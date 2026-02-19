@@ -26,6 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - run: rustup component add clippy
+      - uses: Swatinem/rust-cache@v2
       - name: Install SARIF tools
         run: cargo install clippy-sarif sarif-fmt
       - name: Run clippy
