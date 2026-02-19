@@ -15,7 +15,6 @@ categories = ["command-line-utilities"]
 
 [package.metadata.release]
 publish = false
-tag-prefix = "v"
 sign-commit = true
 sign-tag = true
 push-remote = "upstream"
