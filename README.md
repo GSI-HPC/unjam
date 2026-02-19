@@ -4,4 +4,4 @@
 
 © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
 
-SPDX-License-Identifier: [LGPL-3.0-or-later](LICENSE)
+SPDX-License-Identifier: LGPL-3.0-or-later

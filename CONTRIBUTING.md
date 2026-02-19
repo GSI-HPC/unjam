@@ -18,7 +18,7 @@ These checks are enforced in CI.
 
 ## Licensing
 
-All files must include [SPDX](https://spdx.dev/) license headers. See the [SPDX specification](https://spdx.github.io/spdx-spec/) for details.
+All files must include [SPDX](https://spdx.dev/) license headers. See the [SPDX specification](https://spdx.github.io/spdx-spec/) for details. Compliance is checked with [`reuse lint`](https://reuse.software/) in CI.
 
 ## Commit Messages
 
