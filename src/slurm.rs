@@ -52,10 +52,8 @@ fn squeue(args: &[&str]) -> Result<Vec<(String, u32, String, String)>, String> {
 /// D43 job resolution: the `--slurm` value, else `$SLURM_JOB_ID`, else the only running job
 /// of `squeue --me`; otherwise lists the running jobs and exits 2 (no terminal is set up yet).
 fn resolve(arg: &str) -> Result<String, String> {
-    if let Some(id) = Some(arg.to_owned()).filter(|a| !a.is_empty()) {
-        return Ok(id);
-    }
-    if let Some(id) = std::env::var("SLURM_JOB_ID").ok().filter(|j| !j.is_empty()) {
+    let env = || std::env::var("SLURM_JOB_ID").ok().filter(|j| !j.is_empty());
+    if let Some(id) = Some(arg.to_owned()).filter(|a| !a.is_empty()).or_else(env) {
         return Ok(id);
     }
     let mine = squeue(&["--me", "--states=RUNNING"])?;
@@ -137,16 +135,11 @@ pub fn spawn(argv: &[OsString], tx: &SyncSender<Msg>, ctl: Receiver<String>) -> 
 /// Forwards control lines to srun, which broadcasts them to every agent, and sends `K` when
 /// idle. Returns once the viewer drops its sender: closing stdin is teardown step 1.
 fn control(mut w: ChildStdin, ctl: &Receiver<String>) {
-    loop {
-        let line = match ctl.recv_timeout(KEEPALIVE) {
-            Ok(l) => l,
-            Err(RecvTimeoutError::Timeout) => "K\n".into(),
-            Err(RecvTimeoutError::Disconnected) => return,
-        };
-        if w.write_all(line.as_bytes()).is_err() {
-            return;
-        }
-    }
+    let next = || match ctl.recv_timeout(KEEPALIVE) {
+        Err(RecvTimeoutError::Timeout) => Some("K\n".into()),
+        r => r.ok(),
+    };
+    let _ = std::iter::from_fn(next).try_for_each(|l: String| w.write_all(l.as_bytes()));
 }
 
 /// The stdout reader (§7.3): whole lines in chunks of up to 64 KiB, `Msg::End` at EOF. A
