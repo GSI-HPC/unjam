@@ -4,7 +4,7 @@
 # Development tools and tasks; CI runs the same tasks. Every tool is pinned.
 [tools]
 # Keep equal to rust-toolchain.toml: mise exports RUSTUP_TOOLCHAIN, which overrides that file.
-rust = { version = "1.93.1", components = "rustfmt,clippy" }
+rust = "1.93.1"  # components come from rust-toolchain.toml
 # Prebuilt binary: no source build, so no Perl or OpenSSL needed. 1.1.7 declares rust_version 1.97.
 "github:crate-ci/cargo-release" = "1.1.6"
 "cargo:clippy-sarif" = "0.8.0"
