@@ -407,7 +407,9 @@ impl App {
         let mut targets: Vec<_> = self.marks.iter().map(|m| (m.1.clone(), m.2.clone())).collect();
         targets.extend(row.filter(|_| self.marks.is_empty()));
         for (tasks, pattern) in targets {
-            let (iv, what) = level(&self.view.rules, &tasks, &pattern);
+            let task = if let TaskSet::Ranges(r) = &tasks { r[0].0 } else { 0 };
+            let path = if pattern == "." { "" } else { &pattern };
+            let (iv, what) = effective(&self.view.rules, task, path);
             let (iv, what) = match (key, what) {
                 ('p', What::Procs) => (iv, What::Cg),
                 ('p', What::Cg) => (0, What::Off),
@@ -435,16 +437,23 @@ impl App {
     }
 }
 
-/// The rule target of a row: all agents for cross-node rows, the row's node otherwise.
-fn target(st: &State, r: &Row) -> Option<Target> {
+/// Where a row's rule resolves, borrowed so drawing builds no owned target: the agent (0 for
+/// cross-node rows, as the agents resolve `*`) and the cgroup path (empty for the job).
+fn at<'a>(st: &'a State, r: &Row) -> Option<(u32, &'a str)> {
     let c = st.nodes.get(r.node as usize)?.cgs.get(&r.id)?;
-    let path = if c.path.is_empty() { ".".into() } else { c.path.to_string() };
     match r.key {
-        Key::Job => Some((TaskSet::All, ".".into())),
-        Key::Step(_) => Some((TaskSet::All, path)),
-        Key::Cg(i, _) => Some((TaskSet::Ranges(vec![(i, i)]), path)),
+        Key::Job => Some((0, "")),
+        Key::Step(_) => Some((0, &*c.path)),
+        Key::Cg(i, _) => Some((i, &*c.path)),
         Key::Proc(..) | Key::Folded(_) => None,
     }
+}
+
+/// The rule target of a row: all agents for cross-node rows, the row's node otherwise.
+fn target(st: &State, r: &Row) -> Option<Target> {
+    let (i, path) = at(st, r)?;
+    let tasks = if let Key::Cg(..) = r.key { TaskSet::Ranges(vec![(i, i)]) } else { TaskSet::All };
+    Some((tasks, if path.is_empty() { ".".into() } else { path.into() }))
 }
 
 /// Rows up to `n`, or all when the cursor's entity `k` lies beyond them after a re-sort
@@ -455,12 +464,6 @@ fn follow<'a>(st: &'a State, v: &View, k: Option<Key>, n: usize) -> (Option<usiz
         rows = state::rows(st, v, usize::MAX);
     }
     (k.and_then(|k| rows.iter().position(|r| r.key == k)), rows)
-}
-
-/// The effective rule of a target as the agents resolve it (node 0 for `*`).
-fn level(rules: &[Rule], tasks: &TaskSet, pattern: &str) -> (u32, What) {
-    let task = if let TaskSet::Ranges(r) = tasks { r[0].0 } else { 0 };
-    effective(rules, task, if pattern == "." { "" } else { pattern })
 }
 
 /// The §6.3 defaults: processes everywhere for small jobs; cgroups at half rate and task
@@ -646,8 +649,8 @@ fn texts(app: &App, r: &Row) -> [String; 5 + NCOL] {
     out[1] = r.name.to_string();
     out[2] = if own { app.st.nodes[r.node as usize].host.clone() } else { String::new() };
     out[3] = if let Key::Proc(_, p) = r.key { p.to_string() } else { String::new() };
-    if let Some((tasks, pat)) = target(&app.st, r).filter(|_| !app.view.rules.is_empty()) {
-        let (iv, what) = level(&app.view.rules, &tasks, &pat);
+    if let Some((task, path)) = at(&app.st, r).filter(|_| !app.view.rules.is_empty()) {
+        let (iv, what) = effective(&app.view.rules, task, path);
         out[4] = format!("{:>5} {}", interval(iv, what), ["o", "c", "p"][what as usize]);
     }
     for (c, (_, unit, _)) in COLS.iter().enumerate() {
