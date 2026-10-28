@@ -665,6 +665,34 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore = "benchmark: mise run bench"]
+    #[allow(clippy::print_stdout, reason = "the number is the report docs/perf.md quotes")]
+    fn bench_apply_values() {
+        let mut st = State::new();
+        node(&mut st, 0, "n1", 1);
+        let lines: [&[u8]; 7] = [
+            b"g\t1\t0\t1800000\t4096\n",
+            b"g\t2\t0\t1600000\t2048\n",
+            b"g\t4\t0\t1200000\t1024\n",
+            b"g\t5\t0\t400000\t512\n",
+            b"g\t7\t0\t2000\t8\n",
+            b"p\t100\t0\t1000000\t1000\n",
+            b"p\t101\t0\t200000\t-\n",
+        ];
+        let (mut vals, mut values) = (Vec::new(), 0u128);
+        let start = std::time::Instant::now();
+        for _ in 0..200_000 {
+            for line in lines {
+                let ev = wire::parse(line, &mut vals).unwrap();
+                st.apply(0, &ev, 0).unwrap();
+                values += vals.len() as u128;
+            }
+        }
+        let ps = start.elapsed().as_nanos() * 1000 / values;
+        println!("bench_apply_values: decode + apply {}.{:03} ns/value", ps / 1000, ps % 1000);
+    }
+
     fn view(layout: Layout) -> View {
         let (toggled, filter) = (HashSet::new(), String::new());
         View {

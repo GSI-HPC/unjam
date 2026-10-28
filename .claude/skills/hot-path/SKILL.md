@@ -36,7 +36,7 @@ description: Use when editing src/agent.rs, src/source.rs, src/cgroup.rs, src/pr
   measured per-file cost in `docs/perf.md` (rstat-flushing files: measure on a busy sind worker).
 
 ## Measure before and after (paste numbers into the PR)
-    cargo test --locked alloc_count
+    cargo test --locked zero_allocations                 # the alloc_count guard
     mise run bench                                       # ns/cgroup, ns/process, bytes/tick, apply ns/value
     mise run build:musl && mise run it:up                # nodes run the static binary from /data
     B=/data/target/x86_64-unknown-linux-musl/release/unjam

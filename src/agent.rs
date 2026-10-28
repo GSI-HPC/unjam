@@ -881,6 +881,60 @@ mod tests {
         assert!(walk <= 2 * entries, "{walk} allocations for {entries} directory entries");
     }
 
+    /// A warm sampler over the 25.11 fixture with every cgroup at `level`, ready for `sample`.
+    fn warm(level: &str) -> (Sampler, Tree) {
+        let (mut s, t) = sampler("25.11", &format!("bench-{level}"));
+        lines(|e| s.snapshot(0, e));
+        rule(&mut s, &format!("*\t.\t1000\t{level}"), 0);
+        lines(|e| {
+            s.tick(1000, e);
+        });
+        s.due.clear();
+        s.due.push(1000);
+        (s, t)
+    }
+
+    /// The best mean ns per call of `f` over 40 blocks of 1000 calls.
+    fn best_ns(mut f: impl FnMut()) -> u128 {
+        let mut best = u128::MAX;
+        for _ in 0..40 {
+            let start = std::time::Instant::now();
+            for _ in 0..1000 {
+                f();
+            }
+            best = best.min(start.elapsed().as_nanos() / 1000);
+        }
+        best
+    }
+
+    #[test]
+    #[ignore = "benchmark: mise run bench"]
+    #[allow(clippy::print_stdout, reason = "the numbers are the report docs/perf.md quotes")]
+    fn bench_sample_and_encode() {
+        // Fixture files are plain files, so no rstat flush: this is the agent's own cost.
+        let ((mut c, _tc), (mut p, _tp)) = (warm("c"), warm("p"));
+        let tick = lines(|e| p.sample(e));
+        let (cgs, procs) = (count(&tick, "g"), count(&tick, "p"));
+        let bytes: usize = tick.iter().map(|l| l.len() + 3).sum(); // "0\t" prefix and "\n"
+        let pids: Vec<(u32, u64)> = p.core.procs.iter().map(|(&pid, e)| (pid, e.cg)).collect();
+        assert_eq!(pids.len(), procs, "every process is sampled");
+        let mut buf = Vec::with_capacity(1 << 17);
+        let tick_c = best_ns(|| {
+            buf.clear();
+            c.sample(&mut |e| wire::write(&mut buf, 0, e));
+        });
+        let all_procs = best_ns(|| {
+            buf.clear();
+            for &(pid, cg) in &pids {
+                p.core.sample_proc(pid, cg, &mut |e| wire::write(&mut buf, 0, e));
+            }
+        });
+        println!("bench_sample_and_encode: {cgs} cgroups, {procs} processes (best of 40 x 1000)");
+        println!("  ns/cgroup {} (level c, sample + encode)", tick_c / cgs as u128);
+        println!("  ns/process {} (sample + encode)", all_procs / procs as u128);
+        println!("  bytes/tick {bytes} (level p)");
+    }
+
     /// Blocks every write until the test drops the sender, then records what was written.
     struct Gate(Receiver<()>, Arc<Mutex<Vec<u8>>>, mpsc::Sender<()>);
 
