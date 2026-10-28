@@ -31,6 +31,11 @@ pub struct Metric {
     pub kind: Kind,
 }
 
+/// Builds a `Metric` in a `const` table; one helper for every source's descriptor table.
+pub const fn metric(name: &'static str, unit: &'static str, kind: Kind) -> Metric {
+    Metric { name, unit, kind }
+}
+
 /// The single interchange type between sampler, wire, record, replay and state. It borrows its
 /// data, so producing and consuming one allocates nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

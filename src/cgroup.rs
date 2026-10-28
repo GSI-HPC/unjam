@@ -7,7 +7,7 @@
 use std::os::unix::fs::{DirEntryExt, MetadataExt};
 use std::{fs, path::Path, path::PathBuf};
 
-use crate::model::{Ent, Kind, Metric, NA};
+use crate::model::{Ent, Kind, Metric, NA, metric as m};
 use crate::source::{Env, Files, Sampled, Slot, Source, Target, kv, kv_eq, num};
 
 /// Files read per cgroup at level `c`, in slot order; the first two are hot (§5.2, §5.3).
@@ -26,11 +26,6 @@ const FILES: [&str; 10] = [
 
 /// The `cpu.stat` keys behind the first four metrics.
 const CPU_KEYS: [&str; 4] = ["usage_usec", "user_usec", "system_usec", "throttled_usec"];
-
-/// Shorthand for the descriptor table below.
-const fn m(name: &'static str, unit: &'static str, kind: Kind) -> Metric {
-    Metric { name, unit, kind }
-}
 
 /// Round-one cgroup metrics (§4.3). Names are append-only: they are wire and column identity.
 pub const METRICS: &[Metric] = &[
