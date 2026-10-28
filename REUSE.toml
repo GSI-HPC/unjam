@@ -5,3 +5,9 @@ path = "Cargo.lock"
 precedence = "aggregate"
 SPDX-FileCopyrightText = "© GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany"
 SPDX-License-Identifier = "LGPL-3.0-or-later"
+
+[[annotations]]
+path = ["tests/fixtures/**", ".claude/**"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "© GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany"
+SPDX-License-Identifier = "LGPL-3.0-or-later"
