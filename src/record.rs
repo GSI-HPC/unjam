@@ -960,12 +960,8 @@ mod tests {
                     assert_eq!(r.tracks[0].index.len(), complete, "cut at {at}");
                     assert_eq!(warns.is_empty(), at == full.len(), "cut at {at}: {warns:?}");
                     if at < full.len() {
-                        let n = r.tracks[0].index.get(complete).map_or(ends[complete - 1], |e| e.0);
-                        assert!(
-                            warns[0].ends_with(&format!("truncated at byte {}", n.min(at as u64)))
-                                || at as u64 >= ends[complete - 1],
-                            "{warns:?}"
-                        );
+                        let want = format!("truncated at byte {}", ends[complete - 1]);
+                        assert!(warns[0].ends_with(&want), "cut at {at}: {warns:?}");
                     }
                     r.goto(&mut State::new(), usize::MAX).unwrap();
                 }
