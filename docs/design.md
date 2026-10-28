@@ -70,7 +70,7 @@ This is the living design of the repository. It started as the reviewed round-on
 
 ### 3.2 Attach: launch sequence and exact srun line
 
-1. Resolve the job (§3.1). Then `squeue --noheader --jobs=<J> --format="%A %D %T"` gives the numeric job id (array tasks resolve to the real id), the node count N and the state. If the state is not `RUNNING`, unjam exits 1 with that message.
+1. Resolve the job (§3.1). Then `squeue --noheader --jobs=<J> --format="%A %D %T %j"` gives the numeric job id (array tasks resolve to the real id), the node count N and the state of every matching row. An array job id (the id `sbatch` prints) lists every task plus the pending rest, which keeps the array id and sorts first (squeue sorts states as strings). unjam therefore takes the `RUNNING` row whose id is `<J>`, else the only `RUNNING` row; several `RUNNING` rows are listed like the jobs of §3.1 and unjam exits 2. With no `RUNNING` row, unjam exits 1 with the first row's state.
 2. With `--nodelist LIST`, N becomes the line count of `scontrol show hostnames LIST`.
 3. The TUI spawns srun with `Command::process_group(0)`, so terminal SIGINT and SIGTSTP never reach it. stdin, stdout and stderr are piped. The child environment is cleared of every `SLURM_*` and `SRUN_*` variable except `SLURM_CONF`, so input variables inherited from an enclosing `salloc` cannot add options we did not pass. This uses `Command::env_remove` on the child only, because `std::env::remove_var` is `unsafe` in edition 2024.
 

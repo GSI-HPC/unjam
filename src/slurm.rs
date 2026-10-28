@@ -38,8 +38,11 @@ fn run(cmd: &str, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// `squeue` rows as (job id, node count, state, name); array tasks resolve to the real id.
-fn squeue(args: &[&str]) -> Result<Vec<(String, u32, String, String)>, String> {
+/// A `squeue` row: job id, node count, state and name.
+type Row = (String, u32, String, String);
+
+/// `squeue` rows; array tasks resolve to the real id.
+fn squeue(args: &[&str]) -> Result<Vec<Row>, String> {
     let text = run("squeue", &[&["--noheader", "--format=%A %D %T %j"], args].concat())?;
     let row = |l: &str| {
         let mut f = l.splitn(4, ' ');
@@ -49,33 +52,46 @@ fn squeue(args: &[&str]) -> Result<Vec<(String, u32, String, String)>, String> {
     Ok(text.lines().filter_map(row).collect())
 }
 
+/// The running row with id `want`, else the only running row. `Err` holds the running rows
+/// when none or several fit: an array job id lists every task plus the pending rest.
+fn running(mut rows: Vec<Row>, want: &str) -> Result<Row, Vec<Row>> {
+    rows.retain(|r| r.2 == "RUNNING");
+    let i = rows.iter().position(|r| r.0 == want).or((rows.len() == 1).then_some(0));
+    i.map(|i| rows.swap_remove(i)).ok_or(rows)
+}
+
+/// Lists the running jobs `rows` and exits 2 (no terminal is set up yet): `what` names no
+/// single one (D43).
+fn pick(rows: &[Row], what: &str) -> ! {
+    let mut e = io::stderr().lock();
+    let _ = writeln!(e, "unjam: {} running jobs {what}; pick one with --slurm=JOBID", rows.len());
+    for (id, n, _, name) in rows {
+        let _ = writeln!(e, "  {id:>10}  {n:>5} nodes  {name}");
+    }
+    std::process::exit(2)
+}
+
 /// D43 job resolution: the `--slurm` value, else `$SLURM_JOB_ID`, else the only running job
-/// of `squeue --me`; otherwise lists the running jobs and exits 2 (no terminal is set up yet).
+/// of `squeue --me`.
 fn resolve(arg: &str) -> Result<String, String> {
     let env = || std::env::var("SLURM_JOB_ID").ok().filter(|j| !j.is_empty());
     if let Some(id) = Some(arg.to_owned()).filter(|a| !a.is_empty()).or_else(env) {
         return Ok(id);
     }
     let mine = squeue(&["--me", "--states=RUNNING"])?;
-    if let [(id, ..)] = &mine[..] {
-        return Ok(id.clone());
-    }
-    let mut e = io::stderr().lock();
-    let _ = writeln!(e, "unjam: {} running jobs of yours; pick one with --slurm=JOBID", mine.len());
-    for (id, n, _, name) in &mine {
-        let _ = writeln!(e, "  {id:>10}  {n:>5} nodes  {name}");
-    }
-    std::process::exit(2)
+    Ok(running(mine, "").unwrap_or_else(|rows| pick(&rows, "of yours")).0)
 }
 
-/// The job to attach to; it must be running. `--nodelist` sets the agent count (§3.2).
+/// The job to attach to; it must be running. An array job id with several running tasks lists
+/// them like [`resolve`]. `--nodelist` sets the agent count (§3.2).
 pub fn job(arg: &str, nodelist: Option<&str>) -> Result<Job, String> {
-    let id = resolve(arg)?;
-    let found = squeue(&[&format!("--jobs={id}")])?.into_iter().next();
-    let (id, nodes, state, _) = found.ok_or_else(|| format!("job {id} not found"))?;
-    if state != "RUNNING" {
-        return Err(format!("job {id} is {state}, not RUNNING"));
-    }
+    let want = resolve(arg)?;
+    let rows = squeue(&[&format!("--jobs={want}")])?;
+    let state = rows.first().map(|r| r.2.clone()).ok_or_else(|| format!("job {want} not found"))?;
+    let (id, nodes, ..) = running(rows, &want).or_else(|r| match r.len() {
+        0 => Err(format!("job {want} is {state}, not RUNNING")),
+        _ => pick(&r, &format!("in array {want}")),
+    })?;
     let Some(list) = nodelist else { return Ok(Job { id, nodes }) };
     let n = run("scontrol", &["show", "hostnames", list])?.lines().count();
     Ok(Job { id, nodes: u32::try_from(n).unwrap_or(u32::MAX) })
@@ -262,6 +278,33 @@ mod tests {
         let bcast =
             "--bcast=/var/tmp/unjam.42.1000.00000000000000bc /opt/unjam agent --unlink-self";
         assert_eq!(argv("--bcast=/var/tmp/", 3), format!("{} {fixed} {bcast}", base(3)));
+    }
+
+    /// A `squeue` row for the tests.
+    fn row(id: &str, state: &str) -> Row {
+        (id.into(), 2, state.into(), "job".into())
+    }
+
+    #[test]
+    fn array_job_id_resolves_to_its_running_task() {
+        // `squeue --jobs=1234` for `--array=1-4%2`: the pending rest keeps the array id and sorts
+        // first, the running tasks have their own ids.
+        let ids = |r: Result<Row, Vec<Row>>| r.map_err(|v| v.into_iter().map(|r| r.0).collect());
+        let pending = row("1234", "PENDING");
+        let two = vec![pending.clone(), row("1235", "RUNNING"), row("1236", "RUNNING")];
+        assert_eq!(
+            ids(running(two.clone(), "1234")),
+            Err::<Row, Vec<_>>(vec!["1235".into(), "1236".into()])
+        );
+        assert_eq!(ids(running(two[..2].to_vec(), "1234")), Ok(row("1235", "RUNNING")));
+        assert_eq!(ids(running(vec![pending], "1234")), Err(vec![]));
+        // Once every task runs, the last one started carries the array id.
+        let all = vec![row("1235", "RUNNING"), row("1234", "RUNNING"), row("1236", "RUNNING")];
+        assert_eq!(ids(running(all, "1234")), Ok(row("1234", "RUNNING")));
+        assert_eq!(
+            ids(running(vec![row("1240", "RUNNING")], "1234_6")),
+            Ok(row("1240", "RUNNING"))
+        );
     }
 
     #[test]
