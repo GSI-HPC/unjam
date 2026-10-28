@@ -81,7 +81,7 @@ srun --jobid=<J> --overlap \
      --input=all --quiet \
      --kill-on-bad-exit=0 --wait=0 \
      --job-name=unjam --chdir=/ \
-     [--bcast=<DIR>/unjam.<J>.<uid>] \
+     [--bcast=<DIR>/unjam.<J>.<uid>.<nonce>] \
      [<--srun-arg values>…] \
      <AGENT> agent [--keepalive <SECS>] [--unlink-self]
 ```
@@ -101,12 +101,12 @@ srun --jobid=<J> --overlap \
 | `--job-name=unjam` | Makes the step identifiable in `squeue -s` and `sacct` |
 | `--chdir=/` | The TUI's working directory may not exist on compute nodes |
 | **not** `-u/--unbuffered`, `--pty` | Both run tasks under a pty, which turns off `LAUNCH_BUFFERED_IO`, the line buffering §7 relies on, and adds CRLF translation |
-| `--bcast=<DIR>/unjam.<J>.<uid>` | Only with `--bcast[=DIR]` (DIR defaults to `/tmp`): srun copies `<AGENT>` to every node. The path is explicit because srun(1) 25.11 says `--bcast` without a path defaults to the `--chdir` directory, which is `/` here; job id and uid keep concurrent viewers apart |
+| `--bcast=<DIR>/unjam.<J>.<uid>.<nonce>` | Only with `--bcast[=DIR]` (DIR defaults to `/tmp`): srun copies `<AGENT>` to every node. The path is explicit because srun(1) 25.11 says `--bcast` without a path defaults to the `--chdir` directory, which is `/` here. The nonce is 64 bits (16 hex digits) from std's `RandomState`, whose keys come from the OS random source; no file is read. It keeps concurrent viewers apart, even two of one user on one job, and keeps other users from guessing the name: srun always sets `BCAST_FLAG_FORCE`, so slurmd opens the destination with `O_CREAT|O_TRUNC`, not `O_EXCL`, and would write into, then exec, a file another user pre-created in a sticky `/tmp`. The nonce shows in srun's argv on the submit host only |
 | **not** `--label` | Lines carry their own node index (ADR D6) |
 
 - `<AGENT>` defaults to `std::env::current_exe()`, which assumes a shared filesystem. `--agent PATH` overrides it.
 - `--print-srun` prints the argv and exits. A golden unit test pins `slurm::srun_args`.
-- **Sites without a shared filesystem (D36 revised).** `--bcast[=DIR]` adds `--bcast=<DIR>/unjam.<J>.<uid>` (DIR defaults to `/tmp`) to the srun line and `--unlink-self` to the agent command. The agent removes its copy right after it starts (`std::fs::remove_file` on `current_exe()`; the running image stays mapped), so nothing is left on the nodes, even after a crash. About 30 LOC; IT 8 covers it. The static musl release binaries (§18) make the copy independent of the compute nodes' glibc. DIR must allow executables: sind (and sites that harden `/tmp`) mount `/tmp` `noexec`, where execve of the copy fails with "Permission denied" and the copy stays behind; IT 8 therefore uses `--bcast=/var/tmp`.
+- **Sites without a shared filesystem (D36 revised).** `--bcast[=DIR]` adds `--bcast=<DIR>/unjam.<J>.<uid>.<nonce>` (DIR defaults to `/tmp`) to the srun line and `--unlink-self` to the agent command. The agent removes its copy right after it starts (`std::fs::remove_file` on `current_exe()`; the running image stays mapped), so nothing is left on the nodes, even after a crash. About 30 LOC; IT 8 covers it. The static musl release binaries (§18) make the copy independent of the compute nodes' glibc. DIR must allow executables: sind (and sites that harden `/tmp`) mount `/tmp` `noexec`, where execve of the copy fails with "Permission denied" and the copy stays behind; IT 8 therefore uses `--bcast=/var/tmp`.
 
 ### 3.3 Attach: lifecycle and teardown
 

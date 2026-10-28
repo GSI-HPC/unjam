@@ -5,6 +5,7 @@
 //! with its reader and control threads, and the staged teardown (§3.2, §3.3, D43).
 
 use std::ffi::OsString;
+use std::hash::{BuildHasher, RandomState};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
@@ -83,17 +84,16 @@ pub fn job(arg: &str, nodelist: Option<&str>) -> Result<Job, String> {
 }
 
 /// The srun argv, `srun` first (§3.2). With `--bcast` srun copies the agent to
-/// `DIR/unjam.<job>.<uid>`, and the copy removes itself at start (D36).
-pub fn srun_args(job: &Job, a: &SlurmArgs, exe: PathBuf, uid: u32) -> Vec<OsString> {
+/// `DIR/unjam.<job>.<uid>.<nonce>`, and the copy removes itself at start (D36).
+pub fn srun_args(job: &Job, a: &SlurmArgs, exe: PathBuf, uid: u32, nonce: u64) -> Vec<OsString> {
     let (id, n) = (&job.id, job.nodes);
     let mut v: Vec<String> = vec!["srun".into(), format!("--jobid={id}"), "--overlap".into()];
     v.extend([format!("--nodes={n}"), format!("--ntasks={n}"), "--ntasks-per-node=1".into()]);
     v.extend(a.nodelist.as_ref().map(|l| format!("--nodelist={l}")));
     let fixed = ["--cpu-bind=none", "--mpi=none", "--input=all", "--quiet", "--kill-on-bad-exit=0"];
     v.extend(fixed.iter().chain(&["--wait=0", "--job-name=unjam", "--chdir=/"]).map(|&s| s.into()));
-    v.extend(
-        a.bcast.as_ref().map(|d| format!("--bcast={}/unjam.{id}.{uid}", d.trim_end_matches('/'))),
-    );
+    let dir = a.bcast.as_ref().map(|d| d.trim_end_matches('/'));
+    v.extend(dir.map(|d| format!("--bcast={d}/unjam.{id}.{uid}.{nonce:016x}")));
     v.extend(a.srun_arg.iter().cloned());
     let mut v: Vec<OsString> = v.into_iter().map(Into::into).collect();
     v.extend([a.agent.clone().unwrap_or(exe).into(), "agent".into()]);
@@ -197,7 +197,10 @@ impl Remote {
 pub fn view(arg: &str, a: &SlurmArgs, opts: Opts, batch: Option<u32>) -> Result<(), String> {
     let job = job(arg, a.nodelist.as_deref())?;
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
-    let argv = srun_args(&job, a, exe, fs::metadata("/proc/self").map_or(0, |m| m.uid()));
+    // srun opens the copy with O_TRUNC, not O_EXCL: a name other users cannot guess keeps them
+    // from planting the file. RandomState's keys come from the OS random source.
+    let nonce = RandomState::new().hash_one(job.id.as_str());
+    let argv = srun_args(&job, a, exe, fs::metadata("/proc/self").map_or(0, |m| m.uid()), nonce);
     if a.print_srun {
         let line: Vec<_> = argv.iter().map(|s| s.to_string_lossy()).collect();
         return writeln!(io::stdout(), "{}", line.join(" ")).map_err(|e| e.to_string());
@@ -238,7 +241,7 @@ mod tests {
         let cli = Cli::try_parse_from(["unjam", "--slurm=42"].into_iter().chain(flags.split(' ')))
             .unwrap();
         let job = Job { id: "42".into(), nodes };
-        let v = srun_args(&job, &cli.srun, "/opt/unjam".into(), 1000);
+        let v = srun_args(&job, &cli.srun, "/opt/unjam".into(), 1000, 0xbc);
         v.iter().map(|s| s.to_string_lossy()).collect::<Vec<_>>().join(" ")
     }
 
@@ -261,9 +264,10 @@ mod tests {
             argv("--agent-keepalive 5", 3),
             format!("{} {fixed} /opt/unjam agent --keepalive 5", base(3))
         );
-        let bcast = "--bcast=/tmp/unjam.42.1000 /opt/unjam agent --unlink-self";
+        let bcast = "--bcast=/tmp/unjam.42.1000.00000000000000bc /opt/unjam agent --unlink-self";
         assert_eq!(argv("--bcast", 3), format!("{} {fixed} {bcast}", base(3)));
-        let bcast = "--bcast=/var/tmp/unjam.42.1000 /opt/unjam agent --unlink-self";
+        let bcast =
+            "--bcast=/var/tmp/unjam.42.1000.00000000000000bc /opt/unjam agent --unlink-self";
         assert_eq!(argv("--bcast=/var/tmp/", 3), format!("{} {fixed} {bcast}", base(3)));
     }
 

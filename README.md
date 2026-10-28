@@ -37,9 +37,9 @@ Keys: `↑↓` move, `←→` fold, `v` layout (step, node, flat), `s` sort, `/`
   and takes none away. Sites whose `job_submit` or `cli_filter` plugins, SPANK plugins or
   `MaxStepCount` restrict steps must allow one extra overlap step per viewer; `--srun-arg`
   passes further srun options.
-- **No shared filesystem.** `--bcast` copies the binary to `/tmp/unjam.<J>.<uid>` on each node,
-  and the agent removes the copy when it starts. Where `/tmp` is mounted `noexec`, name another
-  directory: `--bcast=/var/tmp`. Static binaries for x86_64 and aarch64 are
+- **No shared filesystem.** `--bcast` copies the binary to `/tmp/unjam.<J>.<uid>.<random>` on
+  each node, and the agent removes the copy when it starts. Where `/tmp` is mounted `noexec`,
+  name another directory: `--bcast=/var/tmp`. Static binaries for x86_64 and aarch64 are
   attached to each [GitHub release](https://github.com/GSI-HPC/unjam/releases).
 
 ## Recording
