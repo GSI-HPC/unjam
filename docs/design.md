@@ -1134,7 +1134,7 @@ slurm:
 - Commands run as alice through `sind exec unjam --user alice --` (on the submitter) or `sind ssh alice@worker-N.unjam --`.
 - Record output goes to `/home/alice`.
 
-**`tests/sind/run.sh`** (`bash`, `set -euo pipefail`). It starts with the smoke tests of the scaffold: `sinfo`; `srun -N3 hostname` as alice gives three hosts; the job cgroup's `cgroup.subtree_control`, found by stripping `/step_*` from the task's `/proc/self/cgroup`, lists `io` and `pids` where `EXTRA` is set; and the static binary runs on a worker. Assertions of the tests below use `--batch` output. A helper `wait_running JOBID… [timeout 60s]` polls `squeue -h -j … -o %T` and fails unless every job is `RUNNING`.
+**`tests/sind/run.sh`** (`bash`, `set -Eeuo pipefail`). Every check reports `ok` or `not ok` and the run goes on; a command that still aborts it is reported as `not ok` with its line, and the `failures:` summary is printed on every exit. It starts with the smoke tests of the scaffold: `sinfo`; `srun -N3 hostname` as alice gives three hosts; the job cgroup's `cgroup.subtree_control`, found by stripping `/step_*` from the task's `/proc/self/cgroup`, lists `io` and `pids` where `EXTRA` is set; and the static binary runs on a worker. Assertions of the tests below use `--batch` output. A helper `wait_running JOBID… [timeout 60s]` polls `squeue -h -j … -o %T` and fails unless every job is `RUNNING`.
 
 | # | Test | Assertion |
 |---|---|---|

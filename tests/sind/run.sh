@@ -8,7 +8,9 @@
 #   SLURM       Slurm line of the cluster: 25.11 or 26.05 (default)
 #   EXTRA       non-empty when the cluster enables io and pids in job cgroups
 #   JOBIDPATHS  non-empty when the cluster sets CgroupJobIdPaths=yes
-set -euo pipefail
+# Every test reports through ok/not_ok and the run goes on; a command that still aborts the run
+# is reported as a failure with its line, and the summary is printed anyway.
+set -Eeuo pipefail
 
 CLUSTER=unjam
 BIN=/data/target/$(uname -m)-unknown-linux-musl/release/unjam
@@ -25,6 +27,19 @@ on_worker() { local n=$1; shift; sind ssh "alice@worker-$n.$CLUSTER" -- "$@"; }
 
 ok() { echo "ok - $1"; }
 not_ok() { echo "not ok - $1"; failures=$((failures + 1)); }
+
+# Cancels the test jobs; after an abort, also names the failed command and prints the summary.
+finish() {
+	local status=$?
+	as_alice scancel -u alice || true
+	as_bob scancel -u bob || true
+	if [ -z "${finished:-}" ]; then
+		not_ok "run aborted at ${aborted:-?} (exit $status); later tests did not run"
+		echo "failures: $failures"
+	fi
+}
+trap 'aborted="line $LINENO${FUNCNAME:+ in ${FUNCNAME[0]} from line ${BASH_LINENO[0]}}: $BASH_COMMAND"' ERR
+trap finish EXIT
 
 # Smoke 1: Slurm answers and shows the three workers.
 if out=$(sind exec "$CLUSTER" -- sinfo --noheader --format='%D %T'); then
@@ -116,12 +131,11 @@ J=$(as_alice sbatch --parsable -N3 --ntasks-per-node=1 --cpus-per-task=1 --mem=2
 	--wrap 'srun sleep 600')
 A=$(as_alice sbatch --parsable -N1 -w worker-0 -n1 --mem=256M --wrap 'srun sleep 601')
 B=$(as_bob sbatch --parsable -N1 -w worker-1 -n1 --mem=256M --wrap 'srun sleep 602')
-trap 'as_alice scancel -u alice || true; as_bob scancel -u bob || true' EXIT
 if wait_running "$J" "$A" "$B"; then
 	ok "jobs $J $A $B running"
 else
 	not_ok "jobs $J $A $B not all running"
-	as_alice squeue
+	as_alice squeue || true
 fi
 
 # IT 2: attach isolation. Agents start in a new step of J; they must see J only, without their
@@ -172,8 +186,11 @@ as_bob scancel "$B" || true
 
 # IT 2: the job directory under which the agents found J, by Slurm line and naming scheme.
 scope=/sys/fs/cgroup/system.slice/slurmstepd.scope
-dirs=$(on_worker 0 ls "$scope")
-if [ "$SLURM" = 25.11 ] || [ -n "${JOBIDPATHS:-}" ]; then
+dirs=$(on_worker 0 ls "$scope") || dirs=
+if [ -z "$dirs" ]; then
+	want="a listing of $scope on worker-0"
+	found=no
+elif [ "$SLURM" = 25.11 ] || [ -n "${JOBIDPATHS:-}" ]; then
 	want="job_$J"
 	grep -qx "$want" <<<"$dirs" && found=yes || found=no
 else
@@ -252,13 +269,13 @@ fi
 # IT 8: no shared filesystem needed. The viewer runs from a submitter-local copy that no worker
 # has; --bcast copies it, and each agent removes its copy. sind mounts /tmp noexec, hence
 # /var/tmp.
-as_alice cp "$BIN" /var/tmp/unjam-local
-if as_alice /var/tmp/unjam-local --slurm="$J" --bcast=/var/tmp --batch 2 >"$OUT/sind-it8.txt" 2>&1 &&
+if as_alice cp "$BIN" /var/tmp/unjam-local &&
+	as_alice /var/tmp/unjam-local --slurm="$J" --bcast=/var/tmp --batch 2 >"$OUT/sind-it8.txt" 2>&1 &&
 	grep -q '^nodes=3 ' <(last "$OUT/sind-it8.txt"); then
 	ok "IT 8: 3 nodes through --bcast"
 else
 	not_ok "IT 8: 3 nodes through --bcast"
-	cat "$OUT/sind-it8.txt"
+	cat "$OUT/sind-it8.txt" 2>/dev/null || true
 fi
 for n in 0 1 2; do
 	if on_worker "$n" ls /var/tmp | grep -q "^unjam\.$J\."; then
@@ -278,6 +295,7 @@ wait_done() {
 }
 
 # Copies alice's files matching $1 (a glob under /home/alice) to $OUT/rec; prints their names.
+# Fails when the glob matches nothing (tar -c), so callers guard it.
 fetch() {
 	mkdir -p "$OUT/rec"
 	as_alice sh -c "cd /home/alice && tar -cf - $1" | tar -C "$OUT/rec" -xvf -
@@ -290,11 +308,12 @@ extra=${EXTRA:+--extra}
 # IT 6: record. One recorder per node next to the app; the job's exit code is the app's. The
 # journals are checked with pyarrow, converted with the README's Parquet recipe and replayed.
 R=$(as_alice sbatch --parsable -N2 --ntasks-per-node=1 --mem=256M -o /dev/null --wrap \
-	"srun $BIN record -i 200ms -o /home/alice/rec-%j-%n.arrows -- sh -c 'dd if=/dev/zero of=/dev/null bs=1M count=20000; exit 3'")
+	"srun $BIN record -i 200ms -o /home/alice/rec-%j-%n.arrows -- sh -c 'dd if=/dev/zero of=/dev/null bs=1M count=20000; exit 3'") ||
+	not_ok "IT 6: sbatch"
 wait_done "$R" || not_ok "IT 6: job $R still queued"
-code=$(as_alice scontrol show job "$R" | sed -n 's/.* ExitCode=\([0-9]*\):.*/\1/p')
+code=$(as_alice scontrol show job "$R" | sed -n 's/.* ExitCode=\([0-9]*\):.*/\1/p') || true
 [ "$code" = 3 ] && ok "IT 6: job exit code 3 passed through" || not_ok "IT 6: job exit code ${code:-?}"
-files=$(fetch "rec-$R-*.arrows" | sed "s|^|$OUT/rec/|")
+files=$(fetch "rec-$R-*.arrows" | sed "s|^|$OUT/rec/|") || true
 if [ "$(wc -w <<<"$files")" -eq 2 ]; then ok "IT 6: two journals"; else not_ok "IT 6: journals: $files"; fi
 for f in $files; do
 	pyarrow python -c "import sys,pyarrow as pa,pyarrow.parquet as pq; \
@@ -319,8 +338,9 @@ fi
 # IT 6b: lifetime rule. The app exits at once but leaves a daemonized sleep in its task cgroup;
 # the recorder (and so the step) waits for it.
 t0=$SECONDS
-as_alice srun -N1 "$BIN" record -i 200ms -o /home/alice/daemon-%j.arrows -- sh -c 'setsid sleep 4 & exit 0'
-if [ $((SECONDS - t0)) -ge 4 ]; then
+if ! as_alice srun -N1 "$BIN" record -i 200ms -o /home/alice/daemon-%j.arrows -- sh -c 'setsid sleep 4 & exit 0'; then
+	not_ok "IT 6b: srun $BIN record exited non-zero"
+elif [ $((SECONDS - t0)) -ge 4 ]; then
 	ok "IT 6b: the recorder waits for a daemonized descendant"
 else
 	not_ok "IT 6b: the step ended after $((SECONDS - t0)) s, before the daemon"
@@ -329,7 +349,7 @@ fi
 # IT 6c: TUI recording. The viewer writes what it receives, one journal per node, which
 # replays like a record journal.
 attach it6c "$J" --batch 3 --record "/home/alice/tui-$J" || not_ok "IT 6c: unjam --record"
-files=$(fetch "tui-$J/*.arrows" | sed "s|^|$OUT/rec/|")
+files=$(fetch "tui-$J/*.arrows" | sed "s|^|$OUT/rec/|") || true
 # shellcheck disable=SC2086
 if [ "$(wc -w <<<"$files")" -eq 3 ] && pyarrow tests/sind/check_record.py --source tui $extra $files &&
 	"$LOCAL_BIN" --replay $files --batch 1 --at end >"$OUT/sind-it6c-replay.txt" 2>&1 &&
@@ -346,16 +366,17 @@ fi
 # "truncated at byte N".
 for sig in TERM KILL; do
 	K=$(as_alice sbatch --parsable -N1 -n1 -w worker-0 --mem=256M -o /dev/null --wrap \
-		"srun $BIN record -i 200ms -o /home/alice/kill-$sig-%j.arrows -- sleep 300")
+		"srun $BIN record -i 200ms -o /home/alice/kill-$sig-%j.arrows -- sleep 300") ||
+		not_ok "IT 7: sbatch for SIG$sig"
 	wait_running "$K" || not_ok "IT 7: job $K not running"
 	sleep 13
 	if [ "$sig" = TERM ]; then
-		as_alice scancel --signal=TERM "$K"
+		as_alice scancel --signal=TERM "$K" || not_ok "IT 7: scancel --signal=TERM $K"
 	else
-		on_worker 0 pkill -KILL -f "'^$BIN record'"
+		on_worker 0 pkill -KILL -f "'^$BIN record'" || not_ok "IT 7: no recorder to SIGKILL on worker-0"
 	fi
-	wait_done "$K" || as_alice scancel "$K"
-	f=$OUT/rec/$(fetch "kill-$sig-$K.arrows")
+	wait_done "$K" || as_alice scancel "$K" || true
+	f=$OUT/rec/$(fetch "kill-$sig-$K.arrows") || true
 	trunc=${sig/TERM/}
 	"$LOCAL_BIN" --replay "$f" --batch 1 --at end >"$OUT/sind-it7-$sig.txt" 2>&1 || true
 	warned=$(grep -c 'truncated at byte [0-9]' "$OUT/sind-it7-$sig.txt" || true)
@@ -371,7 +392,7 @@ done
 
 # IT 5: framing stress, 3 nodes × 500 processes at 100 ms. No decode errors; agent RSS < 16 MiB.
 F=$(as_alice sbatch --parsable -N3 --ntasks-per-node=1 --cpus-per-task=1 --mem=256M \
-	--wrap 'srun sh -c "for i in \$(seq 500); do sleep 900 & done; wait"')
+	--wrap 'srun sh -c "for i in \$(seq 500); do sleep 900 & done; wait"') || not_ok "IT 5: sbatch"
 wait_running "$F" || not_ok "IT 5: job $F not running"
 sleep 5
 if attach it5 "$F" --rule $'*\t.\t100\tp' --budget 64M --batch 30; then
@@ -393,4 +414,5 @@ else
 fi
 
 echo "failures: $failures"
+finished=yes
 [ "$failures" -eq 0 ]
