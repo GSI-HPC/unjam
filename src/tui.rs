@@ -24,7 +24,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row as TRow, Table};
 use ratatui::{DefaultTerminal, Frame};
 
-use crate::model::{Control, Event, Kind, NA, Rule, TaskSet, What, effective, upsert};
+use crate::model::{self, Control, Event, Kind, NA, Rule, TaskSet, What, effective, upsert};
 use crate::record::{Reader, Rec};
 use crate::source::{Files, Slot, kv};
 use crate::state::{self, HIST, Key, Layout, NCOL, Row, State, View};
@@ -411,8 +411,7 @@ impl App {
                 ('+', w) => (iv / 2, w),
                 (_, w) => (iv * 2, w),
             };
-            let interval_ms =
-                if what == What::Off { 0 } else { (iv / 100 * 100).clamp(100, 60_000) };
+            let interval_ms = if what == What::Off { 0 } else { model::interval_ms(iv.into()) };
             let r = Rule { tasks, pattern: pattern.into(), interval_ms, what };
             upsert(&mut self.view.rules, r.clone());
             self.send(&Control::Rule(r));

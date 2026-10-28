@@ -25,7 +25,7 @@ use arrow_schema::DataType::{self, Timestamp, UInt8, UInt32, UInt64, Utf8};
 use arrow_schema::{Field, Schema, SchemaRef, TimeUnit};
 
 use crate::agent::{Opts, Sampler, now_ms};
-use crate::model::{Control, Ent, Event, Kind, NA, Rule, TaskSet, What};
+use crate::model::{self, Control, Ent, Event, Kind, NA, Rule, TaskSet, What};
 use crate::state::{Columns, Layout, Node, Proc, State, Vals};
 use crate::tui::{self, App};
 use crate::{RecordArgs, cgroup, procfs, wire};
@@ -679,8 +679,7 @@ fn start(
     let opts =
         Opts { node: 0, ntasks: 1, step: id, root: sc.root.clone(), exclude: None, cap: 1024 };
     let (mut s, mut st, now) = (Sampler::new(env, opts), State::new(), now_ms());
-    let ms =
-        u32::try_from(a.interval.as_millis()).unwrap_or(u32::MAX).clamp(100, 60_000) / 100 * 100;
+    let ms = model::interval_ms(a.interval.as_millis());
     let what = if a.no_procs { What::Cg } else { What::Procs };
     s.control(
         Control::Rule(Rule { tasks: TaskSet::All, pattern: ".".into(), interval_ms: ms, what }),
