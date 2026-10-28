@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{fs, thread};
 
 use crate::model::{Control, Ent, Event, NA, Rule, TaskSet, What, effective, next_due, upsert};
@@ -351,8 +351,13 @@ impl Sampler {
         }
     }
 
-    /// The earliest deadline: a timer, or the structure rescan.
-    pub fn next_due(&self) -> u64 {
+    /// The earliest deadline: a timer, or the structure rescan. A deadline more than one period
+    /// ahead of `now` means the wall clock stepped back; it is re-phased to `now`.
+    pub fn next_due(&mut self, now: u64) -> u64 {
+        for t in self.timers.iter_mut().filter(|t| t.1 > now + u64::from(t.0)) {
+            t.1 = next_due(now, t.0);
+        }
+        self.walked = self.walked.map(|w| w.min(now));
         let walk = self.walked.map_or(0, |t| t + OFF_WALK_MS);
         self.timers.iter().map(|t| t.1).fold(walk, u64::min)
     }
@@ -477,31 +482,33 @@ pub fn now_ms() -> u64 {
 
 /// The loop every sampler runs, remote (stdin/stdout) or local (channels): control lines first,
 /// then due ticks. Returns on control EOF, when the writer is gone (`EPIPE`) and after
-/// `keep` milliseconds without input.
+/// `keep` milliseconds without input, timed on the monotonic clock so wall-clock steps do not.
 pub fn run(ctl: &Receiver<String>, out: &mut Out, s: &mut Sampler, keep: u64) -> io::Result<()> {
-    let mut heard = now_ms();
-    s.snapshot(heard, &mut |e| out.push(e));
-    out.send(heard, s.interval(), None)?;
+    let (mut heard, keep, now) = (Instant::now(), Duration::from_millis(keep), now_ms());
+    s.snapshot(now, &mut |e| out.push(e));
+    out.send(now, s.interval(), None)?;
     loop {
-        let wake = s.next_due().min(heard.saturating_add(keep));
-        match ctl.recv_timeout(Duration::from_millis(wake.saturating_sub(now_ms()))) {
+        let now = now_ms();
+        let wait = Duration::from_millis(s.next_due(now).saturating_sub(now));
+        match ctl.recv_timeout(wait.min(keep.saturating_sub(heard.elapsed()))) {
             Ok(line) => {
-                heard = now_ms();
+                let now = now_ms();
+                heard = Instant::now();
                 match wire::parse_control(&line) {
                     Ok(Control::Budget(t, b)) if t.contains(s.opts.node) => out.rate = b,
-                    Ok(c) => s.control(c, heard, &mut |e| out.push(e)),
+                    Ok(c) => s.control(c, now, &mut |e| out.push(e)),
                     Err(e) => out.push(&Event::Warn(&e)),
                 }
-                out.send(heard, s.interval(), None)?;
+                out.send(now, s.interval(), None)?;
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return Ok(()),
         }
-        let now = now_ms();
-        if now >= heard.saturating_add(keep) {
+        if heard.elapsed() >= keep {
             return Ok(());
         }
-        if now >= s.next_due() {
+        let now = now_ms();
+        if now >= s.next_due(now) {
             let me = s.tick(now, &mut |e| out.push(e));
             if out.pending.len() > PENDING_CAP {
                 s.storm(now, &mut |e| out.push(e));
@@ -702,7 +709,7 @@ mod tests {
         rule(&mut s, "*\t.\t1000\tc", 0);
         rule(&mut s, "*\tstep_0/user\t500\tp", 0);
         assert_eq!(s.timers.len(), 2);
-        assert_eq!(s.next_due(), 500);
+        assert_eq!(s.next_due(0), 500);
         let half = lines(|e| {
             s.tick(500, e);
         });
@@ -715,7 +722,10 @@ mod tests {
             s.tick(1000, e);
         });
         assert_eq!(count(&full, "g"), 8);
-        assert_eq!(s.next_due(), 1500);
+        assert_eq!(s.next_due(1000), 1500);
+        assert_eq!(s.next_due(400), 500, "a backward clock step re-phases the timers");
+        assert_eq!(s.walked, Some(400), "and the walk time, so the walk is not held off");
+        assert_eq!(count(&lines(|e| _ = s.tick(500, e)), "g"), 3);
         rule(&mut s, "1\t.\t200\tp", 1000);
         assert_eq!(s.timers.len(), 2, "rules for other agents change nothing");
     }

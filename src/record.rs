@@ -643,7 +643,7 @@ pub fn run_record(a: &RecordArgs) -> Result<ExitCode, String> {
     let (mut status, mut grace, werr) = (None, u64::MAX, |e: io::Error| format!("record: {e}"));
     while (status.is_none() || !quiet(&sc, &before)) && now_ms() < grace {
         let now = now_ms();
-        if now >= s.next_due() {
+        if now >= s.next_due(now) {
             let (self_cpu_us, self_rss) = (NA, NA);
             let _ = st.apply(
                 0,
@@ -657,7 +657,8 @@ pub fn run_record(a: &RecordArgs) -> Result<ExitCode, String> {
             (grace, ()) = (now + GRACE_MS, w.cut().map_err(werr)?);
         }
         status = status.or(child.try_wait().map_err(|e| e.to_string())?);
-        std::thread::sleep(Duration::from_millis(s.next_due().saturating_sub(now_ms()).min(200)));
+        let wait = s.next_due(now).saturating_sub(now_ms()).min(200);
+        std::thread::sleep(Duration::from_millis(wait));
     }
     w.finish().map_err(werr)?;
     let code = status.map_or_else(
