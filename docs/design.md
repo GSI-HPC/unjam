@@ -575,6 +575,7 @@ srun's I/O thread throughput and CPU at 1k tasks are **UNVERIFIED**. They will b
 
 - `r` starts or stops recording in a live viewer; `--slurm --record DIR` starts it at launch. Without `--record`, `r` records into `unjam-rec-<secs>` in the current directory.
 - The TUI feeds the events it receives into `record::Writer`, one `.arrows` file per node (`DIR/<host>.arrows`, `/` in the host name replaced by `_`, created new with mode 0600; a missing `DIR` is created with mode 0700, since the files hold other users' command lines when root records). The schema metadata carries `unjam.source=tui`, so a reader can tell such a file from a `record` journal. Batching, keyframes and crash safety are those of §8.3; replay reads both.
+- A node's tick is written when its next tick starts, at that node's first structure or `T` line after it: an agent sends a tick's structure before its `T`, so writing at `T` would mix in the next tick's structure (entities that just exited would lose their last sample).
 - Values arrive at the rule intervals that are active, so a TUI recording is as sparse or dense as the view was. About 50 LOC.
 
 ### 8.6 Interop claims (each tested in IT 6)

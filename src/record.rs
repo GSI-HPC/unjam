@@ -96,9 +96,11 @@ pub struct Writer {
     strs: [StringBuilder; 3],
     /// Number of cgroup metric columns.
     width: usize,
-    /// Entities that have their keyframe row in the open batch, and the batch's first tick.
+    /// Entities that have their keyframe row in the open batch, the batch's first tick and the
+    /// last tick written.
     keyed: HashSet<(u64, u64)>,
     since: u64,
+    last: u64,
 }
 
 impl Writer {
@@ -123,14 +125,18 @@ impl Writer {
         let (ts, schema) = (TsBuilder::new().with_timezone("UTC"), Arc::new(schema));
         let (ids, strs, kind) = (Default::default(), Default::default(), UInt8Builder::new());
         let (width, keyed) = (st.cols.0[0].len(), HashSet::new());
-        Ok(Self { w, schema, ts, kind, u64s, ids, strs, width, keyed, since: 0 })
+        Ok(Self { w, schema, ts, kind, u64s, ids, strs, width, keyed, since: 0, last: 0 })
     }
 
     /// Appends node `i`'s tick at its last `T` time as a complete snapshot: every cgroup in
     /// path order (parents first), then every process. Values only where they were taken at
-    /// that tick, so a TUI recording keeps the rule intervals it saw (§8.2, §8.5).
+    /// that tick, so a TUI recording keeps the rule intervals it saw (§8.2, §8.5). A tick
+    /// already written is skipped.
     pub fn node(&mut self, st: &State, i: usize) -> io::Result<()> {
         let n = &st.nodes[i];
+        if std::mem::replace(&mut self.last, n.prev[0]) == n.prev[0] {
+            return Ok(());
+        }
         if !self.kind.is_empty() && n.prev[0].saturating_sub(self.since) >= MAX_MS {
             self.cut()?;
         }
@@ -555,13 +561,13 @@ impl Rec {
     /// cannot be created is skipped from then on.
     pub fn node(&mut self, st: &State, i: u32) -> Result<(), String> {
         let n = &st.nodes[i as usize];
-        let path = self.dir.join(format!("{}.arrows", n.host.replace('/', "_")));
-        let e = |x: io::Error| format!("record {}: {x}", path.display());
         if n.prev[0] == 0 || n.host.is_empty() {
             return Ok(());
         }
+        let path = || self.dir.join(format!("{}.arrows", n.host.replace('/', "_")));
+        let e = |x: io::Error| format!("record {}: {x}", path().display());
         if !self.files.contains_key(&i) {
-            let (w, err) = match Writer::create(&path, st, i as usize, &self.meta) {
+            let (w, err) = match Writer::create(&path(), st, i as usize, &self.meta) {
                 Ok(w) => (Some(w), Ok(())),
                 Err(x) => (None, Err(e(x))),
             };

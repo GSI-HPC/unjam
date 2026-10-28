@@ -186,7 +186,8 @@ impl App {
     }
 
     /// Decodes whole lines into the store. A bad line counts as a node error and asks that
-    /// node for a resync, at most once per 10 s (§7.4).
+    /// node for a resync, at most once per 10 s (§7.4). A recording takes a node's tick before
+    /// the next tick's first line, structure or `T`, changes it.
     pub fn ingest(&mut self, buf: &[u8]) {
         self.mon.count[0] += buf.len() as u64;
         for line in buf.split_inclusive(|&b| b == b'\n') {
@@ -201,7 +202,7 @@ impl App {
                 Some(Event::Warn(w)) => (true, Some(format!("node {node}: {w}"))),
                 Some(ev) => {
                     let tick = matches!(ev, Event::Tick { .. });
-                    let rec = self.rec.as_mut().filter(|_| tick);
+                    let rec = self.rec.as_mut().filter(|_| !ev.is_value());
                     self.ticks += u64::from(tick);
                     let err = rec.and_then(|r| r.node(&self.st, node).err());
                     (self.st.apply(node, &ev, self.now).is_ok(), err)
@@ -994,6 +995,32 @@ mod tests {
         let mut out = Vec::new();
         snapshot(&app, &mut out).unwrap();
         golden("batch-local.txt", &String::from_utf8(out).unwrap());
+    }
+
+    #[test]
+    fn recording_takes_each_tick_before_the_next_ticks_structure() {
+        let dir = std::env::temp_dir().join(format!("unjam-tui-rec-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (mut app, _rx) = app(false, "mono");
+        (app.rec_dir, app.now) = (Some(dir.clone()), 0);
+        app.record();
+        let lines =
+            ["H 1 0.1 n1 42.0 1 0", "D p 0 p_rss_bytes B gauge", "G 1 0 ", "T 1000 0 0 0 -"];
+        feed(&mut app, 0, &lines.map(str::to_owned));
+        let next = ["P 50 1 1 1 sh sh", "T 2000 0 0 0 -", "p 50 0 777", "x 50", "T 3000 0 0 0 -"];
+        feed(&mut app, 0, &next.map(str::to_owned));
+        app.record();
+        let (mut r, warns) = Reader::open(&[dir.join("n1.arrows")]).unwrap();
+        assert!(warns.is_empty(), "{warns:?}");
+        assert_eq!(r.times, [1000, 2000, 3000]);
+        let mut st = State::new();
+        let mut rss = || {
+            let k = r.at.wrapping_add(1);
+            r.goto(&mut st, k).unwrap();
+            st.nodes[0].procs.get(&50).map(|p| p.vals.v[2])
+        };
+        assert_eq!([rss(), rss(), rss()], [None, Some(777), None], "pid 50 lives for tick 2000");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
