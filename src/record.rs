@@ -198,9 +198,9 @@ impl Writer {
 
 /// A `Read` that counts the bytes it hands out. `StreamReader::try_new` does not buffer, so
 /// the count is the exact offset of the next message (§8.4).
-pub struct Counting<R>(R, u64);
+struct Counting(BufReader<File>, u64);
 
-impl<R: Read> Read for Counting<R> {
+impl Read for Counting {
     /// Reads and counts.
     fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
         let k = self.0.read(b)?;

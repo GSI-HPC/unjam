@@ -563,7 +563,7 @@ srun's I/O thread throughput and CPU at 1k tasks are **UNVERIFIED**. They will b
 
 ### 8.4 Replay and seeking (`.arrows` only, one reader path)
 
-- **Open.** Wrap the file in `Counting<R>`, a `Read` that counts bytes. `StreamReader::try_new(counting, Some(vec![0]))` decodes only `ts`. `try_new` is unbuffered in arrow-ipc 60, so the count is exact. Keep the schema message bytes, and record `index: Vec<(offset, first_ts)>`.
+- **Open.** Wrap the buffered file in `Counting`, a `Read` that counts bytes. `StreamReader::try_new(counting, Some(vec![0]))` decodes only `ts`. `try_new` is unbuffered in arrow-ipc 60, so the count is exact. Keep the schema message bytes, and record `index: Vec<(offset, first_ts)>`.
 - **Seek(t).** Binary-search the index, then `StreamReader::try_new(Cursor::new(schema_bytes).chain(file_at(offset)), None)`, decode that one batch, and apply ticks up to t. Validation stays on; `with_skip_validation` (an `unsafe fn`) is never called.
 - **Step.** Forward moves to the next tick and loads the next batch when needed. Back is `seek(t − interval)`.
 - **Several files** share one cursor, and each file shows its latest tick ≤ t. Rates use tick t and the tick before it, across batch boundaries. Applying a snapshot tick is `State::apply` per row followed by `State::retain_tick(node, ts)`.
@@ -701,7 +701,7 @@ src/procfs.rs    Proc source, stat(), cmdline(), auxv(), hostname(), btime(), no
 src/agent.rs     Sampler (rules, timers, discovery, emit, self-CPU/RSS accounting), run(), Out (writer, budget, stagger), --unlink-self
 src/wire.rs      Event and Control text codec, split_node(), line cap and value splitting
 src/slurm.rs     job resolution, squeue/scontrol queries, srun_args() (incl. --bcast), spawn and reader threads, Remote teardown
-src/record.rs    run_record(), schema(), Writer (also for TUI recording), Reader (index, seek), Counting<R>
+src/record.rs    run_record(), schema(), Writer (also for TUI recording), Reader (index, seek), Counting
 src/state.rs     State/Node/Cg/Proc/Columns, apply() (incl. CPU history), retain_tick(), derive(), rate(), rows() (3 layouts, sort, filter, folded node ranges)
 src/tui.rs       App, Feed, Msg, input thread, event loop, keys, draw (header, self-monitoring, heat strip, history bars), fmt, batch output, recording toggle, default_rules()
 src/theme.rs     Theme, Glyphs, THEMES, pick()
@@ -802,7 +802,7 @@ Every item carries a `///` doc stating why it exists, enforced by `tests/budget.
 | `Job` | slurm | squeue/scontrol result (id, nodes, state) needed to build the srun argv |
 | `Remote` | slurm | Owns the srun child, its stdin and the step id, for control and staged teardown |
 | `Writer` | record | Arrow builders plus per-batch keyframe tracking |
-| `Reader`, `Counting<R>` | record | Multi-file replay with seek index and exact byte offsets |
+| `Reader`, `Counting` | record | Multi-file replay with seek index and exact byte offsets |
 | `State`, `Node`, `Cg`, `Proc` | state | The TUI data store filled by every feed |
 | `Columns` | state | Interns `(Ent, name)` → `ColId` from `D` lines. This is how future metrics reach the TUI without code changes |
 | `View`, `Layout`, `Row` | state | Rows to render: one of three level orders (step, node, flat), fold, sibling sort, filter, folded node ranges |
