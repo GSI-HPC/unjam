@@ -12,12 +12,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, LazyLock};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 use std::{fs, thread};
 
-use ratatui::crossterm::event::{
-    self, Event as Term, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-};
+use ratatui::crossterm::event::{self, Event as Term, KeyCode, KeyEvent};
+use ratatui::crossterm::event::{KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout as Split, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -29,7 +28,7 @@ use crate::record::{Reader, Rec};
 use crate::source::{Files, Slot, kv};
 use crate::state::{self, HIST, Key, Layout, NCOL, Row, State, View};
 use crate::theme::{THEMES, Theme};
-use crate::{procfs, wire};
+use crate::{agent::now_ms, procfs, wire};
 
 /// What the main thread blocks on (D38): terminal events, data, the end of srun's output and
 /// the 1 Hz tick.
@@ -453,12 +452,6 @@ pub fn default_rules(nodes: u32, interval_ms: u32) -> Vec<Rule> {
     let big = [format!("*\t.\t{}\tc", interval_ms * 2), "*\t*/user\t-\to".into()];
     let text = if nodes > 16 { &big[..] } else { &[format!("*\t.\t{interval_ms}\tp")][..] };
     text.iter().filter_map(|t| Rule::parse(t).ok()).collect()
-}
-
-/// Wall-clock milliseconds, the time base of `T` lines and staleness.
-fn now_ms() -> u64 {
-    let d = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
-    u64::try_from(d.as_millis()).unwrap_or(0)
 }
 
 /// Runs a viewer: the ticker, then `--batch` snapshots or the terminal with its input thread.

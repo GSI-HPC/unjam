@@ -324,11 +324,8 @@ impl Track {
         let get = |k: &str| m.get(&format!("unjam.{k}")).map_or("-", String::as_str);
         let (version, host, step) = (get("version"), get("host"), get("step"));
         let btime = get("btime").parse().unwrap_or(NA);
-        let _ = st.apply(
-            i,
-            &Event::Hello { proto: wire::PROTO, version, host, step, ntasks: 1, btime },
-            0,
-        );
+        let hello = Event::Hello { proto: wire::PROTO, version, host, step, ntasks: 1, btime };
+        let _ = st.apply(i, &hello, 0);
         let mut idx = [0u16; 2];
         for f in self.schema.fields().iter().skip(FIXED) {
             let ent = if f.name().starts_with("p_") { Ent::Proc } else { Ent::Cgroup };
@@ -567,10 +564,8 @@ impl Rec {
         let path = || self.dir.join(format!("{}.arrows", n.host.replace('/', "_")));
         let e = |x: io::Error| format!("record {}: {x}", path().display());
         if !self.files.contains_key(&i) {
-            let (w, err) = match Writer::create(&path(), st, i as usize, &self.meta) {
-                Ok(w) => (Some(w), Ok(())),
-                Err(x) => (None, Err(e(x))),
-            };
+            let w = Writer::create(&path(), st, i as usize, &self.meta);
+            let (w, err) = w.map_or_else(|x| (None, Err(e(x))), |w| (Some(w), Ok(())));
             self.files.insert(i, w);
             err?;
         }
