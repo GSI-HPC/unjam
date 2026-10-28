@@ -36,6 +36,7 @@ size = { depends = ["build"], run = "scripts/size.sh target/release/unjam" }
 "size:self-test" = { depends = ["build"], run = "scripts/size.sh --self-test target/release/unjam" }
 unsafe-deps = { run = "scripts/unsafe-deps.sh" }
 "unsafe-deps:self-test" = { run = "scripts/unsafe-deps.sh --self-test" }
+package = { run = "cargo publish --dry-run --locked" }  # what crates.io would receive
 msrv = { run = [
   "rustup toolchain install 1.88 --profile minimal",
   "cargo +1.88 check --locked --all-targets",
