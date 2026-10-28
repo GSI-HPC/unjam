@@ -535,14 +535,20 @@ pub fn setup(root: Option<PathBuf>, job: bool, cap: usize) -> Result<(Env, Opts)
     Ok((env, Opts { node, ntasks, step, root, exclude, cap }))
 }
 
+/// Removes `exe` if it is an `srun --bcast` copy (`unjam.…`, D36). A split from `main` for its
+/// test: a copy already gone, for example unlinked by another agent in a shared DIR, counts as
+/// removed instead of stopping the agent.
+fn unlink_copy(exe: &Path) -> Result<(), String> {
+    let copy = exe.file_name().is_some_and(|n| n.as_encoded_bytes().starts_with(b"unjam."));
+    let gone = |e: io::Error| (e.kind() == io::ErrorKind::NotFound).then_some(()).ok_or(e);
+    let res = if copy { fs::remove_file(exe).or_else(gone) } else { Ok(()) };
+    res.map_err(|e| format!("--unlink-self {}: {e}", exe.display()))
+}
+
 /// `unjam agent`: one sampler on this node, stdin as control, stdout as output. `unlink`
-/// removes an `srun --bcast` copy (`unjam.<job>.<uid>`) of the own binary at start (D36).
+/// removes an `srun --bcast` copy of the own binary at start.
 pub fn main(root: Option<PathBuf>, keepalive: u64, unlink: bool) -> Result<(), String> {
-    let copy =
-        |e: &PathBuf| e.file_name().is_some_and(|n| n.as_encoded_bytes().starts_with(b"unjam."));
-    if let Some(exe) = std::env::current_exe().ok().filter(|e| unlink && copy(e)) {
-        fs::remove_file(&exe).map_err(|e| format!("--unlink-self {}: {e}", exe.display()))?;
-    }
+    std::env::current_exe().ok().filter(|_| unlink).map_or(Ok(()), |e| unlink_copy(&e))?;
     let (env, opts) = setup(root, true, 1024)?;
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || io::stdin().lines().map_while(Result::ok).try_for_each(|l| tx.send(l)));
@@ -1024,6 +1030,25 @@ mod tests {
         }
         assert!(rem.is_empty());
         got
+    }
+
+    #[test]
+    fn unlink_self_removes_only_a_copy_and_tolerates_it_gone() {
+        let dir = std::env::temp_dir().join(format!("unjam-unlink-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let (copy, other) = (dir.join("unjam.42.1000.00000000000000bc"), dir.join("unjam"));
+        for f in [&copy, &other] {
+            fs::write(f, "").unwrap();
+        }
+        unlink_copy(&copy).unwrap();
+        assert!(!copy.exists());
+        // A second agent exec'd the same copy: it is gone, and the agent keeps running.
+        unlink_copy(&copy).unwrap();
+        let deleted = dir.join("unjam.42.1000.00000000000000bc (deleted)");
+        unlink_copy(&deleted).unwrap();
+        unlink_copy(&other).unwrap();
+        assert!(other.exists(), "not a --bcast copy");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
