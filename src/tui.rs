@@ -714,7 +714,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 }
 
 /// Local mode: host CPU history and memory gauge (nord-host mock); Slurm mode: the node heat
-/// strip, one cell per ⌈N / width⌉ nodes, dotted where no node has values (D41).
+/// strip, one cell per ⌈N / width⌉ nodes, dotted where no node has values (D41). The wire
+/// carries no core count, so cells band relative to the busiest node (at least one core).
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped bar widths")]
 fn strip_line(app: &App, t: &Theme, width: u16) -> Vec<Span<'static>> {
     let (nodes, [used, total, ncpu]) = (&app.st.nodes, app.mon.host);
@@ -724,9 +725,10 @@ fn strip_line(app: &App, t: &Theme, width: u16) -> Vec<Span<'static>> {
         let per = nodes.len().div_ceil(usize::from(width.saturating_sub(7)).max(1)).max(1);
         let cpu = |n: &state::Node| n.root_vals()?.get(0, Kind::Counter);
         let max = |c: &[state::Node]| c.iter().filter_map(cpu).max_by(f64::total_cmp);
+        let top = max(nodes).map_or(1e6, |us| us.max(1e6)) / 1e3;
         let cells = nodes
             .chunks(per)
-            .map(|c| max(c).map_or(glyph(0, t.dim), |us| glyph(8, heat(us / 1e3))));
+            .map(|c| max(c).map_or(glyph(0, t.dim), |us| glyph(8, heat(us / top))));
         return [Span::styled(" NODES ", t.dim)].into_iter().chain(cells).collect();
     }
     let v = nodes.first().and_then(state::Node::root_vals);
@@ -1224,6 +1226,16 @@ mod tests {
         assert_eq!(wide, " NODES ██████·");
         let narrow: String = strip(10);
         assert_eq!(narrow, " NODES ██·", "cells of three nodes; the last holds the silent one");
+    }
+
+    #[test]
+    fn heat_strip_bands_relative_to_the_busiest_node() {
+        let (mut app, _rx) = app(false, "nord");
+        host(&mut app, 0, "small", 2);
+        host(&mut app, 1, "big", 50);
+        let t = &THEMES[app.opts.theme];
+        let fg: Vec<_> = strip_line(&app, t, 20)[1..].iter().map(|s| s.style.fg).collect();
+        assert_eq!(fg, [Some(t.heat[0]), Some(t.heat[3])], "1.4 of 34 cores is idle beside 34");
     }
 
     #[test]

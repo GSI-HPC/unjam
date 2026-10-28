@@ -615,7 +615,7 @@ srun's I/O thread throughput and CPU at 1k tasks are **UNVERIFIED**. They will b
   - `agents max`: the highest agent CPU (rate of `T.self_cpu_us`) and RSS (`T.self_rss_bytes`), with that node's name. In local mode the sampler is a TUI thread and counts under `tui`.
   - `drop` and `err`: summed dropped ticks and decode errors.
   - About 30 LOC. The help pane adds a per-node table: CPU, RSS, out B/s, msg/s, drops, errors and clock skew.
-- **Node heat strip (D41, Slurm mode).** One cell per ⌈N / width⌉ nodes. A cell's colour is the `theme.heat` band of the highest CPU% among its nodes; a cell whose nodes are all `Off` is dotted. About 40 LOC.
+- **Node heat strip (D41, Slurm mode).** One cell per ⌈N / width⌉ nodes. A cell's colour is the `theme.heat` band of the highest CPU% among its nodes, relative to the busiest node of the job (at least one core, as the wire carries no core count), so imbalance shows on many-core nodes; a cell whose nodes are all `Off` is dotted. About 40 LOC.
 - **CPU history bar (D41).** Every row draws its last 16 CPU samples from `hist` (§4.5) as a bar sparkline in `theme.heat` colours. About 35 LOC.
 
 The mock assumes `EnableExtraControllers=io,pids`. Without it, IO-R/s and IO-W/s are hidden and PIDS shows `~`-marked summed threads where processes are sampled (§4.3, §9.2).
