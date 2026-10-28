@@ -9,18 +9,18 @@
 # of all modules may not exceed `total`. Modules listed here but not yet written are skipped;
 # every file in src/ must have a line. A budget is raised only in the PR that needs it, with a
 # one-line reason here.
-main.rs     130  # record subcommand, --replay/--at, ExitCode passthrough
-model.rs    160
-source.rs   140  # Slot::Missing (retried once per 10 s), polling self-check, one permission-denied W
-cgroup.rs   160  # measured 158; lowered to keep the module sum at the total cap
-procfs.rs   145  # Ident for P lines plus the host, btime, auxv and limits readers
-agent.rs    450  # stored P identity for S resyncs, pid reuse and moves, T in the writer path
-wire.rs     200
-slurm.rs    175
-record.rs   560  # journal writer/reader, replay tracks with seek, run_record, TUI recording (D41)
-state.rs    457  # rows of three layouts with folded ranges, PIDS fallback, history ring (D39, D41)
-tui.rs      670  # replay cursor and keys, 'r' recording, signal teardown; keys follow the cursor's entity
-theme.rs     60
+main.rs     133  # record subcommand, --replay/--at, ExitCode passthrough
+model.rs    173  # shared metric() descriptor; interval_ms() rounds every interval alike
+source.rs   139  # Slot::Missing (retried once per 10 s), polling self-check, one permission-denied W
+cgroup.rs   159  # stacked-disk IO skip, own-step check, self_cgroup() shared with the recorder
+procfs.rs   145  # Ident for P lines, the host, btime, auxv and limits readers, usage()
+agent.rs    481  # stored P identity for S resyncs, pid reuse, moves and execs, T in the writer path
+wire.rs     211  # measured; it was already 211 against 200, within the 10 % tolerance
+slurm.rs    185  # array task pick, per-viewer --bcast name and owner check
+record.rs   568  # journal writer/reader, replay tracks with seek and rounds, run_record, TUI recording
+state.rs    476  # three layouts, folded ranges, PIDS fallback, history ring, resync sweep, cycle guard
+tui.rs      725  # replay cursor and keys, 'r' recording, signal teardown, keys follow the entity
+theme.rs     64  # measured; nine bar glyphs and two tree guides per glyph set
 total      3460  # record and replay: journal writer/reader, replay and the recorder (§10.2)
 
 # Release binary (bytes) and resolved normal dependencies (crates, root excluded) on
