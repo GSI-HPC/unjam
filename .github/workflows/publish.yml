@@ -18,7 +18,6 @@ jobs:
   verify:
     name: Verify the tag
     if: github.repository == 'GSI-HPC/unjam'
-    if: github.repository == 'GSI-HPC/unjam'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
