@@ -223,16 +223,14 @@ pub fn view(arg: &str, a: &SlurmArgs, opts: Opts, batch: Option<u32>) -> Result<
     drop(ctl);
     let res = tui::view(&mut app, &tx, &rx, batch);
     let step = app.st.nodes.iter().find(|n| n.step.contains('.')).map(|n| n.step.clone());
-    let failed = app.st.nodes.is_empty().then(|| app.log.iter().rev().cloned().collect::<Vec<_>>());
+    let log = || app.log.iter().rev().cloned().collect::<Vec<_>>().join("\n");
+    let failed = app.st.nodes.is_empty().then(log);
     drop(app);
     // Keep the readers reading srun's pipes, so srun can forward stdin EOF and exit (§3.3).
     thread::spawn(move || rx.into_iter().for_each(drop));
     remote.stop(step.as_deref());
     res.map_err(|e| format!("tui: {e}"))?;
-    match failed {
-        Some(tail) => Err(format!("no agent reported; srun said:\n{}", tail.join("\n"))),
-        None => Ok(()),
-    }
+    failed.map_or(Ok(()), |tail| Err(format!("no agent reported; srun said:\n{tail}")))
 }
 
 #[cfg(test)]
