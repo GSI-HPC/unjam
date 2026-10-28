@@ -9,6 +9,15 @@
 "cargo:sarif-fmt" = "0.8.0"
 "cargo:cargo-deny" = "0.20.2"    # declares rust_version 1.88 ≤ pinned 1.93.1
 "pipx:reuse" = "6.2.0"
+# sind (integration tests) is not a mise tool: the github backend needs the GitHub API to
+# resolve releases, and every `mise run` would fail where that is unreachable. Install sind
+# v0.15.0 yourself (CONTRIBUTING.md); CI takes it from sind-action.
+
+[env]
+# mise [env] overrides the process environment, so a plain value would hide CI's realm. The
+# template keeps an inherited SIND_REALM and defaults to unjam-it locally (isolates the test
+# cluster from other sind clusters on the same Docker daemon).
+SIND_REALM = "{{ get_env(name='SIND_REALM', default='unjam-it') }}"
 
 # Tasks use inline tables: a [tasks.<name>] header cannot carry a key on its own line.
 [tasks]
@@ -34,4 +43,10 @@ reuse = { run = "reuse lint" }
 deny = { run = "cargo deny --locked check" }
 bench = { run = "cargo test --release --locked -- --ignored bench_ --nocapture" }  # report only
 check = { depends = ["fmt", "lint", "test", "reuse", "deny", "size", "unsafe-deps"] }
+# Integration on sind; SLURM, EXTRA and JOBIDPATHS select the cluster (tests/sind/cluster.sh).
+"it:cluster" = { run = "mkdir -p target && tests/sind/cluster.sh > target/sind-cluster.yaml" }
+"it:up" = { depends = ["it:cluster"], run = "sind create cluster --config target/sind-cluster.yaml --wait 10m" }
+"it:test" = { depends = ["build:musl"], run = "tests/sind/run.sh" }
+"it:down" = { run = "sind delete cluster unjam" }
+it = { run = "tests/sind/it.sh" }  # up, test, and down even on failure
 release = { run = "cargo release" }
