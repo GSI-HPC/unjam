@@ -279,8 +279,16 @@ impl Node {
         (self.prev, self.seen) = (t, now);
     }
 
-    /// Adds or re-announces a cgroup (resyncs repeat `G` lines; values are kept).
+    /// Adds or re-announces a cgroup (resyncs repeat `G` lines; values are kept). A new parent
+    /// takes it from the old one's kids, and a parent at or below the cgroup itself (only a
+    /// crafted journal) is ignored, so `rows` always walks a tree.
     fn cg(&mut self, id: u64, parent: u64, path: &str) {
+        let mut up = std::iter::successors(Some(parent), |p| Some(self.cgs.get(p)?.parent));
+        if up.any(|p| p == id) {
+            return;
+        }
+        let old = self.cgs.get(&id).map_or(parent, |c| c.parent);
+        self.cgs.entry(old).and_modify(|p| p.kids.retain(|&k| k != id || old == parent));
         if parent == 0 {
             self.root = id;
         } else if let Some(p) = self.cgs.get_mut(&parent).filter(|p| !p.kids.contains(&id)) {
@@ -696,6 +704,25 @@ mod tests {
     fn layouts_of_an_empty_store() {
         for layout in [Layout::Step, Layout::Node, Layout::Flat] {
             assert!(rows(&State::new(), &view(layout), 100).len() <= 1, "{layout:?}");
+        }
+    }
+
+    #[test]
+    fn parent_cycles_are_refused() {
+        for (g, kids) in [
+            (&["G 1 0 ", "G 1 1 a"][..], [(1, vec![])]),
+            (&["G 1 0 ", "G 2 1 a", "G 3 2 a/b", "G 1 3 a/b/c"], [(1, vec![2])]),
+            (&["G 1 0 ", "G 2 1 a", "G 2 0 ", "G 1 2 a"], [(1, vec![])]),
+        ] {
+            let mut st = State::new();
+            feed(&mut st, 0, &DESC[..1]);
+            feed(&mut st, 0, g);
+            for (id, want) in kids {
+                assert_eq!(st.nodes[0].cgs[&id].kids, want, "{g:?}");
+            }
+            for layout in [Layout::Step, Layout::Node, Layout::Flat] {
+                assert!(rows(&st, &view(layout), usize::MAX).len() <= 4, "{g:?}");
+            }
         }
     }
 

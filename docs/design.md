@@ -567,6 +567,7 @@ srun's I/O thread throughput and CPU at 1k tasks are **UNVERIFIED**. They will b
 - **Seek(t).** Binary-search the index, then `StreamReader::try_new(Cursor::new(schema_bytes).chain(file_at(offset)), None)`, decode that one batch, and apply ticks up to t. Validation stays on; `with_skip_validation` (an `unsafe fn`) is never called.
 - **Step.** Forward moves to the next tick and loads the next batch when needed. Back is `seek(t − interval)`.
 - **Several files** share one cursor, and each file shows its latest tick ≤ t. Rates use tick t and the tick before it, across batch boundaries. Applying a snapshot tick is `State::apply` per row followed by `State::retain_tick(node, ts)`.
+- **Malformed files.** A row whose parent path resolves to the cgroup itself or to one below it (possible only in a crafted or corrupted file) is ignored by `State`, which also moves a re-parented cgroup out of its old parent's kids, so the layouts always walk a tree.
 - **Memory.** Only the current decoded batch per file is held: typically about 250 KB per node and at most about 3 MB (the row cap), so about 250 MB at 1k nodes in the typical case (K8).
 
 ### 8.5 Recording in the TUI (D41)
