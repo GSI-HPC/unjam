@@ -471,7 +471,7 @@ Verified in Slurm 25.11 source:
 
 **Compatibility.**
 
-- `proto` governs only the line grammar. A TUI refuses a node whose `H.proto` differs and shows the reason on that node's row.
+- `proto` governs only the line grammar. A TUI ignores every line of a node whose `H.proto` differs and logs the reason (`node N: proto X, need Y: ignored`, in the footer and help pane), since such a node has no rows to show it on.
 - Different unjam **versions** with the same proto interoperate, because columns are matched by `D` names. Adding metrics never bumps `proto`.
 - Parsers ignore extra trailing fields on `H`, `D` and `T` lines. A later field (such as a self-CPU stretch, or a cost class in `D`) can therefore be appended without a proto bump. `self_rss_bytes` on `T` was added this way (D40).
 

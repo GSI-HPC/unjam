@@ -200,6 +200,10 @@ impl App {
             nodes.resize_with(nodes.len().max(node as usize + 1), Default::default);
             let (ok, warn) = match wire::parse(rest, &mut self.vals) {
                 Some(Event::Warn(w)) => (true, Some(format!("node {node}: {w}"))),
+                Some(ev @ Event::Hello { proto, .. }) if proto != wire::PROTO => {
+                    let w = format!("node {node}: proto {proto}, need {}: ignored", wire::PROTO);
+                    (self.st.apply(node, &ev, self.now).is_ok(), Some(w))
+                }
                 Some(ev) => {
                     let tick = matches!(ev, Event::Tick { .. });
                     let rec = self.rec.as_mut().filter(|_| !ev.is_value());
@@ -1038,6 +1042,16 @@ mod tests {
         app.now += 10_000;
         feed(&mut app, 0, &bad[..1]);
         assert_eq!(rx.try_iter().count(), 1, "again after 10 s");
+    }
+
+    #[test]
+    fn other_proto_is_logged_and_ignored() {
+        // A node with another proto used to be blank with no error and no log line.
+        let (mut app, rx) = app(false, "mono");
+        feed(&mut app, 0, &["H 2 9.0 n1 42.0 1 0".into(), "G 1 0 ".into()]);
+        assert_eq!(app.log.front().unwrap(), "node 0: proto 2, need 1: ignored");
+        assert!(app.st.nodes[0].cgs.is_empty());
+        assert_eq!((app.st.nodes[0].errors, rx.try_iter().count()), (0, 0), "no resync loop");
     }
 
     #[test]
