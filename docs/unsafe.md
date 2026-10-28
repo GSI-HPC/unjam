@@ -12,7 +12,8 @@ Production code has no `unsafe` (`unsafe_code = "deny"`). Policy and decision tr
 
 One `## <n>. <file>:<item>` entry per `#[allow(unsafe_code, reason = "…")]` site in `src/`:
 location, invariants, rejected safe alternative, and the test that exercises it.
-`tests/budget.rs` checks that the number of entries equals the number of sites.
+`tests/budget.rs` checks that the entries name exactly the `allow` and `expect(unsafe_code)`
+sites.
 
 ## 1. src/main.rs:alloc_count
 

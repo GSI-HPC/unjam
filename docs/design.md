@@ -871,7 +871,7 @@ Every item carries a `///` doc stating why it exists, enforced by `tests/budget.
 ## 12. unsafe policy
 
 - **Production code has zero `unsafe`.** Lints: `unsafe_code = "deny"` (not `forbid`, ADR D24), `unsafe_op_in_unsafe_fn = "deny"`, `clippy::undocumented_unsafe_blocks = "deny"`, `clippy::multiple_unsafe_ops_per_block = "deny"`.
-- **Any use** needs a local `#[allow(unsafe_code, reason = "…")]`, a `// SAFETY:` comment and an entry in `docs/unsafe.md`. `tests/budget.rs` fails when the number of `allow(unsafe_code)` sites in `src/` differs from the number of `## ` entries in the ledger's "Our code" part.
+- **Any use** needs a local `#[allow(unsafe_code, reason = "…")]`, a `// SAFETY:` comment and an entry in `docs/unsafe.md`. `tests/budget.rs` fails unless the `allow(unsafe_code)` and `expect(unsafe_code)` sites in `src/` and the ledger's "Our code" entries name the same `<file>:<item>`s.
 - **The one planned use** is test-only: `src/main.rs` `#[cfg(test)] mod alloc_count` implements `unsafe impl GlobalAlloc`. It delegates to `System` and counts in a `const`-initialised `thread_local!` `Cell<u64>`, which has no destructor and does not allocate. It lets a test assert zero allocations per steady-state tick. Implementing `GlobalAlloc` is unsafe by definition. Ledger entry #1.
 
 | Where unsafe would usually appear | What we do instead |
@@ -1093,8 +1093,8 @@ Measured after record and replay: 3,466,568 bytes (3.31 MiB, 2 % over the target
 
 1. LOC per module and total against `docs/budget.txt` (+10 %).
 2. Every `fn`, `struct`, `enum`, `trait`, `type`, `const`, `static` and `mod` item in `src/` is preceded by a `///` doc line (attributes may sit in between). The `#[cfg(test)]` module, by convention the last item of a file, is exempt.
-3. Every `[dependencies]` key appears in `docs/deps.md`.
-4. The count of `allow(unsafe_code)` sites equals the number of entries in the "Our code" part of `docs/unsafe.md`. Dependency rows are checked by `scripts/unsafe-deps.sh`.
+3. Every key of `[dependencies]`, `[build-dependencies]` and their `[target.….]` forms appears in `docs/deps.md`.
+4. The `<file>:<item>` of every `allow(unsafe_code)` or `expect(unsafe_code)` site in `src/` matches the `## <n>. <file>:<item>` entries in the "Our code" part of `docs/unsafe.md`, one to one. Dependency rows are checked by `scripts/unsafe-deps.sh`.
 
 Its own line counter is unit-tested inside the file.
 

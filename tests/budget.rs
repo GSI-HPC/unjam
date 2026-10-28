@@ -114,30 +114,85 @@ fn strip_visibility(line: &str) -> &str {
     line.strip_prefix("pub ").unwrap_or(line)
 }
 
-/// Keys of the `[dependencies]` table of a Cargo manifest.
-fn dependency_keys(manifest: &str) -> Vec<String> {
-    manifest
-        .lines()
-        .skip_while(|line| line.trim() != "[dependencies]")
-        .skip(1)
-        .take_while(|line| !line.starts_with('['))
-        .filter_map(|line| {
-            let (key, _) = line.split_once('=')?;
-            let key = key.trim();
-            (!key.is_empty() && !key.starts_with('#')).then(|| key.to_owned())
-        })
-        .collect()
+/// The table a manifest header names, without a `target.<triple or 'cfg(…)'>.` prefix.
+fn table(header: &str) -> &str {
+    let Some(rest) = header.strip_prefix("target.") else { return header };
+    let after = match rest.chars().next() {
+        Some(q @ ('\'' | '"')) => rest[1..].split_once(q).map_or("", |(_, r)| r),
+        _ => rest.split_once('.').map_or("", |(_, r)| r),
+    };
+    after.trim_start_matches('.')
 }
 
-/// Number of `## ` entries in the "Our code" part of the unsafe ledger.
-fn ledger_entries(ledger: &str) -> usize {
+/// Keys of every dependency table of a Cargo manifest: `[dependencies]`,
+/// `[build-dependencies]`, their `[target.….]` forms and `[dependencies.<key>]` headers.
+fn dependency_keys(manifest: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut in_table = false;
+    for line in manifest.lines().map(str::trim) {
+        if let Some(header) = line.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+            let t = table(header.trim());
+            in_table = t == "dependencies" || t == "build-dependencies";
+            let named = t.strip_prefix("dependencies.").or(t.strip_prefix("build-dependencies."));
+            keys.extend(named.map(|key| key.trim_matches(['"', '\'']).to_owned()));
+        } else if let Some((key, _)) = line.split_once('=').filter(|_| in_table) {
+            let key = key.split('.').next().unwrap_or_default().trim().trim_matches(['"', '\'']);
+            if !key.is_empty() && !key.starts_with('#') {
+                keys.push(key.to_owned());
+            }
+        }
+    }
+    keys
+}
+
+/// `<file>:<item>` of every `allow(unsafe_code)` or `expect(unsafe_code)` attribute, also
+/// across lines; the item is the identifier after the next item keyword or `impl`, and an
+/// inner attribute (`#![…]`) names the whole file as `<file>`.
+fn unsafe_sites(file: &str, src: &str) -> Vec<String> {
+    let mut sites = Vec::new();
+    let (mut attr, mut depth, mut open) = (String::new(), 0, false);
+    for line in src.lines().map(str::trim) {
+        if depth == 0 && (line.starts_with("#[") || line.starts_with("#![")) {
+            attr.clear();
+        }
+        if depth > 0 || line.starts_with("#[") || line.starts_with("#![") {
+            attr.push_str(line);
+            depth = (depth + line.matches('[').count()).saturating_sub(line.matches(']').count());
+            if depth == 0 {
+                let opens = attr.contains("unsafe_code")
+                    && (attr.contains("allow(") || attr.contains("expect("));
+                if opens && attr.starts_with("#![") {
+                    sites.push(file.to_owned());
+                } else {
+                    open |= opens;
+                }
+            }
+            continue;
+        }
+        if open && !line.is_empty() && !line.starts_with("//") {
+            let rest = strip_visibility(line);
+            let rest = rest.strip_prefix("unsafe ").unwrap_or(rest);
+            let item = ITEMS.iter().chain(&["impl "]).find_map(|kw| rest.strip_prefix(kw));
+            let name = item.unwrap_or(rest).trim_start();
+            let end = name.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(name.len());
+            sites.push(format!("{file}:{}", &name[..end]));
+            open = false;
+        }
+    }
+    sites
+}
+
+/// `<file>:<item>` of every `## <n>. <file>:<item>` entry in the "Our code" part of the
+/// unsafe ledger.
+fn ledger_entries(ledger: &str) -> Vec<String> {
     ledger
         .lines()
         .skip_while(|line| line.trim() != "# Our code")
         .skip(1)
         .take_while(|line| !line.starts_with("# "))
-        .filter(|line| line.starts_with("## "))
-        .count()
+        .filter_map(|line| line.strip_prefix("## "))
+        .map(|entry| entry.split_once(". ").map_or(entry, |(_, site)| site).trim().to_owned())
+        .collect()
 }
 
 /// Gate 1: every module within its line budget and the sum within the hard cap.
@@ -174,13 +229,18 @@ fn dependencies_are_ledgered() {
     assert!(missing.is_empty(), "no docs/deps.md row for: {}", missing.join(", "));
 }
 
-/// Gate 4: every `allow(unsafe_code)` site has an entry in `docs/unsafe.md`, and no more.
+/// Gate 4: every `allow`/`expect(unsafe_code)` site has its `<file>:<item>` entry in
+/// `docs/unsafe.md`, and no more.
 #[test]
 fn unsafe_sites_match_ledger() {
-    let sites: usize =
-        modules().iter().map(|(_, src)| src.matches("allow(unsafe_code").count()).sum();
-    let entries = ledger_entries(&read("docs/unsafe.md"));
-    assert_eq!(sites, entries, "allow(unsafe_code) sites in src/ vs \"Our code\" entries");
+    let mut sites: Vec<String> = modules()
+        .iter()
+        .flat_map(|(name, src)| unsafe_sites(&format!("src/{name}"), src))
+        .collect();
+    let mut entries = ledger_entries(&read("docs/unsafe.md"));
+    sites.sort();
+    entries.sort();
+    assert_eq!(sites, entries, "unsafe_code sites in src/ vs \"Our code\" entries");
 }
 
 #[test]
@@ -214,6 +274,30 @@ fn ledgers_parse() {
     let manifest = "[package]\nname = \"x\"\n[dependencies]\n# why\nclap = \"4\"\n\
                     lz4_flex = { version = \"0.14\" }\n\n[lints.rust]\nx = 1\n";
     assert_eq!(dependency_keys(manifest), ["clap", "lz4_flex"]);
-    let ledger = "# unsafe\n## not counted\n# Our code\n## 1. a\n## 2. b\n# Dependencies\n## c\n";
-    assert_eq!(ledger_entries(ledger), 2);
+    let ledger = "# unsafe\n## not counted\n# Our code\n## 1. src/a.rs:x\n## 2. src/b.rs:y\n\
+                  # Dependencies\n## c\n";
+    assert_eq!(ledger_entries(ledger), ["src/a.rs:x", "src/b.rs:y"]);
+}
+
+#[test]
+fn dependency_keys_cover_target_build_and_dotted_tables() {
+    let manifest = "[dependencies]\nclap = \"4\"\nlibc.workspace = true\n\
+                    [target.'cfg(target_feature = \"sse4.1\")'.dependencies]\nrustix = \"1\"\n\
+                    [target.x86_64-unknown-linux-gnu.build-dependencies]\ncc = \"1\"\n\
+                    [dependencies.nix]\nversion = \"0.30\"\n[dev-dependencies]\ntempfile = \"3\"\n\
+                    [target.'cfg(unix)'.dev-dependencies]\nproptest = \"1\"\n";
+    assert_eq!(dependency_keys(manifest), ["clap", "libc", "rustix", "cc", "nix"]);
+}
+
+#[test]
+fn unsafe_sites_include_expect_and_multi_line_attributes() {
+    let src = "#[allow(unsafe_code, reason = \"a\")]\nmod counting {}\n\
+               #[expect(unsafe_code, reason = \"b\")]\n/// doc\n#[inline]\npub unsafe fn ffi() {}\n\
+               #[expect(\n    unsafe_code,\n    reason = \"c [d]\"\n)]\nunsafe impl Send for X {}\n\
+               #[deny(unsafe_code)]\nfn safe() {}\n";
+    assert_eq!(
+        unsafe_sites("src/x.rs", src),
+        ["src/x.rs:counting", "src/x.rs:ffi", "src/x.rs:Send"]
+    );
+    assert_eq!(unsafe_sites("src/y.rs", "#![allow(unsafe_code, reason = \"e\")]\n"), ["src/y.rs"]);
 }
