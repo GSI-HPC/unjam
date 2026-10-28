@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, LazyLock};
+use std::thread;
 use std::time::{Duration, Instant};
-use std::{fs, thread};
 
 use ratatui::crossterm::event::{self, Event as Term, KeyCode, KeyEvent};
 use ratatui::crossterm::event::{KeyEventKind, KeyModifiers};
@@ -76,8 +76,9 @@ pub struct Opts {
 
 /// The TUI's own cost and data rates for the self-monitoring header (D40).
 struct Mon {
-    /// Cached `/proc/self/stat` and the page size and clock ticks to read it with.
-    stat: (Files, Slot, Env),
+    /// Cached `/proc/self/stat` and (local mode) `/proc/meminfo`, and the page size and clock
+    /// ticks to read them with.
+    stat: (Files, [Slot; 2], Env),
     /// Time and own CPU µs at the last tick; own CPU % and RSS bytes.
     at: [u64; 2],
     tui: [f64; 2],
@@ -124,7 +125,7 @@ impl App {
     pub fn new(opts: Opts, ctl: Sender<String>) -> Self {
         let env = procfs::env("/proc".into(), PathBuf::new());
         let ncpu = thread::available_parallelism().map_or(1, usize::from) as f64;
-        let stat = (Files::new(1), Slot::Empty, env);
+        let stat = (Files::new(2), [Slot::Empty, Slot::Empty], env);
         let (at, tui, count, rate) = ([now_ms(), 0], [f64::NAN; 2], [0; 3], [0.0; 3]);
         let mon = Mon { stat, at, tui, count, rate, host: [f64::NAN, f64::NAN, ncpu] };
         let layout = if opts.local { Layout::Node } else { Layout::Step };
@@ -230,8 +231,8 @@ impl App {
     fn tick(&mut self) {
         let (now, m) = (now_ms(), &mut self.mon);
         let dt = (now.saturating_sub(m.at[0]) as f64 / 1000.0).max(0.001);
-        let (files, slot, env) = &mut m.stat;
-        if let Some((us, rss)) = procfs::usage(files, slot, env) {
+        let (files, [me, mem], env) = &mut m.stat;
+        if let Some((us, rss)) = procfs::usage(files, me, env) {
             m.tui = [us.saturating_sub(m.at[1]) as f64 / dt / 1e4, rss as f64];
             m.at[1] = us;
         }
@@ -243,8 +244,8 @@ impl App {
             (n.agent[3], n.lines) = (n.lines as f64 / dt, 0);
         }
         if self.opts.local {
-            let info = fs::read("/proc/meminfo").unwrap_or_default();
-            let kb = |k| kv(&info, k).map_or(f64::NAN, |v| v as f64 * 1024.0);
+            let info = files.read(mem, false, &env.proc_root, "meminfo").unwrap_or_default();
+            let kb = |k| kv(info, k).map_or(f64::NAN, |v| v as f64 * 1024.0);
             (m.host[0], m.host[1]) = (kb("MemTotal") - kb("MemAvailable"), kb("MemTotal"));
         }
         self.now = now;
@@ -850,6 +851,7 @@ pub fn snapshot(app: &App, w: &mut dyn Write) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::Path;
     use std::sync::mpsc;
 

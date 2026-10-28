@@ -21,6 +21,7 @@ commit, the machine (sind worker, Slurm line, kernel) and the command that produ
 | — | — | `cpu.stat` | — | — | rstat flush |
 | — | — | `io.stat` | — | — | rstat flush |
 | — | — | `memory.stat` | — | — | |
+| 485e292 | 6.18.44 (dev container, not a sind worker) | `/proc/meminfo` (1.5 KB) | 1.5–2.0 | 2.6–3.5 | Local TUI only, once per second; `fs::read` with its heap buffer was 4.6–5.9 µs. 20,000 reads per case, 3 runs |
 
 ## Benchmarks (`mise run bench`)
 

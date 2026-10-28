@@ -329,6 +329,7 @@ Level semantics (§6): `o` reads nothing, `c` reads cgroup files, `p` adds proce
 | Process, level `p`, each tick | `/proc/<pid>/stat`, `/proc/<pid>/io` | 2 / 6 |
 | New process, or `comm` changed (exec) | `/proc/<pid>/cmdline` once (NUL becomes space, cut to fit the line) | 3 |
 | Agent self, each tick | `/proc/self/stat` (utime + stime for self-CPU reporting) | 1 |
+| TUI, each second | `/proc/self/stat` for the header (D40); in local mode also `/proc/meminfo` (`MemTotal`, `MemAvailable`) for the host memory bar. Both stay open in the TUI's own two-fd `Files`; `meminfo` is a cold-tier file, which a cap of 2 still caches | 1 each / 3 each |
 | Record mode, each tick | `cgroup.events` of each `user/*` sibling, own `task_*/cgroup.procs` | 1 each |
 
 A missing file (controller not enabled, old kernel) gives NA. The file is retried by the first discovery walk of each 10 s period, not by every walk, so a node without the io and pids controllers does not pay a failed open per absent file per tick.
@@ -1187,7 +1188,7 @@ Open:
 - **Q5.** Are compiled-in themes enough (no theme files, no parser dependency)?
 - **Q6.** Is 16 nodes the right threshold for turning processes off by default? Is attaching as operator or root wanted? srun's permissions decide either way.
 - **Q7.** Heterogeneous jobs and multiple clusters are out of scope for v1. Is that acceptable?
-- **Q8.** There are no host-level metrics (`/proc/stat`, `meminfo`) in round one, because the cgroup root covers totals. Is that acceptable?
+- **Q8.** There are no host-level metrics (`/proc/stat`, `meminfo`) on the wire in round one, because the cgroup root covers totals. Only the local TUI reads `/proc/meminfo`, for its host memory bar (§5.3). Is that acceptable?
 - **Q9.** Do any target sites run Slurm steps in a cgroup namespace (`namespace/linux` or a container plugin)? If so, a resolution via `scontrol listpids` would be needed.
 - **Q11.** Default record interval of 5 s: acceptable? And if measurements show the agent above 1 % of one core under default rules, should an automatic interval stretch be added (about 30 LOC)?
 
