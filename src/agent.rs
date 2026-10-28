@@ -339,6 +339,10 @@ impl Sampler {
             self.walk(now, emit);
         }
         self.sample(emit);
+        if let Some(w) = self.core.files.denied.as_mut().filter(|w| !w.is_empty()) {
+            emit(&Event::Warn(w));
+            w.clear();
+        }
         let Core { files, env, .. } = &mut self.core;
         let s =
             files.read(&mut self.me, true, &env.proc_root, "self/stat").ok().and_then(procfs::stat);
@@ -772,6 +776,23 @@ mod tests {
         assert!(!exec.contains(&"x\t101".to_owned()), "same process: values are kept");
         let after = lines(|e| _ = s.tick(3000, e));
         assert_eq!((count(&after, "P"), count(&after, "p")), (0, 3));
+    }
+
+    #[test]
+    fn unreadable_proc_io_warns_once() {
+        let (mut s, t) = sampler("25.11", "denied");
+        lines(|e| s.snapshot(0, e));
+        let io = t.0.join("proc/101/io");
+        fs::remove_file(&io).unwrap();
+        // A write-only sysctl: reading it is denied even to root, like another user's io.
+        std::os::unix::fs::symlink("/proc/sys/vm/drop_caches", &io).unwrap();
+        rule(&mut s, "*\t.\t1000\tp", 0);
+        let first = lines(|e| _ = s.tick(1000, e));
+        let w: Vec<_> = first.iter().filter(|l| l.starts_with("W\t")).collect();
+        assert!(w.len() == 1 && w[0].contains("101/io: permission denied"), "{first:?}");
+        let p101 = first.iter().find(|l| l.starts_with("p\t101\t")).unwrap();
+        assert!(p101.ends_with("\t-\t-"), "{p101}");
+        assert_eq!(count(&lines(|e| _ = s.tick(2000, e)), "W"), 0, "one W per agent");
     }
 
     #[test]

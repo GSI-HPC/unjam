@@ -388,7 +388,7 @@ Correction to the base design: if a site places steps in a cgroup namespace root
 
 **Local mode on a compute node:** `unjam --root /sys/fs/cgroup/system.slice/slurmstepd.scope/<jobdir>`. There is no `--job J` lookup. The docs show how to find `<jobdir>` with `scontrol listpids J` and `/proc/<pid>/cgroup` (ADR D4).
 
-**Permissions.** cgroupfs interface files are world-readable. `/proc/<pid>/io` needs ptrace-read access, which holds for the user's own processes. Otherwise the value is NA and the agent sends one `W` line.
+**Permissions.** cgroupfs interface files are world-readable. `/proc/<pid>/io` needs ptrace-read access, which holds for the user's own processes. Otherwise the value is NA, and the first denied open sends one `W` line per agent (`<path>: permission denied, NA`, from `Files::denied`); later denials stay quiet.
 
 ---
 
