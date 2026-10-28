@@ -146,6 +146,8 @@ pub struct Node {
     pub host: String,
     pub step: String,
     pub proto: u32,
+    /// Boot time from `H`, for the record metadata.
+    pub btime: u64,
     cmap: [Vec<u16>; 2],
     pub cgs: HashMap<u64, Cg>,
     pub procs: HashMap<u32, Proc>,
@@ -191,9 +193,9 @@ impl State {
         let n = &mut self.nodes[i];
         n.dirty = true;
         match *ev {
-            Event::Hello { proto, host, step, .. } => {
-                (n.proto, n.host, n.step, n.cmap) =
-                    (proto, host.into(), step.into(), Default::default());
+            Event::Hello { proto, host, step, btime, .. } => {
+                (n.proto, n.host, n.step, n.btime, n.cmap) =
+                    (proto, host.into(), step.into(), btime, Default::default());
             }
             _ if n.proto != crate::wire::PROTO => {}
             Event::Desc { ent, idx, name, unit, kind } => {

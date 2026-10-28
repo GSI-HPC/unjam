@@ -9,7 +9,7 @@
 # of all modules may not exceed `total`. Modules listed here but not yet written are skipped;
 # every file in src/ must have a line. A budget is raised only in the PR that needs it, with a
 # one-line reason here.
-main.rs     125
+main.rs     130  # record subcommand, --replay/--at, ExitCode passthrough
 model.rs    160
 source.rs   135  # Slot::Missing (absent files not retried per tick) and the polling self-check
 cgroup.rs   160  # measured 158; lowered to keep the module sum at the total cap
@@ -17,11 +17,11 @@ procfs.rs   145  # Ident for P lines plus the host, btime, auxv and limits reade
 agent.rs    450  # stored P identity for S resyncs, pid reuse and moves, T in the writer path
 wire.rs     200
 slurm.rs    175
-record.rs   330
+record.rs   560  # journal writer/reader, replay tracks with seek, run_record
 state.rs    457  # rows of three layouts with folded ranges, PIDS fallback, history ring (D39, D41)
-tui.rs      620  # key queue and quit in the input thread, NODE sort, cursor follow (D38, D39)
+tui.rs      660  # replay cursor and keys, signal teardown
 theme.rs     60
-total      2900
+total      3460  # record and replay: journal writer/reader, replay and the recorder (§10.2)
 
 # Release binary (bytes) and resolved normal dependencies (crates, root excluded) on
 # x86_64-unknown-linux-gnu. Re-baselined from measurement (+5 %) by the change that needs it.

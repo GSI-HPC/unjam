@@ -200,7 +200,6 @@ pub fn job_root(mount: &Path, self_cgroup: &str) -> Result<(PathBuf, PathBuf), S
 }
 
 /// Record mode: `…/step_<S>/user`, every task of the own step on this node (§3.5).
-#[cfg_attr(not(test), expect(dead_code, reason = "record mode uses it; not wired yet"))]
 pub fn record_root(mount: &Path, self_cgroup: &str) -> Result<PathBuf, String> {
     Ok(mount.join(step_paths(self_cgroup)?.1).join("user"))
 }

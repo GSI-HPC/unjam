@@ -1,0 +1,51 @@
+ unjam --replay  2/2 nodes (0 stale)  4 procs  1s  node  sort CPU% ▼  00:16:46Z
+ tui - - · in 0 0 msg/s · out 0 · agents max - - (n2) · drop 0 err 0
+NAME                                            NODE     PID   CPU%    MEM   INT W
+▾ n1                                              n1           0.1%   4.0K
+  ▾ c                                             n1           0.4%    16K
+    └ dd if=/dev/zero                             n1      11   0.6%   8.0K
+  ▾ a                                             n1           0.2%   8.0K
+    ▾ b                                           n1           0.3%    12K
+      └ sh -c x                                   n1      10   0.5%   8.0K
+▾ n2                                              n2           0.1%   4.0K
+  ▾ c                                             n2           0.4%    16K
+    └ dd if=/dev/zero                             n2      11   0.6%   8.0K
+  ▾ a                                             n2           0.2%   8.0K
+    ▾ b                                           n2           0.3%    12K
+      └ sh -c x                                   n2      10   0.5%   8.0K
+nodes=2 stale=0 errors=0 dropped=0
+
+ unjam --replay  2/2 nodes (0 stale)  4 procs  1s  node  sort CPU% ▼  00:16:47Z
+ tui - - · in 0 0 msg/s · out 0 · agents max - - (n2) · drop 0 err 0
+NAME                                            NODE     PID   CPU%    MEM   INT W
+▾ n1                                              n1           0.1%   4.0K
+  ▾ c                                             n1           0.4%    16K
+    └ dd if=/dev/zero                             n1      11   0.6%   8.0K
+  ▾ a                                             n1           0.2%   8.0K
+    ▾ b                                           n1           0.3%    12K
+      └ sh -c x                                   n1      10   0.5%   8.0K
+▾ n2                                              n2           0.1%   4.0K
+  ▾ c                                             n2           0.4%    16K
+    └ dd if=/dev/zero                             n2      11   0.6%   8.0K
+  ▾ a                                             n2           0.2%   8.0K
+    ▾ b                                           n2           0.3%    12K
+      └ sh -c x                                   n2      10   0.5%   8.0K
+nodes=2 stale=0 errors=0 dropped=0
+
+ unjam --replay  2/2 nodes (0 stale)  4 procs  1s  node  sort CPU% ▼  00:16:48Z
+ tui - - · in 0 0 msg/s · out 0 · agents max - - (n2) · drop 0 err 0
+NAME                                            NODE     PID   CPU%    MEM   INT W
+▾ n1                                              n1           0.1%   4.0K
+  ▾ c                                             n1           0.4%    16K
+    └ dd if=/dev/zero                             n1      11   0.6%   8.0K
+  ▾ a                                             n1           0.2%   8.0K
+    ▾ b                                           n1           0.3%    12K
+      └ sh -c x                                   n1      10   0.5%   8.0K
+▾ n2                                              n2           0.1%   4.0K
+  ▾ c                                             n2           0.4%    16K
+    └ dd if=/dev/zero                             n2      11   0.6%   8.0K
+  ▾ a                                             n2           0.2%   8.0K
+    ▾ b                                           n2           0.3%    12K
+      └ sh -c x                                   n2      10   0.5%   8.0K
+nodes=2 stale=0 errors=0 dropped=0
+

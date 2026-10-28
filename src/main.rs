@@ -13,6 +13,8 @@ mod cgroup;
 mod model;
 /// The /proc source and the constants read from /proc.
 mod procfs;
+/// Record and replay: the recorder, the Arrow journal writer and reader, and TUI recording.
+mod record;
 /// Slurm attach: job resolution, the srun line, the srun child and its teardown.
 mod slurm;
 /// The metric-source plug-in surface and the fd cache.
@@ -58,8 +60,8 @@ struct Cli {
     /// Print N text snapshots instead of the TUI, then exit.
     #[arg(long, value_name = "N")]
     batch: Option<u32>,
-    /// Replay: start at this time.
-    #[arg(long, value_name = "TIME", requires = "replay")]
+    /// Replay: start at TIME: start, end, +DUR, -DUR or HH:MM[:SS] (UTC).
+    #[arg(long, value_name = "TIME", requires = "replay", allow_hyphen_values = true)]
     at: Option<String>,
     #[command(flatten)]
     srun: SlurmArgs,
@@ -100,20 +102,7 @@ struct SlurmArgs {
 #[derive(Subcommand, Debug)]
 enum Cmd {
     /// Record a job step: run CMD and write its cgroup and process metrics to an .arrows file.
-    Record {
-        /// Output path; %j job id, %s step id, %n host name, %% a percent sign.
-        #[arg(short, long, default_value = "unjam-%j.%s-%n.arrows")]
-        output: String,
-        /// Sampling interval.
-        #[arg(short, long, default_value = "5s", value_parser = parse_dur)]
-        interval: Duration,
-        /// Sample cgroups only.
-        #[arg(long)]
-        no_procs: bool,
-        /// The command to run.
-        #[arg(last = true, required = true, value_name = "CMD")]
-        cmd: Vec<String>,
-    },
+    Record(RecordArgs),
     /// Per-node sampler: control lines on stdin, event lines on stdout (started by srun).
     #[command(hide = true)]
     Agent {
@@ -127,6 +116,26 @@ enum Cmd {
         #[arg(long)]
         unlink_self: bool,
     },
+}
+
+/// `unjam record` flags (§3.5).
+#[derive(Args, Debug)]
+struct RecordArgs {
+    /// Output path; %j job id, %s step id, %n host name, %% a percent sign.
+    #[arg(short, long, default_value = "unjam-%j.%s-%n.arrows")]
+    output: String,
+    /// Sampling interval.
+    #[arg(short, long, default_value = "5s", value_parser = parse_dur)]
+    interval: Duration,
+    /// Sample cgroups only.
+    #[arg(long)]
+    no_procs: bool,
+    /// Cgroup to sample instead of the own step's tasks or the own cgroup.
+    #[arg(long)]
+    root: Option<PathBuf>,
+    /// The command to run.
+    #[arg(last = true, required = true, value_name = "CMD")]
+    cmd: Vec<String>,
 }
 
 /// `500ms`, `2s`, `1m` for clap, without a humantime dependency.
@@ -154,35 +163,36 @@ fn parse_size(s: &str) -> Result<u64, String> {
 
 /// The viewer: resolves theme and interval, then runs the chosen source.
 fn viewer(cli: Cli) -> Result<(), String> {
-    if !cli.replay.is_empty() {
-        return Err("--replay is not available in this build yet".into());
-    }
     let env = |k| std::env::var(k).ok();
     let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
     let theme = theme::pick(cli.theme.as_deref(), env("UNJAM_THEME").as_deref(), no_color)?;
     let default = Duration::from_secs(if cli.slurm.is_some() { 2 } else { 1 });
     let iv = cli.interval.unwrap_or(default).as_millis();
     let interval_ms = u32::try_from(iv).unwrap_or(u32::MAX).clamp(100, 60_000) / 100 * 100;
-    let (source, local) = ("unjam".into(), cli.slurm.is_none());
+    let (source, local) = ("unjam".into(), cli.slurm.is_none() && cli.replay.is_empty());
     let opts = tui::Opts { source, interval_ms, rules: cli.rules, theme, local };
     match &cli.slurm {
+        _ if !local && cli.slurm.is_none() => {
+            record::replay(&cli.replay, cli.at.as_deref(), opts, cli.batch)
+        }
         Some(job) => slurm::view(job, &cli.srun, opts, cli.batch),
         None => agent::local(opts, cli.root, cli.batch),
     }
 }
 
-/// Entry point: dispatches the command line; errors go to stderr with exit code 1.
+/// Entry point: dispatches the command line; errors go to stderr with exit code 1. `record`
+/// passes the app's exit code through.
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let res = match cli.cmd {
         Some(Cmd::Agent { root, keepalive, unlink_self }) => {
-            agent::main(root, keepalive, unlink_self)
+            agent::main(root, keepalive, unlink_self).map(|()| ExitCode::SUCCESS)
         }
-        Some(Cmd::Record { .. }) => Err("record is not available in this build yet".into()),
-        None => viewer(cli),
+        Some(Cmd::Record(a)) => record::run_record(&a),
+        None => viewer(cli).map(|()| ExitCode::SUCCESS),
     };
     match res {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(e) => {
             let _ = writeln!(std::io::stderr(), "unjam: {e}");
             ExitCode::FAILURE
@@ -286,9 +296,12 @@ mod tests {
     #[test]
     fn subcommands() {
         let cli = parse("record -i 1s -- srun ./a.out -n 4").unwrap();
-        let Some(Cmd::Record { output, interval, cmd, .. }) = cli.cmd else { panic!() };
-        assert_eq!((output.as_str(), interval), ("unjam-%j.%s-%n.arrows", Duration::from_secs(1)));
-        assert_eq!(cmd, ["srun", "./a.out", "-n", "4"]);
+        let Some(Cmd::Record(a)) = cli.cmd else { panic!() };
+        assert_eq!(
+            (a.output.as_str(), a.interval),
+            ("unjam-%j.%s-%n.arrows", Duration::from_secs(1))
+        );
+        assert_eq!(a.cmd, ["srun", "./a.out", "-n", "4"]);
         assert!(parse("record").is_err(), "a command is required");
         let cli = parse("agent --keepalive 5").unwrap();
         assert!(matches!(

@@ -11,6 +11,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant, SystemTime};
 use std::{fs, thread};
 
@@ -24,6 +25,7 @@ use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row as TRow, Table};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::model::{Control, Event, Kind, NA, Rule, TaskSet, What, effective, upsert};
+use crate::record::Reader;
 use crate::source::{Files, Slot, kv};
 use crate::state::{self, HIST, Key, Layout, NCOL, Row, State, View};
 use crate::theme::{THEMES, Theme};
@@ -53,8 +55,11 @@ const SORTS: [&str; NCOL + 2] = ["NAME", "CPU%", "MEM", "IO-R/s", "IO-W/s", "PID
 /// Key hints for the footer and the help pane.
 const HINTS: &str = "↑↓ move ←→ fold ␣ mark p what +/- rate 0 reset v layout s sort / filter \
                      t theme ? help q quit";
-/// Set by Ctrl-C in the input thread and by `q`: quits even while a draw blocks (D38).
-static QUIT: AtomicBool = AtomicBool::new(false);
+/// Replay key hints.
+const REPLAY: &str = "␣ play , . tick < > 60s g G start/end";
+/// Set by Ctrl-C in the input thread, by `q`, SIGTERM and SIGHUP: quits even while a draw
+/// blocks (D38).
+static QUIT: LazyLock<Arc<AtomicBool>> = LazyLock::new(Arc::default);
 /// Whether the filter is being edited, so the input thread leaves `q` to the filter.
 static EDIT: AtomicBool = AtomicBool::new(false);
 
@@ -107,6 +112,9 @@ pub struct App {
     pub now: u64,
     ticks: u64,
     vals: Vec<u64>,
+    /// Replay: the reader and whether it plays.
+    pub replay: Option<Reader>,
+    playing: bool,
 }
 
 impl App {
@@ -142,6 +150,8 @@ impl App {
             now,
             ticks,
             vals,
+            replay: None,
+            playing: false,
         }
     }
 
@@ -229,7 +239,40 @@ impl App {
             (m.host[0], m.host[1]) = (kb("MemTotal") - kb("MemAvailable"), kb("MemTotal"));
         }
         self.now = now;
+        if let Some(at) = self.replay.as_ref().filter(|_| self.playing).map(|r| r.at + 1) {
+            self.seek(|_| at);
+        }
+        self.now = self.replay.as_ref().map_or(now, Reader::now);
         self.st.derive();
+    }
+
+    /// Moves the replay cursor to the tick `to` picks.
+    fn seek(&mut self, to: impl FnOnce(&Reader) -> usize) {
+        let Some(r) = self.replay.as_mut() else { return };
+        let k = to(r);
+        self.playing &= k < r.times.len();
+        if let Err(e) = r.goto(&mut self.st, k) {
+            self.log(e);
+        }
+        self.now = self.replay.as_ref().map_or(self.now, Reader::now);
+        self.st.derive();
+    }
+
+    /// Replay keys (§9.3); false for any other key.
+    fn replay_key(&mut self, code: KeyCode) -> bool {
+        let jump = |r: &Reader, d: i64| r.find(r.now().saturating_add_signed(d));
+        match code {
+            _ if self.replay.is_none() => return false,
+            KeyCode::Char(' ') => self.playing = !self.playing,
+            KeyCode::Char(',') => self.seek(|r| r.at.saturating_sub(1)),
+            KeyCode::Char('.') => self.seek(|r| r.at + 1),
+            KeyCode::Char('<') => self.seek(|r| jump(r, -60_000)),
+            KeyCode::Char('>') => self.seek(|r| jump(r, 60_000)),
+            KeyCode::Char('g') => self.seek(|_| 0),
+            KeyCode::Char('G') => self.seek(|r| r.times.len()),
+            _ => return false,
+        }
+        true
     }
 
     /// Handles one message; true if the screen must be redrawn at once (keys, resize).
@@ -266,6 +309,7 @@ impl App {
             }
             (3, KeyCode::Esc) => return (self.overlay, self.view.filter) = (0, String::new()),
             (1..=3, c) if c != KeyCode::Char('q') => return self.overlay = 0,
+            (_, c) if self.replay_key(c) => return,
             _ => {}
         }
         let rows = state::rows(&self.st, &self.view, self.cursor.saturating_add(1));
@@ -416,14 +460,18 @@ pub fn view(
             }
             left *= u32::from(!app.ended);
         }
-        return Ok(());
+    } else {
+        let (ktx, krx) = mpsc::channel();
+        thread::spawn(move || input(&ktx, &keys));
+        for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGHUP] {
+            signal_hook::flag::register(sig, Arc::clone(&QUIT))?;
+        }
+        let mut term = ratatui::try_init()?;
+        let res = event_loop(app, [rx, &krx], &mut term);
+        ratatui::restore();
+        res?;
     }
-    let (ktx, krx) = mpsc::channel();
-    thread::spawn(move || input(&ktx, &keys));
-    let mut term = ratatui::try_init()?;
-    let res = event_loop(app, [rx, &krx], &mut term);
-    ratatui::restore();
-    res
+    Ok(())
 }
 
 /// The input thread (D38): blocks on terminal events; `q`, Ctrl-C (or a dead terminal) set the
@@ -453,7 +501,7 @@ fn event_loop(app: &mut App, rx: [&Receiver<Msg>; 2], t: &mut DefaultTerminal) -
     let (frame, mut drawn, mut dirty) = (Duration::from_millis(250), None::<Instant>, true);
     while !QUIT.load(Relaxed) {
         if dirty && drawn.is_none_or(|d| d.elapsed() >= frame) {
-            app.now = now_ms();
+            app.now = app.replay.as_ref().map_or_else(now_ms, Reader::now);
             t.draw(|f| draw(f, app))?;
             (drawn, dirty) = (Some(Instant::now()), false);
         }
@@ -525,7 +573,11 @@ fn title(app: &App) -> [String; 2] {
         if app.view.desc { '▼' } else { '▲' },
         format!("{:02}:{:02}:{:02}Z", s / 3600, s / 60 % 60, s % 60),
     );
-    let l0 = format!(" {src}  {procs} procs  {iv}  {layout}  sort {sort} {arrow}  {clock}");
+    let mode = match &app.replay {
+        Some(_) => ["  [⏸]", "  [▶]"][usize::from(app.playing)],
+        None => "",
+    };
+    let l0 = format!(" {src}{mode}  {procs} procs  {iv}  {layout}  sort {sort} {arrow}  {clock}");
     let [cpu, rss, inb, msg, out] = [
         ("%", m.tui[0]),
         ("B", m.tui[1]),
@@ -561,7 +613,7 @@ fn texts(app: &App, r: &Row) -> [String; 5 + NCOL] {
     out[1] = r.name.to_string();
     out[2] = if own { app.st.nodes[r.node as usize].host.clone() } else { String::new() };
     out[3] = if let Key::Proc(_, p) = r.key { p.to_string() } else { String::new() };
-    if let Some((tasks, pat)) = target(&app.st, r) {
+    if let Some((tasks, pat)) = target(&app.st, r).filter(|_| !app.view.rules.is_empty()) {
         let (iv, what) = level(&app.view.rules, &tasks, &pat);
         out[4] = format!("{:>5} {}", interval(iv, what), ["o", "c", "p"][what as usize]);
     }
@@ -613,7 +665,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     table(f, app, t, &rows[app.scroll.min(rows.len())..rows.len().min(app.scroll + height)], body);
     let hint = app.log.front().map_or(String::new(), |l| format!(" │ {l}"));
     let filter = app.overlay == 3 || !app.view.filter.is_empty();
-    let text = if filter { format!(" /{}▏", app.view.filter) } else { format!(" {HINTS}{hint}") };
+    let keys = if app.replay.is_some() { REPLAY } else { HINTS };
+    let text = if filter { format!(" /{}▏", app.view.filter) } else { format!(" {keys}{hint}") };
     f.render_widget(Paragraph::new(text).style(t.dim.bg(t.header.bg.unwrap_or_default())), foot);
     let (w, h) = (area.width, area.height);
     let pop = Rect { x: w / 10, y: h / 10, width: w * 4 / 5, height: h * 4 / 5 };
