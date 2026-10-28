@@ -772,7 +772,7 @@ signal-hook = { version = "0.3", default-features = false }
 | mimalloc, itoa, memchr | No measured need |
 | procfs, sysinfo | Allocate per read; no fd caching |
 
-- **Measured tree.** A probe of exactly this dependency set (ratatui + clap + arrow-ipc with LZ4 + signal-hook) had 91 unique crates, 74 of them from ratatui, and a **2.76 MB** stripped binary. Gates are re-baselined from measurement at each phase (§13.3): ≤ 3.25 MiB and ≤ 96 crates after record and replay (**UNVERIFIED** until measured with our code and with the `--target` restriction in `size.sh`).
+- **Measured tree.** A probe of exactly this dependency set (ratatui + clap + arrow-ipc with LZ4 + signal-hook) had 91 unique crates, 74 of them from ratatui, and a **2.76 MB** stripped binary. Gates are re-baselined from measurement at each phase (§13.3): ≤ 3.25 MiB and ≤ 96 crates after record and replay. Measured with our code: 3,466,568 bytes and 90 crates (§13.3).
 
 ---
 
@@ -1045,7 +1045,7 @@ release = { run = "cargo release" }
 | Phase 3 | ≤ 2 MiB | ≤ 80 |
 | Phase 6 | ≤ 3.25 MiB | ≤ 96 |
 
-All values are **UNVERIFIED** until measured.
+Measured after record and replay: 3,466,568 bytes (3.31 MiB, 2 % over the target) and 90 crates. The gate in `docs/budget.txt` is that measurement + 5 % (3,639,896 bytes, 95 crates).
 
 ### 13.4 `deny.toml`
 

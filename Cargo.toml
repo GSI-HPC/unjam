@@ -38,6 +38,16 @@ clap = { version = "4.6", default-features = false, features = ["std", "derive",
 # NOTE: ratatui's crossterm backend pulls ratatui-crossterm with default features, whose defaults are
 # crossterm_0_29 + underline-color (→ ratatui-core/underline-color), so underline-color IS enabled; counted in budgets (D27).
 ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_29"] }
+# Record + replay: builders/RecordBatch, Schema+field metadata, IPC stream (lz4 = pure-Rust lz4_flex, not C zstd).
+arrow-array = { version = "60", default-features = false }
+arrow-schema = { version = "60", default-features = false }
+arrow-ipc = { version = "60", default-features = false, features = ["lz4"] }
+# NOT imported. Feature unification: arrow-ipc enables lz4_flex {std, frame} (unsafe codec);
+# adding safe-encode/safe-decode switches lz4_flex to its safe implementation.
+lz4_flex = { version = "0.14", default-features = false, features = ["safe-encode", "safe-decode"] }
+# SIGTERM/SIGINT/SIGHUP → flag (recorder finalizes, TUI tears down). Same 0.3 that crossterm 0.29 requires (^0.3.17)
+# → 0 new crates. Held below 0.4 by a dependabot ignore until crossterm moves (docs/deps.md).
+signal-hook = { version = "0.3", default-features = false }
 
 [lints.rust]
 unsafe_code = "deny"

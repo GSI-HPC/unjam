@@ -13,16 +13,11 @@ The admission rule is in `.claude/skills/lean-deps/SKILL.md`; size and crate lim
 |---|---|---|---|---|
 | `clap` | 4.6 | `std`, `derive`, `help`, `usage`, `error-context` (no defaults) | The CLI surface; repo convention "clap derive only". Without `color`, `suggestions` and `wrap_help` there is no anstream, strsim or terminal_size | Hand-written parser (more code, worse help); `argh`/`lexopt` (break the repo convention) |
 | `ratatui` | 0.30 | `crossterm_0_29` only (no defaults) | Terminal UI: layout, table and paragraph widgets, double-buffered diffing, `TestBackend` for draw goldens; crossterm through the `ratatui::crossterm` re-export, so no direct crossterm entry | Raw crossterm drawing (re-implements diffing and layout); `cursive` (callback model, heavier); `termion` backend (Unix-only, less maintained) |
-
-## Planned
-
-These arrive with the code that uses them (design §10.3). Each gets a row above when added.
-
-| Crate | Version | Purpose |
-|---|---|---|
-| `arrow-array`, `arrow-schema`, `arrow-ipc` | 60, `arrow-ipc` feature `lz4` | Record and replay (Arrow IPC stream journal) |
-| `lz4_flex` | 0.14, `safe-encode`, `safe-decode` | NOT imported: forces the safe LZ4 codec through feature unification |
-| `signal-hook` | 0.3 | SIGTERM/SIGINT/SIGHUP to a flag |
+| `arrow-array` | 60 | none (no defaults) | Record and replay: typed column builders for the journal and typed views of decoded batches | `parquet` (row groups need a footer, so a killed recorder loses everything; much larger); a hand-written columnar format (no pyarrow/polars/DuckDB readers) |
+| `arrow-schema` | 60 | none (no defaults) | Schema and field metadata (`unjam.unit`, `unjam.kind`, `unjam.source`) that analysis tools read | Part of the same Arrow choice |
+| `arrow-ipc` | 60 | `lz4` (no defaults) | The IPC stream format: append-only, readable up to the last complete batch after SIGKILL; LZ4_FRAME compression keeps journals small | IPC file format (footer written last, unreadable after a crash); `zstd` feature (C code, larger binary) |
+| `lz4_flex` | 0.14 | `safe-encode`, `safe-decode` (no defaults) | NOT imported: arrow-ipc's `lz4` pulls it in; these features force its safe codec through feature unification | `lz4` crate (C bindings) |
+| `signal-hook` | 0.3 | none (no defaults) | SIGTERM/SIGINT/SIGHUP set a flag: the recorder finishes its journal, the TUI tears down; already in the tree through crossterm | Raw `sigaction` (unsafe in our code); `ctrlc` (SIGINT/SIGTERM only, extra crate) |
 
 ## Pins and ignores
 

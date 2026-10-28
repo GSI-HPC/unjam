@@ -25,6 +25,7 @@ total      2900
 
 # Release binary (bytes) and resolved normal dependencies (crates, root excluded) on
 # x86_64-unknown-linux-gnu. Re-baselined from measurement (+5 %) by the change that needs it.
-# Measured with clap and ratatui (Slurm attach): 1,411,784 bytes, 66 crates.
-binary_bytes 1482373
-crates         70
+# Measured with arrow-ipc/array/schema and signal-hook (record and replay): 3,466,568 bytes,
+# 90 crates.
+binary_bytes 3639896
+crates         95
