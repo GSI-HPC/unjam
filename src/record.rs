@@ -405,8 +405,8 @@ impl Track {
     }
 }
 
-/// Multi-file replay: one track per node journal and one shared cursor over the union of
-/// their tick times (§8.4).
+/// Multi-file replay: one track per node journal and one shared cursor over their sampling
+/// rounds (§8.4).
 pub struct Reader {
     tracks: Vec<Track>,
     pub times: Vec<u64>,
@@ -414,17 +414,22 @@ pub struct Reader {
 }
 
 impl Reader {
-    /// Opens and indexes every journal; the warnings name truncated ones.
+    /// Opens and indexes every journal; the warnings name truncated ones. Nodes stamp a round
+    /// a few ms apart, so ticks closer than half the shortest tick gap of any journal form one
+    /// round, which the cursor visits at its latest tick.
     pub fn open(paths: &[PathBuf]) -> Result<(Self, Vec<String>), String> {
-        let (mut tracks, mut times, mut warns) = (vec![], vec![], vec![]);
+        let (mut tracks, mut times, mut warns, mut gap) = (vec![], vec![], vec![], u64::MAX);
         for p in paths {
             let (t, ts, cut) = Track::open(p)?;
             warns.extend(cut.map(|n| format!("{}: truncated at byte {n}", p.display())));
+            gap = ts.windows(2).map(|w| w[0].abs_diff(w[1])).fold(gap, u64::min);
             tracks.push(t);
             times.extend(ts);
         }
-        times.sort_unstable();
-        times.dedup();
+        // Newest first, so that each round keeps its latest tick.
+        times.sort_unstable_by(|a, b| b.cmp(a));
+        times.dedup_by(|t, round| *round - *t < gap.div_ceil(2));
+        times.reverse();
         let none = || "no complete batch in the recordings".to_owned();
         (!times.is_empty())
             .then_some((Self { tracks, times, at: usize::MAX }, warns))
@@ -740,10 +745,11 @@ mod tests {
         feed(st, node, &head.map(str::to_owned));
     }
 
-    /// Tick `t` (seconds) of node `node`: a cgroup and a `dd` that live for ticks 5 to 11, and
-    /// pid 11 reused by `dd2` from tick 15. The future-source column is NA from tick 20.
-    fn tick(st: &mut State, node: u32, t: u64) {
-        let ms = 1_000_000 + t * 1000;
+    /// Tick `t` (seconds, stamped `skew` ms late) of node `node`: a cgroup and a `dd` that live
+    /// for ticks 5 to 11, and pid 11 reused by `dd2` from tick 15. The future-source column is
+    /// NA from tick 20.
+    fn tick(st: &mut State, node: u32, t: u64, skew: u64) {
+        let ms = 1_000_000 + t * 1000 + skew;
         let mut l = vec![format!("T {ms} 0 0 0 -")];
         match t {
             5 => l.extend(["G 4 1 c".into(), "P 11 200 4 10 dd dd~if=/dev/zero".into()]),
@@ -763,14 +769,18 @@ mod tests {
         feed(st, node, &l);
     }
 
-    /// Records `n` ticks of node `node` (host `host`) to `dir/<host>.arrows`; returns the
-    /// source store.
+    /// Records `n` ticks of host `host` to `dir/<host>.arrows`; returns the source store.
     fn journal(dir: &Path, host: &str, n: u64) -> (PathBuf, State) {
+        skewed(dir, host, n, 0)
+    }
+
+    /// `journal` with every tick stamped `skew` ms late, as a node's agent wakes up late.
+    fn skewed(dir: &Path, host: &str, n: u64, skew: u64) -> (PathBuf, State) {
         let (mut st, path) = (State::new(), dir.join(format!("{host}.arrows")));
         hello(&mut st, 0, host);
         let mut w = None;
         for t in 1..=n {
-            tick(&mut st, 0, t);
+            tick(&mut st, 0, t, skew);
             let meta = [("source", "test".into())];
             let w = w.get_or_insert_with(|| Writer::create(&path, &st, 0, &meta).unwrap());
             w.node(&st, 0).unwrap();
@@ -836,7 +846,7 @@ mod tests {
         let mut st = State::new();
         for (i, host) in (0..).zip(["../../x", "/abs"]) {
             hello(&mut st, i, host);
-            tick(&mut st, i, 1);
+            tick(&mut st, i, 1, 0);
         }
         let rec = Rec::new(dir.0.join("rec"), "42", 1000).unwrap();
         assert!(rec.finish(&st).is_empty());
@@ -963,6 +973,22 @@ mod tests {
             }
         }
         assert_eq!(a.nodes[1].prev[0], 1_033_000, "n2 shows its last tick");
+    }
+
+    #[test]
+    fn nodes_stamped_ms_apart_share_one_cursor_step() {
+        let dir = tmp("rounds");
+        let skews = [("n1", 0), ("n2", 3), ("n3", 7)].into_iter();
+        let (paths, _): (Vec<_>, Vec<_>) = skews.map(|(h, s)| skewed(&dir.0, h, 10, s)).unzip();
+        let (mut r, _) = Reader::open(&paths).unwrap();
+        assert_eq!(r.times, (1..=10).map(|t| 1_000_007 + t * 1000).collect::<Vec<_>>());
+        let mut st = State::new();
+        for k in 0..10 {
+            r.goto(&mut st, k).unwrap();
+            let shown: Vec<u64> = st.nodes.iter().map(|n| n.prev[0]).collect();
+            let want = [0, 3, 7].map(|s| 1_001_000 + k as u64 * 1000 + s);
+            assert_eq!(shown, want, "every node advances one tick per step");
+        }
     }
 
     #[test]
