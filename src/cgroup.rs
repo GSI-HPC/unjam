@@ -139,15 +139,11 @@ fn descend(dir: &Path, ino: u64, exclude: Option<&Path>, found: &mut Vec<(PathBu
 /// The path of the unified (`0::`) line of `/proc/self/cgroup`. Hybrid hosts list v1 lines
 /// too; whether `/sys/fs/cgroup` really is cgroup2 is checked by `v2_check`.
 fn v2_path(self_cgroup: &str) -> Result<&str, String> {
-    self_cgroup.lines().find_map(|l| l.strip_prefix("0::")).ok_or_else(v1)
+    self_cgroup.lines().find_map(|l| l.strip_prefix("0::")).ok_or_else(|| V1.into())
 }
 
 /// The refusal text for v1 and hybrid hierarchies.
-fn v1() -> String {
-    "cgroup v2 only: no cgroup2 hierarchy at /sys/fs/cgroup (use --root to point at a cgroup2 \
-     mount)"
-        .to_owned()
-}
+const V1: &str = "cgroup v2 only: no cgroup2 hierarchy at /sys/fs/cgroup (use --root to point at a cgroup2 mount)";
 
 /// Startup check (§5.1): `root` must be a cgroup2 directory and, unless it was given explicitly,
 /// this process must live in a pure v2 hierarchy. Returns the own cgroup directory (below
@@ -165,7 +161,7 @@ pub fn v2_check(
     };
     if !root.join("cgroup.controllers").is_file() {
         let e = format!("{}: not a cgroup v2 directory (no cgroup.controllers)", root.display());
-        return Err(if explicit { e } else { v1() });
+        return Err(if explicit { e } else { V1.into() });
     }
     Ok(if own.join("cpu.stat").is_file() { own } else { root.to_path_buf() })
 }
@@ -194,10 +190,8 @@ fn step_paths(self_cgroup: &str) -> Result<(&str, &str), String> {
 pub fn job_root(mount: &Path, self_cgroup: &str) -> Result<(PathBuf, PathBuf), String> {
     let (job, step) = step_paths(self_cgroup)?;
     let own = mount.join(step);
-    if !own.is_dir() {
-        return Err(format!("{}: own step not found (cgroup namespace)", own.display()));
-    }
-    Ok((mount.join(job), own))
+    let err = format!("{}: own step not found (cgroup namespace)", own.display());
+    own.is_dir().then(|| (mount.join(job), own)).ok_or(err)
 }
 
 /// Record mode: `…/step_<S>/user`, every task of the own step on this node (§3.5).

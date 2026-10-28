@@ -140,10 +140,8 @@ impl Core {
     /// Announces a process new to cgroup `cg`, or again after an exec. `x` comes first when the
     /// pid was known with another start (reuse) or cgroup (move), or has vanished.
     fn new_proc(&mut self, pid: u32, cg: u64, emit: Emit) {
-        let old = self.procs.remove(&pid).map(|mut p| {
-            self.files.release(&mut p.slots);
-            (p.start, p.cg)
-        });
+        let old = self.procs.get(&pid).map(|p| (p.start, p.cg));
+        self.drop_proc(pid, &mut |_| ()); // forgotten silently: whether `x` is due is known below
         let (root, files) = (&self.env.proc_root, &mut self.files);
         let mut slots: Box<[Slot]> = (0..self.width[1]).map(|_| Slot::Empty).collect();
         let id = slots.first_mut().and_then(|s| procfs::ident(root, files, s, pid));
