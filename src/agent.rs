@@ -508,14 +508,14 @@ pub fn run(ctl: &Receiver<String>, out: &mut Out, s: &mut Sampler, keep: u64) ->
     }
 }
 
-/// `unjam agent`: one sampler on this node, stdin as control, stdout as output. Inside a Slurm
-/// step the root is the job and the own step is excluded (§3.3, §5.5); otherwise the root is
-/// `--root` or the whole cgroup2 mount.
-pub fn main(root: Option<PathBuf>, keepalive: u64) -> Result<(), String> {
+/// The sampled root, environment and identity. Inside a Slurm step (`job`) the root is the job
+/// and the own step is excluded (§3.3, §5.5); otherwise it is `--root` or the whole cgroup2
+/// mount, sampled as node 0 of 1.
+pub fn setup(root: Option<PathBuf>, job: bool, cap: usize) -> Result<(Env, Opts), String> {
     let mount = Path::new("/sys/fs/cgroup");
     let me =
         fs::read_to_string("/proc/self/cgroup").map_err(|e| format!("/proc/self/cgroup: {e}"))?;
-    let var = |k: &str| std::env::var(k).ok();
+    let var = |k: &str| std::env::var(k).ok().filter(|_| job);
     let explicit = root.is_some();
     let (root, exclude) = match (root, var("SLURM_STEP_ID")) {
         (Some(r), _) => (r, None),
@@ -527,10 +527,16 @@ pub fn main(root: Option<PathBuf>, keepalive: u64) -> Result<(), String> {
     let step = var("SLURM_JOB_ID").zip(var("SLURM_STEP_ID")).map(|(j, s)| format!("{j}.{s}"));
     let step = step.unwrap_or_else(|| "-".into());
     let (node, ntasks) = (num("SLURM_PROCID", 0), num("SLURM_NTASKS", 1));
+    Ok((env, Opts { node, ntasks, step, root, exclude, cap }))
+}
+
+/// `unjam agent`: one sampler on this node, stdin as control, stdout as output.
+pub fn main(root: Option<PathBuf>, keepalive: u64) -> Result<(), String> {
+    let (env, opts) = setup(root, true, 1024)?;
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || io::stdin().lines().map_while(Result::ok).try_for_each(|l| tx.send(l)));
-    let mut out = Out::spawn(io::stdout(), node, ntasks);
-    let mut s = Sampler::new(env, Opts { node, ntasks, step, root, exclude, cap: 1024 });
+    let mut out = Out::spawn(io::stdout(), opts.node, opts.ntasks);
+    let mut s = Sampler::new(env, opts);
     match run(&rx, &mut out, &mut s, keepalive.saturating_mul(1000)) {
         Err(e) if e.kind() != io::ErrorKind::BrokenPipe => Err(format!("agent: {e}")),
         _ => Ok(()),
