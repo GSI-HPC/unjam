@@ -19,7 +19,7 @@ wire.rs     200
 slurm.rs    175
 record.rs   560  # journal writer/reader, replay tracks with seek, run_record, TUI recording (D41)
 state.rs    457  # rows of three layouts with folded ranges, PIDS fallback, history ring (D39, D41)
-tui.rs      660  # replay cursor and keys, 'r' recording, signal teardown
+tui.rs      670  # replay cursor and keys, 'r' recording, signal teardown; keys follow the cursor's entity
 theme.rs     60
 total      3460  # record and replay: journal writer/reader, replay and the recorder (§10.2)
 

@@ -339,7 +339,8 @@ impl App {
             (_, c) if self.replay_key(c) => return,
             _ => {}
         }
-        let rows = state::rows(&self.st, &self.view, self.cursor.saturating_add(1));
+        let (at, rows) = follow(&self.st, &self.view, self.sel, self.cursor.saturating_add(1));
+        self.cursor = at.unwrap_or(self.cursor);
         let row = rows.get(self.cursor).map(|r| (r.key, r.open, target(&self.st, r)));
         drop(rows);
         match (k.code, row) {
@@ -444,6 +445,16 @@ fn target(st: &State, r: &Row) -> Option<Target> {
         Key::Cg(i, _) => Some((TaskSet::Ranges(vec![(i, i)]), path)),
         Key::Proc(..) | Key::Folded(_) => None,
     }
+}
+
+/// Rows up to `n`, or all when the cursor's entity `k` lies beyond them after a re-sort
+/// (D39), and `k`'s index: draw and keys both act on that entity, not on the index.
+fn follow<'a>(st: &'a State, v: &View, k: Option<Key>, n: usize) -> (Option<usize>, Vec<Row<'a>>) {
+    let mut rows = state::rows(st, v, n);
+    if k.is_some_and(|k| rows.len() == n && rows.iter().all(|r| r.key != k)) {
+        rows = state::rows(st, v, usize::MAX);
+    }
+    (k.and_then(|k| rows.iter().position(|r| r.key == k)), rows)
 }
 
 /// The effective rule of a target as the agents resolve it (node 0 for `*`).
@@ -674,12 +685,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let height = usize::from(body.height.saturating_sub(1));
     app.view.window = height.saturating_sub(4).max(4);
     let limit = app.cursor.saturating_add(1).max(app.scroll + height);
-    let mut rows = state::rows(&app.st, &app.view, limit);
-    if app.sel.is_some_and(|k| rows.len() == limit && rows.iter().all(|r| r.key != k)) {
-        rows = state::rows(&app.st, &app.view, usize::MAX); // follow it past the window (D39)
-    }
-    app.cursor = app.sel.and_then(|k| rows.iter().position(|r| r.key == k)).unwrap_or(app.cursor);
-    app.cursor = app.cursor.min(rows.len().saturating_sub(1));
+    let (at, rows) = follow(&app.st, &app.view, app.sel, limit);
+    app.cursor = at.unwrap_or(app.cursor).min(rows.len().saturating_sub(1));
     app.sel = rows.get(app.cursor).map(|r| r.key);
     app.scroll = app.scroll.min(app.cursor).max((app.cursor + 1).saturating_sub(height));
     table(f, app, t, &rows[app.scroll.min(rows.len())..rows.len().min(app.scroll + height)], body);
@@ -1124,6 +1131,27 @@ mod tests {
         let sent: Vec<String> = rx.try_iter().collect();
         assert_eq!(sent[..2], ["C\t*\n", "B\t*\t524288\n"], "the job's node count and --budget");
         assert!(app.marks.is_empty() && app.view.rules.len() == 1);
+    }
+
+    #[test]
+    fn keys_act_on_the_highlighted_row_after_a_resort() {
+        let (mut app, rx) = app(false, "mono");
+        host(&mut app, 0, "n1", 1);
+        app.view.layout = Layout::Node;
+        let name = |app: &App| state::rows(&app.st, &app.view, 9)[app.cursor].name.to_string();
+        app.cursor = state::rows(&app.st, &app.view, 9)
+            .iter()
+            .position(|r| r.name == "system.slice")
+            .unwrap();
+        frame(&mut app, 100, 14);
+        let up =
+            [format!("T {} 0 0 0 -", NOON + 1000), "g 2 0 4590000".into(), "g 3 0 2430000".into()];
+        feed(&mut app, 0, &up);
+        app.st.derive();
+        assert_ne!(name(&app), "system.slice", "user.slice moved onto the cursor index");
+        app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), ["R\t0\tsystem.slice\t1000\tc\n"]);
+        assert_eq!(name(&app), "system.slice");
     }
 
     #[test]
