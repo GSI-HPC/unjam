@@ -389,7 +389,8 @@ pub struct Out {
     tokens: u64,
     refilled: u64,
     dropped: u32,
-    bytes: u64,
+    /// Bytes handed to the writer so far, reported in `T`.
+    sent: u64,
 }
 
 impl Out {
@@ -408,21 +409,8 @@ impl Out {
             }
         });
         let (spare, pending, vals) = ((0..=QUEUE).map(|_| Vec::new()).collect(), vec![], vec![]);
-        let (rate, tokens, refilled, dropped, bytes) = (DEFAULT_RATE, 2 * DEFAULT_RATE, 0, 0, 0);
-        Self {
-            node,
-            ntasks,
-            tx,
-            back,
-            spare,
-            pending,
-            vals,
-            rate,
-            tokens,
-            refilled,
-            dropped,
-            bytes,
-        }
+        let (rate, tokens, refilled, dropped, sent) = (DEFAULT_RATE, 2 * DEFAULT_RATE, 0, 0, 0);
+        Self { node, ntasks, tx, back, spare, pending, vals, rate, tokens, refilled, dropped, sent }
     }
 
     /// Encodes an event into the tick's values or into the never-dropped structure.
@@ -434,7 +422,7 @@ impl Out {
     /// plus the values if the budget allows, without blocking. `Err` once the writer is gone.
     pub fn send(&mut self, now: u64, interval: u32, me: Option<(u64, u64)>) -> io::Result<()> {
         if let Some((self_cpu_us, self_rss)) = me {
-            let (out_bytes, dropped) = (self.bytes, self.dropped);
+            let (out_bytes, dropped) = (self.sent, self.dropped);
             let t = Event::Tick { ts_ms: now, self_cpu_us, out_bytes, dropped, self_rss };
             wire::write(&mut self.pending, self.node, &t);
         }
@@ -459,7 +447,7 @@ impl Out {
         match self.tx.try_send((buf, delay)) {
             Ok(()) => {
                 self.pending.clear();
-                self.bytes += len;
+                self.sent += len;
                 self.tokens = self.tokens.saturating_sub(len);
             }
             Err(TrySendError::Full((b, _))) => {
@@ -898,8 +886,8 @@ mod tests {
             out.send(t * 100, 100, None).unwrap();
             thread::sleep(Duration::from_millis(1));
         }
-        assert!(out.bytes <= 2000 * 10 + 1000, "{} bytes in 10 s at 2000 B/s", out.bytes);
-        assert!(out.bytes >= 2000 * 4, "{} bytes", out.bytes);
+        assert!(out.sent <= 2000 * 10 + 1000, "{} bytes in 10 s at 2000 B/s", out.sent);
+        assert!(out.sent >= 2000 * 4, "{} bytes", out.sent);
         assert!(out.dropped > 50);
         assert_eq!(stagger(3, 4, 1000), 3 * 250 / 4);
         assert_eq!(stagger(999, 1000, 200), 999 * 100 / 1000);
