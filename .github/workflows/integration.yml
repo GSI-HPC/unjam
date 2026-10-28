@@ -38,7 +38,7 @@ jobs:
       EXTRA: ${{ matrix.extra }}
       JOBIDPATHS: ${{ matrix.jobidpaths }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: jdx/mise-action@v5
         with:
           # uv for IT 6/7 (pyarrow); everything else the tests need is on the runner.
