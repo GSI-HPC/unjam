@@ -21,11 +21,13 @@ use crate::tui::{self, App, Msg, Opts};
 /// Idle time after which the control thread sends `K`, well inside the agents' keepalive.
 const KEEPALIVE: Duration = Duration::from_secs(30);
 
-/// The squeue/scontrol result the srun line needs: the numeric job id and the agent count.
+/// The squeue/scontrol result the srun line needs: the numeric job id, the agent count and the
+/// owner's uid.
 #[derive(Debug)]
 pub struct Job {
     pub id: String,
     pub nodes: u32,
+    pub owner: u32,
 }
 
 /// Runs a Slurm command and returns its stdout; its stderr goes to ours.
@@ -38,16 +40,16 @@ fn run(cmd: &str, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// A `squeue` row: job id, node count, state and name.
-type Row = (String, u32, String, String);
+/// A `squeue` row: job id, node count, state, owner uid and name.
+type Row = (String, u32, String, u32, String);
 
 /// `squeue` rows; array tasks resolve to the real id.
 fn squeue(args: &[&str]) -> Result<Vec<Row>, String> {
-    let text = run("squeue", &[&["--noheader", "--format=%A %D %T %j"], args].concat())?;
+    let text = run("squeue", &[&["--noheader", "--format=%A %D %T %U %j"], args].concat())?;
     let row = |l: &str| {
-        let mut f = l.splitn(4, ' ');
+        let mut f = l.splitn(5, ' ');
         let (id, n, state) = (f.next()?.into(), f.next()?.parse().ok()?, f.next()?.into());
-        Some((id, n, state, f.next().unwrap_or("").into()))
+        Some((id, n, state, f.next()?.parse().ok()?, f.next().unwrap_or("").into()))
     };
     Ok(text.lines().filter_map(row).collect())
 }
@@ -65,7 +67,7 @@ fn running(mut rows: Vec<Row>, want: &str) -> Result<Row, Vec<Row>> {
 fn pick(rows: &[Row], what: &str) -> ! {
     let mut e = io::stderr().lock();
     let _ = writeln!(e, "unjam: {} running jobs {what}; pick one with --slurm=JOBID", rows.len());
-    for (id, n, _, name) in rows {
+    for (id, n, .., name) in rows {
         let _ = writeln!(e, "  {id:>10}  {n:>5} nodes  {name}");
     }
     std::process::exit(2)
@@ -88,13 +90,13 @@ pub fn job(arg: &str, nodelist: Option<&str>) -> Result<Job, String> {
     let want = resolve(arg)?;
     let rows = squeue(&[&format!("--jobs={want}")])?;
     let state = rows.first().map(|r| r.2.clone()).ok_or_else(|| format!("job {want} not found"))?;
-    let (id, nodes, ..) = running(rows, &want).or_else(|r| match r.len() {
+    let (id, nodes, _, owner, _) = running(rows, &want).or_else(|r| match r.len() {
         0 => Err(format!("job {want} is {state}, not RUNNING")),
         _ => pick(&r, &format!("in array {want}")),
     })?;
-    let Some(list) = nodelist else { return Ok(Job { id, nodes }) };
+    let Some(list) = nodelist else { return Ok(Job { id, nodes, owner }) };
     let n = run("scontrol", &["show", "hostnames", list])?.lines().count();
-    Ok(Job { id, nodes: u32::try_from(n).unwrap_or(u32::MAX) })
+    Ok(Job { id, nodes: u32::try_from(n).unwrap_or(u32::MAX), owner })
 }
 
 /// The srun argv, `srun` first (§3.2). With `--bcast` srun copies the agent to
@@ -206,7 +208,12 @@ pub fn view(arg: &str, a: &SlurmArgs, opts: Opts, batch: Option<u32>) -> Result<
     // srun opens the copy with O_TRUNC, not O_EXCL: a name other users cannot guess keeps them
     // from planting the file. RandomState's keys come from the OS random source.
     let nonce = RandomState::new().hash_one(job.id.as_str());
-    let argv = srun_args(&job, a, exe, fs::metadata("/proc/self").map_or(0, |m| m.uid()), nonce);
+    let uid = fs::metadata("/proc/self").map_or(0, |m| m.uid());
+    // A job-private /tmp (job_container/tmpfs) belongs to the job's owner, who could swap the copy.
+    if a.bcast.is_some() && job.owner != uid {
+        return Err(format!("--bcast: job owner {} could swap the copy; use --agent", job.owner));
+    }
+    let argv = srun_args(&job, a, exe, uid, nonce);
     if a.print_srun {
         let line: Vec<_> = argv.iter().map(|s| s.to_string_lossy()).collect();
         return writeln!(io::stdout(), "{}", line.join(" ")).map_err(|e| e.to_string());
@@ -244,7 +251,7 @@ mod tests {
     fn argv(flags: &str, nodes: u32) -> String {
         let cli = Cli::try_parse_from(["unjam", "--slurm=42"].into_iter().chain(flags.split(' ')))
             .unwrap();
-        let job = Job { id: "42".into(), nodes };
+        let job = Job { id: "42".into(), nodes, owner: 1000 };
         let v = srun_args(&job, &cli.srun, "/opt/unjam".into(), 1000, 0xbc);
         v.iter().map(|s| s.to_string_lossy()).collect::<Vec<_>>().join(" ")
     }
@@ -277,7 +284,7 @@ mod tests {
 
     /// A `squeue` row for the tests.
     fn row(id: &str, state: &str) -> Row {
-        (id.into(), 2, state.into(), "job".into())
+        (id.into(), 2, state.into(), 1000, "job".into())
     }
 
     #[test]
