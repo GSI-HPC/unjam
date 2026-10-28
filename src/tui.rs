@@ -29,12 +29,14 @@ use crate::state::{self, HIST, Key, Layout, NCOL, Row, State, View};
 use crate::theme::{THEMES, Theme};
 use crate::{procfs, wire};
 
-/// What the main thread blocks on (D38): terminal events, data and the 1 Hz tick.
+/// What the main thread blocks on (D38): terminal events, data, the end of srun's output and
+/// the 1 Hz tick.
 pub enum Msg {
     Key(KeyEvent),
     Resize,
     Lines(Vec<u8>),
     Stderr(String),
+    End,
     Tick,
 }
 
@@ -95,7 +97,12 @@ pub struct App {
     marks: Vec<(Key, TaskSet, String)>,
     /// 0: table only, 1: detail popup, 2: help and log, 3: editing the filter.
     overlay: u8,
-    log: VecDeque<String>,
+    pub log: VecDeque<String>,
+    /// Nodes the job has (from `start`) and whether srun ended (job over, every agent gone).
+    expect: u32,
+    ended: bool,
+    /// `--budget`: the total agent output in bytes per second, split over `expect` agents.
+    pub budget: Option<u64>,
     mon: Mon,
     pub now: u64,
     ticks: u64,
@@ -128,6 +135,9 @@ impl App {
             marks,
             overlay,
             log,
+            expect: 1,
+            ended: false,
+            budget: None,
             mon,
             now,
             ticks,
@@ -139,7 +149,8 @@ impl App {
     pub fn start(&mut self, nodes: u32) {
         let (iv, rules) = (self.opts.interval_ms, self.opts.rules.clone());
         let rules = if rules.is_empty() { default_rules(nodes, iv) } else { rules };
-        let budget = (4_194_304 / u64::from(nodes.max(1))).max(if nodes > 16 { 4096 } else { 0 });
+        self.expect = nodes.max(1);
+        let budget = (self.budget.unwrap_or(4_194_304) / u64::from(self.expect)).max(4096);
         self.send(&Control::Budget(TaskSet::All, budget));
         for r in &rules {
             self.send(&Control::Rule(r.clone()));
@@ -223,11 +234,16 @@ impl App {
 
     /// Handles one message; true if the screen must be redrawn at once (keys, resize).
     fn handle(&mut self, m: Msg) -> bool {
-        let now = matches!(m, Msg::Key(_) | Msg::Resize);
+        let now = matches!(m, Msg::Key(_) | Msg::Resize | Msg::End);
         match m {
             Msg::Key(k) => self.on_key(k),
             Msg::Lines(b) => self.ingest(&b),
             Msg::Stderr(s) => self.log(s),
+            Msg::End => {
+                (self.ended, self.now) = (true, now_ms());
+                self.log("srun ended: the job is over or every agent has gone".into());
+                QUIT.fetch_or(self.st.nodes.is_empty(), Relaxed);
+            }
             Msg::Tick => self.tick(),
             Msg::Resize => {}
         }
@@ -292,7 +308,7 @@ impl App {
             KeyCode::Char('0') => {
                 self.send(&Control::Clear(TaskSet::All));
                 (self.opts.rules, self.marks) = (vec![], vec![]);
-                self.start(u32::try_from(self.st.nodes.len()).unwrap_or(u32::MAX));
+                self.start(self.expect);
             }
             KeyCode::Char('v') => {
                 self.view.layout = match self.view.layout {
@@ -336,11 +352,11 @@ impl App {
         }
     }
 
-    /// Whether a node sent no `T` for 3 × the longest rule interval (§7.4).
+    /// Whether a node sent no `T` for 3 × the longest rule interval (§7.4), or srun ended.
     fn stale(&self, i: usize) -> bool {
         let longest = self.view.rules.iter().map(|r| r.interval_ms).max().unwrap_or(0).max(1000);
         let n = self.st.nodes.get(i);
-        n.is_some_and(|n| self.now.saturating_sub(n.seen) > 3 * u64::from(longest))
+        self.ended || n.is_some_and(|n| self.now.saturating_sub(n.seen) > 3 * u64::from(longest))
     }
 }
 
@@ -398,6 +414,7 @@ pub fn view(
                 (seen, left) = (app.ticks, left - 1);
                 snapshot(app, out)?;
             }
+            left *= u32::from(!app.ended);
         }
         return Ok(());
     }
@@ -495,9 +512,11 @@ fn title(app: &App) -> [String; 2] {
     let (nodes, m, local) = (&app.st.nodes, &app.mon, app.opts.local);
     let procs: usize = nodes.iter().map(|n| n.procs.len()).sum();
     let stale = (0..nodes.len()).filter(|&i| app.stale(i)).count();
+    let (seen, all) = (nodes.len(), (app.expect as usize).max(nodes.len()));
     let src = match nodes.first() {
         Some(n) if local => format!("unjam  {}", n.host),
-        _ => format!("unjam {}  {} nodes ({stale} stale)", app.opts.source, nodes.len()),
+        _ if app.ended => format!("unjam {}  {seen}/{all} nodes (ended)", app.opts.source),
+        _ => format!("unjam {}  {seen}/{all} nodes ({stale} stale)", app.opts.source),
     };
     let layout = ["step", if local { "tree" } else { "node" }, "flat"][app.view.layout as usize];
     let (iv, s, sort) =
@@ -727,7 +746,7 @@ pub fn snapshot(app: &App, w: &mut dyn Write) -> io::Result<()> {
     let (cols, [l0, l1]) = (shown(&rows), title(app));
     let node = |s: &str| if app.opts.local { String::new() } else { format!(" {s:>7}") };
     let line = |out: &mut String, name: &str, tx: [&str; 3], v: &dyn Fn(usize) -> String| {
-        let mut l = format!("{name:<44.44}{} {:>7}", node(tx[0]), tx[1]);
+        let mut l = format!("{name:<44}{} {:>7}", node(tx[0]), tx[1]);
         for &c in &cols {
             let _ = write!(l, " {:>w$}", v(c), w = usize::from(COLS[c].2));
         }
@@ -926,12 +945,25 @@ mod tests {
     }
 
     #[test]
+    fn srun_end_marks_every_node_ended() {
+        let (mut app, _rx) = app(false, "mono");
+        host(&mut app, 0, "n1", 1);
+        app.start(4);
+        assert!(title(&app)[0].contains(" 1/4 nodes (0 stale) "), "{}", title(&app)[0]);
+        app.handle(Msg::End);
+        assert!(app.ended && app.stale(0));
+        assert!(title(&app)[0].contains(" 1/4 nodes (ended) "), "{}", title(&app)[0]);
+        assert!(app.log.front().unwrap().starts_with("srun ended"));
+    }
+
+    #[test]
     fn keys_send_rules() {
         let (mut app, rx) = app(false, "mono");
         host(&mut app, 0, "n1", 1);
-        app.start(1);
+        app.budget = Some(1 << 20);
+        app.start(2);
         let start: Vec<String> = rx.try_iter().collect();
-        assert_eq!(start, ["B\t*\t4194304\n", "R\t*\t.\t1000\tp\n"]);
+        assert_eq!(start, ["B\t*\t524288\n", "R\t*\t.\t1000\tp\n"]);
         let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
         app.view.layout = Layout::Node;
         app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -959,7 +991,7 @@ mod tests {
         assert_eq!(app.marks.len(), 2);
         app.on_key(key('0'));
         let sent: Vec<String> = rx.try_iter().collect();
-        assert_eq!(sent[0], "C\t*\n");
+        assert_eq!(sent[..2], ["C\t*\n", "B\t*\t524288\n"], "the job's node count and --budget");
         assert!(app.marks.is_empty() && app.view.rules.len() == 1);
     }
 

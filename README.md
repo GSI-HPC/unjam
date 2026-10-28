@@ -23,8 +23,8 @@ Keys: `↑↓` move, `←→` fold, `v` layout (step, node, flat), `s` sort, `/`
 
 ## Site notes
 
-- **cgroup v2 only.** The unified hierarchy is required; v1 and hybrid setups are refused at
-  startup.
+- **cgroup v2 only.** A cgroup2 mount at `/sys/fs/cgroup` is required (or `--root` pointing at
+  one); pure v1 setups are refused at startup.
 - **Slurm 25.11 or later** with the cgroup/v2 plugin (`proctrack/cgroup`, `task/cgroup`). The job
   cgroup is found by structure, so both `job_<id>` directories and the SLUID directories of 26.05
   work.
@@ -38,7 +38,8 @@ Keys: `↑↓` move, `←→` fold, `v` layout (step, node, flat), `s` sort, `/`
   `MaxStepCount` restrict steps must allow one extra overlap step per viewer; `--srun-arg`
   passes further srun options.
 - **No shared filesystem.** `--bcast` copies the binary to `/tmp/unjam.<J>.<uid>` on each node,
-  and the agent removes the copy when it starts. Static binaries for x86_64 and aarch64 are
+  and the agent removes the copy when it starts. Where `/tmp` is mounted `noexec`, name another
+  directory: `--bcast=/var/tmp`. Static binaries for x86_64 and aarch64 are
   attached to each [GitHub release](https://github.com/GSI-HPC/unjam/releases).
 
 ## Recording

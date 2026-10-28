@@ -13,6 +13,8 @@ mod cgroup;
 mod model;
 /// The /proc source and the constants read from /proc.
 mod procfs;
+/// Slurm attach: job resolution, the srun line, the srun child and its teardown.
+mod slurm;
 /// The metric-source plug-in surface and the fd cache.
 mod source;
 /// The TUI data store and the rows of the three layouts.
@@ -81,9 +83,11 @@ struct SlurmArgs {
     /// Extra srun argument (repeatable).
     #[arg(long, requires = "slurm", allow_hyphen_values = true)]
     srun_arg: Vec<String>,
-    /// Copy the agent to the nodes with srun --bcast (no shared filesystem needed).
-    #[arg(long, requires = "slurm")]
-    bcast: bool,
+    /// Copy the agent to DIR/unjam.<job>.<uid> on the nodes with srun --bcast (no shared
+    /// filesystem needed); DIR must allow executables.
+    #[arg(long, value_name = "DIR", requires = "slurm", num_args = 0..=1, require_equals = true,
+          default_missing_value = "/tmp")]
+    bcast: Option<String>,
     /// Record what the TUI receives, one .arrows file per node in DIR.
     #[arg(long, value_name = "DIR", requires = "slurm")]
     record: Option<PathBuf>,
@@ -150,17 +154,21 @@ fn parse_size(s: &str) -> Result<u64, String> {
 
 /// The viewer: resolves theme and interval, then runs the chosen source.
 fn viewer(cli: Cli) -> Result<(), String> {
-    if cli.slurm.is_some() || !cli.replay.is_empty() {
-        return Err("--slurm and --replay are not available in this build yet".into());
+    if !cli.replay.is_empty() {
+        return Err("--replay is not available in this build yet".into());
     }
     let env = |k| std::env::var(k).ok();
     let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
     let theme = theme::pick(cli.theme.as_deref(), env("UNJAM_THEME").as_deref(), no_color)?;
-    let iv = cli.interval.unwrap_or(Duration::from_secs(1)).as_millis();
+    let default = Duration::from_secs(if cli.slurm.is_some() { 2 } else { 1 });
+    let iv = cli.interval.unwrap_or(default).as_millis();
     let interval_ms = u32::try_from(iv).unwrap_or(u32::MAX).clamp(100, 60_000) / 100 * 100;
-    let source = "unjam".into();
-    let opts = tui::Opts { source, interval_ms, rules: cli.rules, theme, local: true };
-    agent::local(opts, cli.root, cli.batch)
+    let (source, local) = ("unjam".into(), cli.slurm.is_none());
+    let opts = tui::Opts { source, interval_ms, rules: cli.rules, theme, local };
+    match &cli.slurm {
+        Some(job) => slurm::view(job, &cli.srun, opts, cli.batch),
+        None => agent::local(opts, cli.root, cli.batch),
+    }
 }
 
 /// Entry point: dispatches the command line; errors go to stderr with exit code 1.
@@ -256,8 +264,12 @@ mod tests {
         assert!(parse("--slurm 123").is_err(), "the job id must be attached");
         let cli = parse("--slurm --budget 512K --srun-arg --exclusive --bcast").unwrap();
         assert_eq!(
-            (cli.srun.budget, cli.srun.srun_arg),
-            (Some(512 << 10), vec!["--exclusive".into()])
+            (cli.srun.budget, cli.srun.srun_arg, cli.srun.bcast.as_deref()),
+            (Some(512 << 10), vec!["--exclusive".into()], Some("/tmp"))
+        );
+        assert_eq!(
+            parse("--slurm --bcast=/var/tmp").unwrap().srun.bcast.as_deref(),
+            Some("/var/tmp")
         );
     }
 

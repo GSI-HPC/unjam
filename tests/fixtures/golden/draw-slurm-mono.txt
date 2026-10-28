@@ -1,4 +1,4 @@
- unjam 42  3 nodes (0 stale)  6 procs  1s  step  sort CPU% ▼  12:00:00Z
+ unjam 42  3/3 nodes (0 stale)  6 procs  1s  step  sort CPU% ▼  12:00:00Z
  tui - - · in 0 0 msg/s · out 0 · agents max 0.0% - (n3) · drop 0 err 0
  NODES ███
 NAME                               PID     CPU      CPU%   MEM    PIDS     INT W

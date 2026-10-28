@@ -55,7 +55,7 @@ This is the living design of the repository. It started as the reviewed round-on
 | Mode | Command | Processes | Threads |
 |---|---|---|---|
 | Local (default) | `unjam [--root /sys/fs/cgroup] [--interval 1s] [--rule R]… [--theme NAME] [--batch N]` | 1 | main (ingest, draw), input, sampler |
-| Attach | `unjam --slurm[=JOBID] [--interval 2s] [--nodelist LIST] [--budget 4M] [--agent PATH] [--bcast] [--srun-arg ARG]… [--record DIR] [--rule R]… [--batch N] [--print-srun]`, plus the hidden `--agent-keepalive SECS` | unjam TUI, srun, one `unjam agent` per node | TUI: main, input, srun-stdout reader, srun-stderr reader. Agent: sampler, stdin reader, stdout writer |
+| Attach | `unjam --slurm[=JOBID] [--interval 2s] [--nodelist LIST] [--budget 4M] [--agent PATH] [--bcast[=DIR]] [--srun-arg ARG]… [--record DIR] [--rule R]… [--batch N] [--print-srun]`, plus the hidden `--agent-keepalive SECS` | unjam TUI, srun, one `unjam agent` per node | TUI: main, input, srun-stdout reader, srun-stderr reader. Agent: sampler, stdin reader, stdout writer |
 | Record | `srun [opts] unjam record [-o PATTERN] [-i 5s] [--no-procs] -- CMD ARGS…` | Per node: one recorder plus the app. All other tasks are the app itself | Recorder: 1 |
 | Replay | `unjam --replay FILE.arrows… [--batch N] [--at TIME]` | 1 | main, input |
 | (internal) | `unjam agent [--root PATH] [--keepalive 120] [--unlink-self]` (hidden) | | |
@@ -81,7 +81,7 @@ srun --jobid=<J> --overlap \
      --input=all --quiet \
      --kill-on-bad-exit=0 --wait=0 \
      --job-name=unjam --chdir=/ \
-     [--bcast=/tmp/unjam.<J>.<uid>] \
+     [--bcast=<DIR>/unjam.<J>.<uid>] \
      [<--srun-arg values>…] \
      <AGENT> agent [--keepalive <SECS>] [--unlink-self]
 ```
@@ -101,12 +101,12 @@ srun --jobid=<J> --overlap \
 | `--job-name=unjam` | Makes the step identifiable in `squeue -s` and `sacct` |
 | `--chdir=/` | The TUI's working directory may not exist on compute nodes |
 | **not** `-u/--unbuffered`, `--pty` | Both run tasks under a pty, which turns off `LAUNCH_BUFFERED_IO`, the line buffering §7 relies on, and adds CRLF translation |
-| `--bcast=/tmp/unjam.<J>.<uid>` | Only with `--bcast`: srun copies `<AGENT>` to every node. The path is explicit because srun(1) 25.11 says `--bcast` without a path defaults to the `--chdir` directory, which is `/` here; job id and uid keep concurrent viewers apart |
+| `--bcast=<DIR>/unjam.<J>.<uid>` | Only with `--bcast[=DIR]` (DIR defaults to `/tmp`): srun copies `<AGENT>` to every node. The path is explicit because srun(1) 25.11 says `--bcast` without a path defaults to the `--chdir` directory, which is `/` here; job id and uid keep concurrent viewers apart |
 | **not** `--label` | Lines carry their own node index (ADR D6) |
 
 - `<AGENT>` defaults to `std::env::current_exe()`, which assumes a shared filesystem. `--agent PATH` overrides it.
 - `--print-srun` prints the argv and exits. A golden unit test pins `slurm::srun_args`.
-- **Sites without a shared filesystem (D36 revised).** `--bcast` adds `--bcast=/tmp/unjam.<J>.<uid>` to the srun line and `--unlink-self` to the agent command. The agent removes its copy right after it starts (`std::fs::remove_file` on `current_exe()`; the running image stays mapped), so nothing is left on the nodes, even after a crash. About 30 LOC; IT 8 covers it. The static musl release binaries (§18) make the copy independent of the compute nodes' glibc.
+- **Sites without a shared filesystem (D36 revised).** `--bcast[=DIR]` adds `--bcast=<DIR>/unjam.<J>.<uid>` (DIR defaults to `/tmp`) to the srun line and `--unlink-self` to the agent command. The agent removes its copy right after it starts (`std::fs::remove_file` on `current_exe()`; the running image stays mapped), so nothing is left on the nodes, even after a crash. About 30 LOC; IT 8 covers it. The static musl release binaries (§18) make the copy independent of the compute nodes' glibc. DIR must allow executables: sind (and sites that harden `/tmp`) mount `/tmp` `noexec`, where execve of the copy fails with "Permission denied" and the copy stays behind; IT 8 therefore uses `--bcast=/var/tmp`.
 
 ### 3.3 Attach: lifecycle and teardown
 
@@ -1138,7 +1138,7 @@ slurm:
 | 5 | Framing stress: 3 nodes × 500 sleeper processes, `--rule $'*\t.\t100\tp' --budget 64M --batch 300` (30 s) | Footer `errors=0`. Bytes per second and fd-cache hit ratio recorded into `docs/perf.md`. Agent RSS < 16 MiB (`T` and `ps`) |
 | 6 | Record: `sbatch -N2 --ntasks-per-node=1 --mem=256M --wrap 'srun /data/…/unjam record -i 200ms -o /home/alice/rec-%j-%n.arrows -- sh -c "dd if=/dev/zero of=/dev/null bs=1M count=3000; exit 3"'` | 2 files. Job exit code 3. `uv run --with pyarrow==21.0.0 tests/sind/check_record.py` (pinned version **UNVERIFIED**): columns and units metadata present; rows > 0; `comm == "dd"` rows exist; `cg_cpu_usage_usec` non-decreasing per `cg`; with `EXTRA`, `cg_io_read_bytes` and `cg_pids_current` non-null on cgroup rows (null without it); the §8.1 Parquet recipe runs and `pq.read_table` gives the IPC row count. `unjam --replay … --batch 1 --at end` lists `dd` |
 | 7 | Record kill: `scancel $J` during record | `check_record.py --truncated` reads ≥ 1 complete batch. `unjam --replay … --batch 1 --at end` succeeds and warns "truncated at byte N" |
-| 8 | Broadcast: copy the binary to `/tmp/unjam-local` on the submitter only (node-local `/tmp`), then `/tmp/unjam-local --slurm=$J --bcast --batch 2` as alice | 3 nodes report. After teardown, no `/tmp/unjam.$J.*` file is left on any worker (`--unlink-self`) |
+| 8 | Broadcast: copy the binary to `/var/tmp/unjam-local` on the submitter only (node-local, exec allowed; sind mounts `/tmp` `noexec`), then `/var/tmp/unjam-local --slurm=$J --bcast=/var/tmp --batch 2` as alice | 3 nodes report. After teardown, no `/var/tmp/unjam.$J.*` file is left on any worker (`--unlink-self`) |
 
 1k-node fan-out is covered synthetically by the mux unit test. The real srun throughput at many tasks is measured once on a production cluster in phase 5 (Q10).
 
