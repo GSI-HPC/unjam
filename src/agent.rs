@@ -516,9 +516,7 @@ pub fn run(ctl: &Receiver<String>, out: &mut Out, s: &mut Sampler, keep: u64) ->
 /// and the own step is excluded (§3.3, §5.5); otherwise it is `--root` or the whole cgroup2
 /// mount, sampled as node 0 of 1.
 pub fn setup(root: Option<PathBuf>, job: bool, cap: usize) -> Result<(Env, Opts), String> {
-    let mount = Path::new("/sys/fs/cgroup");
-    let me =
-        fs::read_to_string("/proc/self/cgroup").map_err(|e| format!("/proc/self/cgroup: {e}"))?;
+    let (mount, me) = cgroup::self_cgroup()?;
     let var = |k: &str| std::env::var(k).ok().filter(|_| job);
     let explicit = root.is_some();
     let (root, exclude) = match (root, var("SLURM_STEP_ID")) {
@@ -528,8 +526,7 @@ pub fn setup(root: Option<PathBuf>, job: bool, cap: usize) -> Result<(Env, Opts)
     };
     let env = procfs::env("/proc".into(), cgroup::v2_check(mount, &root, &me, explicit)?);
     let num = |k, default| var(k).and_then(|v| v.parse().ok()).unwrap_or(default);
-    let step = var("SLURM_JOB_ID").zip(var("SLURM_STEP_ID")).map(|(j, s)| format!("{j}.{s}"));
-    let step = step.unwrap_or_else(|| "-".into());
+    let step = step_id(&var);
     let (node, ntasks) = (num("SLURM_PROCID", 0), num("SLURM_NTASKS", 1));
     Ok((env, Opts { node, ntasks, step, root, exclude, cap }))
 }
@@ -542,6 +539,12 @@ fn unlink_copy(exe: &Path) -> Result<(), String> {
     let gone = |e: io::Error| (e.kind() == io::ErrorKind::NotFound).then_some(()).ok_or(e);
     let res = if copy { fs::remove_file(exe).or_else(gone) } else { Ok(()) };
     res.map_err(|e| format!("--unlink-self {}: {e}", exe.display()))
+}
+
+/// `JOB.STEP` from the Slurm variables `var` yields, or `-`: the `H` line's step field, which
+/// the recorder writes too.
+pub fn step_id(var: &dyn Fn(&str) -> Option<String>) -> String {
+    var("SLURM_JOB_ID").zip(var("SLURM_STEP_ID")).map_or("-".into(), |(j, s)| format!("{j}.{s}"))
 }
 
 /// `unjam agent`: one sampler on this node, stdin as control, stdout as output. `unlink`

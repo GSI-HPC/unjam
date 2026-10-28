@@ -197,6 +197,13 @@ fn step_paths(self_cgroup: &str) -> Result<(&str, &str), String> {
     }
 }
 
+/// The cgroup2 mount and the own `/proc/self/cgroup`, the input of every root lookup: one
+/// read for the agent and the recorder, with one error text.
+pub fn self_cgroup() -> Result<(&'static Path, String), String> {
+    let me = fs::read_to_string("/proc/self/cgroup").map_err(|e| format!("/proc/self/cgroup: {e}"));
+    Ok((Path::new("/sys/fs/cgroup"), me?))
+}
+
 /// Attach mode: the job root and the agent's own step, which the walk excludes (§5.5). The step
 /// must exist below `mount`: a path from a cgroup namespace joined onto a host-view mount would
 /// otherwise make the whole mount the job.

@@ -26,7 +26,7 @@ use arrow_schema::DataType::{self, Timestamp, UInt8, UInt32, UInt64, Utf8};
 use arrow_schema::{Field, Schema, SchemaRef, TimeUnit};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 
-use crate::agent::{Opts, Sampler, now_ms};
+use crate::agent::{Opts, Sampler, now_ms, step_id};
 use crate::model::{self, Control, Ent, Event, Kind, NA, Rule, TaskSet, What};
 use crate::state::{Columns, Layout, Node, Proc, State, Vals};
 use crate::tui::{self, App};
@@ -365,12 +365,7 @@ impl Track {
         if ts != self.tick.0 {
             self.gone(st, i);
             self.tick = (ts, HashSet::new(), HashSet::new());
-            let (self_cpu_us, out_bytes, self_rss) = (NA, NA, NA);
-            let _ = st.apply(
-                i,
-                &Event::Tick { ts_ms: ts, self_cpu_us, out_bytes, dropped: 0, self_rss },
-                ts,
-            );
+            let _ = st.apply(i, &bare_tick(ts), ts);
         }
         let (proc, id) = (c.kind.value(r) == 2, cg.value(r));
         let mine = c.metrics.iter().filter(|m| m.0 == if proc { Ent::Proc } else { Ent::Cgroup });
@@ -462,6 +457,11 @@ impl Reader {
         self.at = k;
         Ok(())
     }
+}
+
+/// The `T` event of a recorded or replayed tick: there is no agent to monitor.
+fn bare_tick(ts_ms: u64) -> Event<'static> {
+    Event::Tick { ts_ms, self_cpu_us: NA, out_bytes: NA, dropped: 0, self_rss: NA }
 }
 
 /// `--at`: `start`, `end`, `+DUR` after the start, `-DUR` before the end, or `HH:MM[:SS]` UTC
@@ -586,9 +586,7 @@ struct Scope {
 /// The scope (§3.5): `--root`, else the own step's `user` directory (every task of the step
 /// on this node), else the own cgroup. Also the sampling environment.
 fn scope(root: Option<PathBuf>) -> Result<(Scope, crate::source::Env), String> {
-    let mount = Path::new("/sys/fs/cgroup");
-    let me =
-        fs::read_to_string("/proc/self/cgroup").map_err(|e| format!("/proc/self/cgroup: {e}"))?;
+    let (mount, me) = cgroup::self_cgroup()?;
     let explicit = root.is_some();
     let own = if explicit { None } else { Some(cgroup::v2_check(mount, mount, &me, false)?) };
     let step = own.as_ref().and_then(|_| cgroup::record_root(mount, &me).ok());
@@ -646,12 +644,7 @@ pub fn run_record(a: &RecordArgs) -> Result<ExitCode, String> {
     while (status.is_none() || !quiet(&sc, &before)) && now_ms() < grace {
         let now = now_ms();
         if now >= s.next_due(now) {
-            let (self_cpu_us, self_rss) = (NA, NA);
-            let _ = st.apply(
-                0,
-                &Event::Tick { ts_ms: now, self_cpu_us, out_bytes: 0, dropped: 0, self_rss },
-                now,
-            );
+            let _ = st.apply(0, &bare_tick(now), now);
             s.tick(now, &mut |e| st.apply(0, e, now).unwrap_or_default());
             w.node(&st, 0).map_err(werr)?;
         }
@@ -677,7 +670,7 @@ fn start(
 ) -> Result<(Scope, State, Sampler, Writer), String> {
     let (sc, env) = scope(a.root.clone())?;
     let (job, step) = (var("SLURM_JOB_ID"), var("SLURM_STEP_ID"));
-    let id = job.as_ref().zip(step.as_ref()).map_or("-".into(), |(j, s)| format!("{j}.{s}"));
+    let id = step_id(var);
     let opts =
         Opts { node: 0, ntasks: 1, step: id, root: sc.root.clone(), exclude: None, cap: 1024 };
     let (mut s, mut st, now) = (Sampler::new(env, opts), State::new(), now_ms());

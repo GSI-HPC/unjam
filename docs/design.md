@@ -697,7 +697,7 @@ One package, one binary. No lib target, no workspace, no cargo features of our o
 src/main.rs      CLI (clap derive: viewer flags with the source group, record, agent), dispatch, exit codes, parse_dur
 src/model.rs     Metric/Kind/Ent/NA, Event, What/Rule/TaskSet/Control, effective(), next_due()
 src/source.rs    trait Source, Target, Env, Probe, SOURCES, Files (tiered fd cache + self-check), kv(), kv_eq()
-src/cgroup.rs    Cgroup source, walk(), procs(), io_sum(), psi(), job_root()/record_root(), v2 check
+src/cgroup.rs    Cgroup source, walk(), procs(), io_sum(), psi(), self_cgroup(), job_root()/record_root(), v2 check
 src/procfs.rs    Proc source, stat(), cmdline(), auxv(), hostname(), btime(), nofile()
 src/agent.rs     Sampler (rules, timers, discovery, emit, self-CPU/RSS accounting), run(), Out (writer, budget, stagger), --unlink-self
 src/wire.rs      Event and Control text codec, split_node(), line cap and value splitting
