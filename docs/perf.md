@@ -27,7 +27,7 @@ commit, the machine (sind worker, Slurm line, kernel) and the command that produ
 
 | Commit | ns/cgroup | ns/process | bytes/tick | apply ns/value | Notes |
 |---|---|---|---|---|---|
-| 3980b31 | 2,700–3,200 | 1,050–1,100 | 987 | 54–60 | 25.11 fixture (8 cgroups at `c`, 3 processes), release build, dev container on 6.18.44 (not a sind worker); 3 runs. Plain fixture files: no rstat flush. Apply includes `wire::parse` |
+| 48110de | 2,700–3,200 | 1,050–1,100 | 987 | 54–60 | 25.11 fixture (8 cgroups at `c`, 3 processes), release build, dev container on 6.18.44 (not a sind worker); 3 runs. Plain fixture files: no rstat flush. Apply includes `wire::parse` |
 
 ## Allocations (unit test, fixtures)
 

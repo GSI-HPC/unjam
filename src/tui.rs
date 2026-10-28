@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
 
-//! The viewer: one channel that the input thread, the sampler (or srun readers) and a 1 Hz
-//! ticker feed; key bindings, drawing with the self-monitoring header, heat strip and history
-//! bars, and the `--batch` text snapshots (§3.4, §7.3, §9).
+//! The viewer: a data channel that the sampler (or srun readers) and a 1 Hz ticker feed, and a
+//! key queue that the input thread fills (§7.3); key bindings, drawing with the self-monitoring
+//! header, heat strip and history bars, and the `--batch` text snapshots (§3.4, §9).
 
 use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
