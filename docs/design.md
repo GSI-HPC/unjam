@@ -486,7 +486,7 @@ Verified in Slurm 25.11 source:
 
 | Situation | Response |
 |---|---|
-| Malformed line, or a value count that does not fit that node's `D` table | Increment the node's error counter, send `S <node>` (at most once per 10 s per node), show it in the status line |
+| Malformed line, or a value count that does not fit that node's `D` table | Increment the node's error counter, send `S <node>` (at most once per 10 s per node), show it in the status line. The resync re-sends only what the agent has, so the next `T` drops the cgroups and processes the node held at that `H` and did not re-announce (a lost `X`/`x`) |
 | No `T` for 3 × the node's longest interval | Node shown as stale (dimmed) |
 | Agent exits | srun's stderr says so, then the node becomes stale. The other agents keep running (§3.3) |
 | srun exits | Every node becomes "ended"; data is kept |
