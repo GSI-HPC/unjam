@@ -11,9 +11,9 @@
 # one-line reason here.
 main.rs     125
 model.rs    160
-source.rs    95
-cgroup.rs   190
-procfs.rs   130
+source.rs   135  # Slot::Missing (absent files not retried per tick) and the polling self-check
+cgroup.rs   160  # measured 158; lowered to keep the module sum at the total cap
+procfs.rs   145  # Ident for P lines plus the host, btime, auxv and limits readers
 agent.rs    275
 wire.rs     200
 slurm.rs    175
