@@ -381,7 +381,7 @@ The io and pids controllers are present in this subtree only with `EnableExtraCo
 
 1. Read `/proc/self/cgroup`, which gives `0::<prefix>/<J>/step_<S>/user/task_<T>`.
 2. Check that the last three path segments match `step_*`, `user` and `task_*`. Otherwise exit with "not inside a Slurm step (or the step runs in a cgroup namespace rooted below the job)".
-3. The job root is `/sys/fs/cgroup` joined with `<prefix>/<J>`. The excluded subtree is `<J>/step_<S>`, the agent's own overlap step.
+3. The job root is `/sys/fs/cgroup` joined with `<prefix>/<J>`. The excluded subtree is `<J>/step_<S>`, the agent's own overlap step. That step directory must exist, otherwise exit with "own step not found (cgroup namespace)": in a cgroup namespace rooted at or above the job, with a host-view `/sys/fs/cgroup`, the path would be relative to the namespace, and the job root would silently become the whole mount.
 4. `record` uses the same parse but takes `…/step_<S>/user` as its root.
 
 Correction to the base design: if a site places steps in a cgroup namespace rooted at the task cgroup, `/proc/self/cgroup` reads `0::/` and step 2 fails, as it should. The base design's claim that the strip "still works" in that case was wrong. In sind, each node container has a **private cgroup namespace at the container root** (sind `architecture/overview.md`: `--cgroupns=private`). There, `/proc/self/cgroup` is relative to the container root and matches the container's `/sys/fs/cgroup`, so the strip works (expected; verified by IT 2 on all three matrix entries).

@@ -188,10 +188,16 @@ fn step_paths(self_cgroup: &str) -> Result<(&str, &str), String> {
     }
 }
 
-/// Attach mode: the job root and the agent's own step, which the walk excludes (§5.5).
+/// Attach mode: the job root and the agent's own step, which the walk excludes (§5.5). The step
+/// must exist below `mount`: a path from a cgroup namespace joined onto a host-view mount would
+/// otherwise make the whole mount the job.
 pub fn job_root(mount: &Path, self_cgroup: &str) -> Result<(PathBuf, PathBuf), String> {
     let (job, step) = step_paths(self_cgroup)?;
-    Ok((mount.join(job), mount.join(step)))
+    let own = mount.join(step);
+    if !own.is_dir() {
+        return Err(format!("{}: own step not found (cgroup namespace)", own.display()));
+    }
+    Ok((mount.join(job), own))
 }
 
 /// Record mode: `…/step_<S>/user`, every task of the own step on this node (§3.5).
@@ -271,7 +277,8 @@ mod tests {
 
     #[test]
     fn slurm_layout() {
-        let mount = Path::new("/sys/fs/cgroup");
+        let tmp = std::env::temp_dir().join(format!("unjam-layout-{}", std::process::id()));
+        let mount = tmp.as_path();
         for (cg, job) in [
             (
                 "0::/system.slice/slurmstepd.scope/job_42/step_3/user/task_0\n",
@@ -291,6 +298,7 @@ mod tests {
                 "system.slice/slurmstepd.scope/job_7",
             ),
         ] {
+            fs::create_dir_all(mount.join(job).join("step_3")).unwrap();
             let (root, own) = job_root(mount, cg).unwrap();
             assert_eq!(root, mount.join(job), "{cg}");
             assert_eq!(own, mount.join(job).join("step_3"));
@@ -306,6 +314,10 @@ mod tests {
         ] {
             assert!(job_root(mount, bad).is_err(), "{bad:?}");
         }
+        let host_view = fixture("25.11");
+        let err = job_root(&host_view, "0::/step_3/user/task_0\n").unwrap_err();
+        assert!(err.contains("cgroup namespace"), "{err}");
+        fs::remove_dir_all(&tmp).unwrap();
     }
 
     #[test]
