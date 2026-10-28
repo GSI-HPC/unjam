@@ -26,7 +26,8 @@ SIND_REALM = "{{ get_env(name='SIND_REALM', default='unjam-it') }}"
 [tasks]
 fmt = { run = "cargo fmt --check" }
 lint = { run = "cargo clippy --all-targets --locked -- -D warnings" }
-"lint:sarif" = { run = "cargo clippy --all-targets --locked --message-format=json -- -D warnings | clippy-sarif | tee clippy-results.sarif | sarif-fmt" }
+# pipefail: the step fails with clippy, not with sarif-fmt, and the SARIF file is still written.
+"lint:sarif" = { shell = "bash -o errexit -o pipefail -c", run = "cargo clippy --all-targets --locked --message-format=json -- -D warnings | clippy-sarif | tee clippy-results.sarif | sarif-fmt" }
 test = { run = "cargo test --locked" }  # includes tests/budget.rs
 build = { run = "cargo build --release --locked" }
 # Static release binary for this machine's architecture (publish.yml `binaries` job).

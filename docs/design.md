@@ -1001,7 +1001,8 @@ SIND_REALM = "{{ get_env(name='SIND_REALM', default='unjam-it') }}"
 [tasks]
 fmt = { run = "cargo fmt --check" }
 lint = { run = "cargo clippy --all-targets --locked -- -D warnings" }
-"lint:sarif" = { run = "cargo clippy --all-targets --locked --message-format=json -- -D warnings | clippy-sarif | tee clippy-results.sarif | sarif-fmt" }
+# pipefail: the step fails with clippy, not with sarif-fmt, and the SARIF file is still written.
+"lint:sarif" = { shell = "bash -o errexit -o pipefail -c", run = "cargo clippy --all-targets --locked --message-format=json -- -D warnings | clippy-sarif | tee clippy-results.sarif | sarif-fmt" }
 test = { run = "cargo test --locked" }  # includes tests/budget.rs
 build = { run = "cargo build --release --locked" }
 # Static release binary for this machine's architecture (publish.yml `binaries` job).
@@ -1328,7 +1329,7 @@ Every job runs `mise run <task>` through `jdx/mise-action@v5` (current major, ch
 
 | File | Trigger | Jobs |
 |---|---|---|
-| `.github/workflows/checks.yml` (reusable) | `workflow_call` | `reuse` (`mise run reuse`, reuse 6.2.0, replacing `fsfe/reuse-action`); `fmt`; `clippy` (`mise run lint:sarif` with the pinned clippy-sarif and sarif-fmt, then `upload-sarif` with `if: always()`, `security-events: write` kept); `build`; `test` (includes the budget test); `msrv` (`mise run msrv`); `deny` (`mise run deny`); `size` (`mise run size`, `size:self-test`, `unsafe-deps`, `unsafe-deps:self-test`; `size.sh` writes its numbers to `$GITHUB_STEP_SUMMARY`) |
+| `.github/workflows/checks.yml` (reusable) | `workflow_call` | `reuse` (`mise run reuse`, reuse 6.2.0, replacing `fsfe/reuse-action`); `fmt`; `clippy` (`mise run lint:sarif` with the pinned clippy-sarif and sarif-fmt; the task runs under `bash -o pipefail`, so a clippy error fails the job; then `upload-sarif` with `if: always()`, `security-events: write` kept); `build`; `test` (includes the budget test); `msrv` (`mise run msrv`); `deny` (`mise run deny`); `size` (`mise run size`, `size:self-test`, `unsafe-deps`, `unsafe-deps:self-test`; `size.sh` writes its numbers to `$GITHUB_STEP_SUMMARY`) |
 | `.github/workflows/integration.yml` (reusable) | `workflow_call`, `workflow_dispatch` | `sind`, see below |
 | `.github/workflows/ci.yml` | `push: [main]`, `pull_request`, `schedule: cron "0 4 * * 1"` (catches moving sind images) | `checks` and `integration` in parallel. Permissions `contents: read`, `security-events: write` |
 | `.github/workflows/publish.yml` | tag `v*` | `verify` (tag on `main`, tag equals the `Cargo.toml` version, CHANGELOG has its section); `checks` and `integration` (need `verify`); `binaries` (needs both; see below); `release` (needs `binaries`); `publish` last (needs `release`, environment `crates-io`, trusted publishing; `cargo publish --locked --no-verify`, since `package` in `checks` verified the same commit and no dependency build script runs while the token is set) |
