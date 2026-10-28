@@ -91,8 +91,9 @@ impl Source for Proc {
         METRICS
     }
 
-    /// Reads `stat` (hot) and `io` (cold, NA without ptrace access). A vanished process, or a
-    /// reused pid whose `start` differs, is `Err` and leads to `x`.
+    /// Reads `stat` (hot) and `io` (cold, NA without ptrace access). A vanished process, a
+    /// reused pid whose `start` differs (`x` and `P`) or an exec that changed a valid UTF-8
+    /// `comm` (`P` again) is `Err`.
     fn sample(
         &mut self,
         t: Target,
@@ -100,11 +101,11 @@ impl Source for Proc {
         io: &mut Files,
         out: &mut [u64],
     ) -> Sampled {
-        let Target::Proc { pid, start } = t else { return Ok(()) };
+        let Target::Proc { pid, start, comm } = t else { return Ok(()) };
         self.name.clear();
         let _ = write!(self.name, "{pid}/stat");
         let s = stat(io.read(&mut slots[0], true, &self.root, &self.name)?)
-            .filter(|s| s.start == start)
+            .filter(|s| s.start == start && std::str::from_utf8(s.comm).map_or(true, |c| c == comm))
             .ok_or_else(|| io::Error::from_raw_os_error(ESRCH))?;
         let us = |ticks: u64| ticks.saturating_mul(1_000_000) / self.clk;
         let v = [us(s.utime), us(s.stime), s.rss.saturating_mul(self.page), s.threads];
@@ -216,7 +217,8 @@ mod tests {
         let mut slots: Vec<Slot> = (0..METRICS.len()).map(|_| Slot::Empty).collect();
         let mut files = Files::new(64);
         let mut out = vec![0; METRICS.len()];
-        src.sample(Target::Proc { pid: 101, start: 5001 }, &mut slots, &mut files, &mut out)
+        let comm = "x) (y";
+        src.sample(Target::Proc { pid: 101, start: 5001, comm }, &mut slots, &mut files, &mut out)
             .unwrap();
         assert_eq!(
             out,
@@ -234,10 +236,12 @@ mod tests {
             ]
         );
         let reused =
-            src.sample(Target::Proc { pid: 101, start: 1 }, &mut slots, &mut files, &mut out);
+            src.sample(Target::Proc { pid: 101, start: 1, comm }, &mut slots, &mut files, &mut out);
         assert_eq!(reused.unwrap_err().raw_os_error(), Some(ESRCH));
+        let exec = Target::Proc { pid: 101, start: 5001, comm: "bash" };
+        assert!(src.sample(exec, &mut slots, &mut files, &mut out).is_err(), "comm changed");
         let gone = src.sample(
-            Target::Proc { pid: 7, start: 1 },
+            Target::Proc { pid: 7, start: 1, comm },
             &mut [Slot::Empty, Slot::Empty],
             &mut files,
             &mut out,

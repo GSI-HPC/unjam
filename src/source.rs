@@ -27,7 +27,7 @@ pub enum Slot {
 #[derive(Clone, Copy, Debug)]
 pub enum Target<'a> {
     Cgroup { dir: &'a Path },
-    Proc { pid: u32, start: u64 },
+    Proc { pid: u32, start: u64, comm: &'a str },
 }
 
 /// The metric-source extension point (R10). `&mut self`, because future likwid or PAPI handles

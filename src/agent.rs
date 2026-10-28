@@ -9,7 +9,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use std::{fs, thread};
+use std::{fs, mem, thread};
 
 use crate::model::{Control, Ent, Event, NA, Rule, TaskSet, What, effective, next_due, upsert};
 use crate::source::{self, Env, Files, Slot, Source, Target};
@@ -121,33 +121,38 @@ impl Core {
         cg.pids.extend_from_slice(&self.pids);
     }
 
-    /// Samples one process. A vanished process gives `x`; a reused pid gives `x` then `P`.
+    /// Samples one process. A vanished process gives `x`; a reused pid gives `x` then `P`; an
+    /// exec (new `comm`) gives `P` again with the new names.
     fn sample_proc(&mut self, pid: u32, cg: u64, emit: Emit) {
         let Some(p) = self.procs.get_mut(&pid).filter(|p| p.cg == cg) else { return };
-        let (start, mut slots) = (p.start, std::mem::take(&mut p.slots));
-        let ok = self.run(Ent::Proc, Target::Proc { pid, start }, &mut slots);
+        let (start, mut slots, comm) = (p.start, mem::take(&mut p.slots), mem::take(&mut p.comm));
+        let ok = self.run(Ent::Proc, Target::Proc { pid, start, comm: &comm }, &mut slots);
         if let Some(p) = self.procs.get_mut(&pid) {
-            p.slots = slots;
+            (p.slots, p.comm) = (slots, comm);
         }
         if ok {
             emit(&Event::ProcVals { pid, first: 0, v: &self.vals });
         } else {
-            self.drop_proc(pid, emit);
             self.new_proc(pid, cg, emit);
         }
     }
 
-    /// Announces a process new to cgroup `cg` (`x` first if it moved from another cgroup).
+    /// Announces a process new to cgroup `cg`, or again after an exec. `x` comes first when the
+    /// pid was known with another start (reuse) or cgroup (move), or has vanished.
     fn new_proc(&mut self, pid: u32, cg: u64, emit: Emit) {
-        self.drop_proc(pid, emit);
+        let old = self.procs.remove(&pid).map(|mut p| {
+            self.files.release(&mut p.slots);
+            (p.start, p.cg)
+        });
+        let (root, files) = (&self.env.proc_root, &mut self.files);
         let mut slots: Box<[Slot]> = (0..self.width[1]).map(|_| Slot::Empty).collect();
-        let Some(id) = slots
-            .first_mut()
-            .and_then(|s| procfs::ident(&self.env.proc_root, &mut self.files, s, pid))
-        else {
+        let id = slots.first_mut().and_then(|s| procfs::ident(root, files, s, pid));
+        if old.is_some() && old != id.as_ref().map(|i| (i.start, cg)) {
+            emit(&Event::ProcGone(pid));
+        }
+        let Some(procfs::Ident { start, ppid: up, comm, cmd }) = id else {
             return self.files.release(&mut slots);
         };
-        let procfs::Ident { start, ppid: up, comm, cmd } = id;
         emit(&Event::Proc { pid, start, cg, ppid: up, comm: &comm, cmd: &cmd });
         self.procs.insert(pid, ProcEnt { start, cg, ppid: up, comm, cmd, slots });
     }
@@ -750,6 +755,23 @@ mod tests {
         assert!(gone < new, "{recreated:?}");
         assert!(recreated.contains(&"x\t102".to_owned()), "its process goes with it");
         assert_eq!(count(&recreated, "P"), 1, "and comes back in the new cgroup");
+    }
+
+    #[test]
+    fn exec_reannounces_names() {
+        let (mut s, t) = sampler("25.11", "exec");
+        lines(|e| s.snapshot(0, e));
+        rule(&mut s, "*\t.\t1000\tp", 0);
+        lines(|e| _ = s.tick(1000, e));
+        let stat = t.0.join("proc/101/stat");
+        fs::write(&stat, fs::read_to_string(&stat).unwrap().replace("(x) (y)", "(app)")).unwrap();
+        fs::write(t.0.join("proc/101/cmdline"), "./app\0-n\0").unwrap();
+        let exec = lines(|e| _ = s.tick(2000, e));
+        let p: Vec<_> = exec.iter().filter(|l| l.starts_with("P\t101\t5001\t")).collect();
+        assert!(p.len() == 1 && p[0].ends_with("\tapp\t./app -n"), "{exec:?}");
+        assert!(!exec.contains(&"x\t101".to_owned()), "same process: values are kept");
+        let after = lines(|e| _ = s.tick(3000, e));
+        assert_eq!((count(&after, "P"), count(&after, "p")), (0, 3));
     }
 
     #[test]

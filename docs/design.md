@@ -313,7 +313,7 @@ pub enum Event<'a> {
   - procfs: `pread` the cached `/proc/self/io` twice with a 4 KiB read of `/proc/self/stat` in between. `rchar` must increase.
   - kernfs: `pread` the own cgroup's `cpu.stat` twice around a busy loop of about 2 ms. `usage_usec` must increase.
   - If either check fails, `cap = 0` (always open, read, close) and one `W` line is sent. This is verified in sind (IT 1).
-- Parsing works on `&[u8]` with byte-level number parsers. The `stat` line is split at the **last** `)`, because `comm` may contain spaces or `)`. `comm` and `cmdline` are converted lossily to UTF-8 once, when the process is first seen.
+- Parsing works on `&[u8]` with byte-level number parsers. The `stat` line is split at the **last** `)`, because `comm` may contain spaces or `)`. `comm` and `cmdline` are converted lossily to UTF-8 when the process is first seen, and again when the `comm` in the `stat` read each tick no longer matches (an exec: wrapper scripts, container starters, the slurmstepd fork before the app). The process is then re-announced with the same pid, start and cgroup, so its values are kept. A `comm` that is not valid UTF-8 is not compared.
 
 ### 5.3 Files read, cadence and syscalls
 
@@ -325,7 +325,7 @@ Level semantics (§6): `o` reads nothing, `c` reads cgroup files, `p` adds proce
 | Cgroup, level ≥ `c` | `cpu.stat`, `memory.current`, `memory.peak`, `memory.events`, `memory.stat`, `io.stat`, `pids.current`, `cpu.pressure`, `memory.pressure`, `io.pressure` | 10 / 30 |
 | Cgroup, level `p` | `cgroup.procs`, sorted and merge-diffed against the previous list into P and x lines | 1 / 3 |
 | Process, level `p`, each tick | `/proc/<pid>/stat`, `/proc/<pid>/io` | 2 / 6 |
-| New process | `/proc/<pid>/cmdline` once (NUL becomes space, cut to fit the line) | 3 |
+| New process, or `comm` changed (exec) | `/proc/<pid>/cmdline` once (NUL becomes space, cut to fit the line) | 3 |
 | Agent self, each tick | `/proc/self/stat` (utime + stime for self-CPU reporting) | 1 |
 | Record mode, each tick | `cgroup.events` of each `user/*` sibling, own `task_*/cgroup.procs` | 1 each |
 
