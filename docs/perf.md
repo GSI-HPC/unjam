@@ -32,7 +32,7 @@ commit, the machine (sind worker, Slurm line, kernel) and the command that produ
 
 | Commit | Test | Bytes/s into the TUI | Agent CPU | Agent RSS | Errors | Notes |
 |---|---|---|---|---|---|---|
-| — | IT 5 (3 × 500 processes, 100 ms) | — | — | — | — | |
+| 8365580 | IT 5 (3 × 500 processes, 100 ms), sind v0.15.0, Slurm 25.11.8 and 26.05.5, kernel 6.18 (VM: no cgroup v2 cpu/memory/pids controllers, so no CPU limits on the 2-CPU workers) | 590 KB/s, 15k lines/s | 10 % of one core (busiest node, from `T`) | 1.8 MiB | 0 | 1,510 processes; 10 Hz × ~1,000 cached preads per node; TUI 3–4 % CPU, 2.4 MiB RSS. Not the default rules: the ≤ 1 % budget applies to those |
 
 ## Size
 

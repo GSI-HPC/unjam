@@ -29,9 +29,9 @@ Keys: `↑↓` move, `←→` fold, `v` layout (step, node, flat), `s` sort, `/`
   cgroup is found by structure, so both `job_<id>` directories and the SLUID directories of 26.05
   work.
 - **IO and PIDS columns (optional).** Slurm enables the io and pids controllers in job cgroups
-  only with `EnableExtraControllers=io,pids` in `cgroup.conf`. Without it, the IO columns are
-  hidden in Slurm mode and PIDS shows the summed thread count of the sampled processes, marked
-  `~`. Nothing else depends on it.
+  only with `EnableExtraControllers=io,pids` in `cgroup.conf`. Without it, cgroup rows show no
+  IO values (processes still do) and PIDS shows the summed thread count of the sampled
+  processes, marked `~`. Nothing else depends on it.
 - **Overlap steps.** `unjam --slurm` runs `srun --jobid=<J> --overlap` with one task per node,
   which Slurm allows for the job owner, operators and root. The step shares the job's resources
   and takes none away. Sites whose `job_submit` or `cli_filter` plugins, SPANK plugins or

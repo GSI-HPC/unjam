@@ -8,11 +8,14 @@
 #   SLURM       Slurm release line of the node image: 25.11 or 26.05 (default)
 #   EXTRA       non-empty: EnableExtraControllers=io,pids (IO and PIDS in job cgroups)
 #   JOBIDPATHS  non-empty: CgroupJobIdPaths=yes (26.05 only; job_<id> instead of SLUID dirs)
+#   CONSTRAIN   cgroup.conf constraint (default ConstrainRAMSpace=yes); hosts without a cgroup v2
+#               memory controller need ConstrainCores=yes. Either puts tasks in task_<N>.
 set -eu
 
 SLURM=${SLURM:-26.05}
 EXTRA=${EXTRA:-}
 JOBIDPATHS=${JOBIDPATHS:-}
+CONSTRAIN=${CONSTRAIN:-ConstrainRAMSpace=yes}
 # Fixed per sind release: the image of that release line at the pinned sind version.
 SIND_VERSION=v0.15.0
 
@@ -45,7 +48,7 @@ slurm:
   main: |
     WaitTime=10
   cgroup: |
-    ConstrainRAMSpace=yes
+    ${CONSTRAIN}
     ${EXTRA:+EnableExtraControllers=io,pids}
     ${JOBIDPATHS:+CgroupJobIdPaths=yes}
 EOF
