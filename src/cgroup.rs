@@ -46,13 +46,24 @@ pub const METRICS: &[Metric] = &[
     m("cg_psi_io_some_usec", "us", Kind::Counter),
 ];
 
-/// The cgroup v2 source; stateless, all state is in the entity's slots.
-pub struct Cgroup;
+/// The cgroup v2 source. It holds the stacked devices `io_sum` skips; the rest is in the slots.
+pub struct Cgroup(Vec<String>);
 
-/// The source registry entry; cgroupfs needs no probing beyond the startup check.
+/// The source registry entry: reads the stacked block devices once from the sysfs next to
+/// `proc_root` (`/sys` in production, absent in fixture trees).
 #[allow(clippy::unnecessary_wraps, reason = "the Probe signature; other sources can fail")]
-pub fn probe(_: &Env) -> Result<Box<dyn Source>, String> {
-    Ok(Box::new(Cgroup))
+pub fn probe(env: &Env) -> Result<Box<dyn Source>, String> {
+    Ok(Box::new(Cgroup(stacked(&env.proc_root.with_file_name("sys/class/block")))))
+}
+
+/// `MAJ:MIN ` of each disk that is, or has a partition that is, held by a dm or md device:
+/// `io.stat` charges a stacked bio again on the disk below, so only the top device is summed.
+fn stacked(class_block: &Path) -> Vec<String> {
+    let devs = fs::read_dir(class_block).into_iter().flatten().flatten().map(|e| e.path());
+    let held = |d: &PathBuf| fs::read_dir(d.join("holders")).is_ok_and(|mut h| h.next().is_some());
+    let disk = |d: PathBuf| d.join(if d.join("partition").exists() { "../dev" } else { "dev" });
+    let dev = |d| fs::read_to_string(disk(d)).ok().map(|t| format!("{} ", t.trim()));
+    devs.filter(held).filter_map(dev).collect()
 }
 
 impl Source for Cgroup {
@@ -83,7 +94,7 @@ impl Source for Cgroup {
                 1 | 2 => out[i + 3] = num(b).unwrap_or(NA),
                 3 => out[6] = kv(b, "oom_kill").unwrap_or(NA),
                 4 => (out[7], out[8]) = (kv(b, "anon").unwrap_or(NA), kv(b, "file").unwrap_or(NA)),
-                5 => (out[9], out[10]) = io_sum(b),
+                5 => (out[9], out[10]) = io_sum(b, &self.0),
                 6 => out[11] = num(b).unwrap_or(NA),
                 _ => out[i + 5] = psi(b),
             }
@@ -97,9 +108,11 @@ fn psi(b: &[u8]) -> u64 {
     b.split(|&c| c == b'\n').next().and_then(|l| kv_eq(l, "total")).unwrap_or(NA)
 }
 
-/// Sums `rbytes` and `wbytes` over the devices of `io.stat` (no devices gives 0, 0).
-pub fn io_sum(text: &[u8]) -> (u64, u64) {
-    text.split(|&b| b == b'\n').fold((0, 0), |(r, w), line| {
+/// Sums `rbytes` and `wbytes` over the devices of `io.stat` except the `skip` prefixes (no
+/// devices gives 0, 0).
+pub fn io_sum(text: &[u8], skip: &[String]) -> (u64, u64) {
+    let top = |l: &&[u8]| !skip.iter().any(|d| l.starts_with(d.as_bytes()));
+    text.split(|&b| b == b'\n').filter(top).fold((0, 0), |(r, w), line| {
         let get = |k| kv_eq(line, k).unwrap_or(0);
         (r.saturating_add(get("rbytes")), w.saturating_add(get("wbytes")))
     })
@@ -210,7 +223,8 @@ mod tests {
     fn sample(dir: &Path) -> Vec<u64> {
         let mut slots: Vec<Slot> = (0..METRICS.len()).map(|_| Slot::Empty).collect();
         let mut out = vec![0; METRICS.len()];
-        Cgroup.sample(Target::Cgroup { dir }, &mut slots, &mut Files::new(64), &mut out).unwrap();
+        let mut src = Cgroup(Vec::new());
+        src.sample(Target::Cgroup { dir }, &mut slots, &mut Files::new(64), &mut out).unwrap();
         out
     }
 
@@ -245,11 +259,43 @@ mod tests {
 
     #[test]
     fn io_and_procs_parsers() {
-        assert_eq!(io_sum(b"8:0 rbytes=1 wbytes=2 rios=3\n259:0 rbytes=10 wbytes=20\n"), (11, 22));
-        assert_eq!(io_sum(b""), (0, 0));
+        let two = b"8:0 rbytes=1 wbytes=2 rios=3\n259:0 rbytes=10 wbytes=20\n";
+        assert_eq!(io_sum(two, &[]), (11, 22));
+        assert_eq!(io_sum(two, &["8:0 ".into()]), (10, 20), "8:0 is stacked");
+        assert_eq!(io_sum(b"", &[]), (0, 0));
         let mut out = vec![9];
         procs(b"30\n4\n100\n", &mut out);
         assert_eq!(out, [4, 30, 100]);
+    }
+
+    #[test]
+    fn stacked_devices_are_the_held_disks() {
+        let tmp = std::env::temp_dir().join(format!("unjam-stacked-{}", std::process::id()));
+        let devices = tmp.join("devices");
+        for (dir, dev, holder) in [
+            ("sda", "8:0", None),
+            ("sda/sda2", "8:2", Some("dm-0")),
+            ("dm-0", "253:0", None),
+            ("nvme0n1", "259:0", Some("md0")),
+            ("nvme1n1", "259:1", None),
+        ] {
+            fs::create_dir_all(devices.join(dir).join("holders")).unwrap();
+            fs::write(devices.join(dir).join("dev"), format!("{dev}\n")).unwrap();
+            if let Some(h) = holder {
+                fs::write(devices.join(dir).join("holders").join(h), "").unwrap();
+            }
+        }
+        fs::write(devices.join("sda/sda2/partition"), "2\n").unwrap();
+        fs::create_dir_all(tmp.join("class")).unwrap();
+        for dir in ["sda", "sda/sda2", "dm-0", "nvme0n1", "nvme1n1"] {
+            let name = dir.rsplit('/').next().unwrap();
+            std::os::unix::fs::symlink(devices.join(dir), tmp.join("class").join(name)).unwrap();
+        }
+        let mut got = stacked(&tmp.join("class"));
+        got.sort();
+        assert_eq!(got, ["259:0 ", "8:0 "], "a held partition marks its disk");
+        assert!(stacked(&tmp.join("nope")).is_empty());
+        fs::remove_dir_all(&tmp).unwrap();
     }
 
     #[test]

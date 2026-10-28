@@ -202,7 +202,7 @@ pub const NA: u64 = u64::MAX;      // missing value; keeps values at 8 B, no Opt
 | `cg_mem_peak_bytes` | `memory.peak` (kernel ≥ 5.19, otherwise NA) | B / Gauge |
 | `cg_oom_kill` | `memory.events` oom_kill | 1 / Counter |
 | `cg_mem_anon_bytes`, `cg_mem_file_bytes` | `memory.stat` anon, file | B / Gauge |
-| `cg_io_read_bytes`, `cg_io_write_bytes` | `io.stat`, rbytes and wbytes summed over devices. In Slurm job cgroups only with `EnableExtraControllers=io` | B / Counter |
+| `cg_io_read_bytes`, `cg_io_write_bytes` | `io.stat`, rbytes and wbytes summed over devices, except disks below a dm or md device: blk-cgroup charges the cloned bio again on the lower disk, so LVM, dm-crypt and md would count twice. IO to a plain partition of such a disk is then not counted. In Slurm job cgroups only with `EnableExtraControllers=io` | B / Counter |
 | `cg_pids_current` | `pids.current`. In Slurm job cgroups only with `EnableExtraControllers=pids` | 1 / Gauge |
 | `cg_psi_cpu_some_usec`, `cg_psi_mem_some_usec`, `cg_psi_io_some_usec` | `{cpu,memory,io}.pressure` `some … total=` | us / Counter |
 
@@ -291,6 +291,7 @@ pub enum Event<'a> {
 | `/proc/sys/kernel/hostname` | Host name, sent in `H` |
 | `/proc/stat` `btime` | Lets `start` be turned into wall time (sent in `H`, stored in record metadata) |
 | `/proc/self/limits` `Max open files` (soft) | Sizes the fd cache without `getrlimit` |
+| `/sys/class/block/*/holders`, `dev` | Disks that are, or have a partition that is, held by a dm or md device; `io.stat` lines of these `MAJ:MIN` are left out of the IO sums. Read once by `cgroup::probe` |
 
 ### 5.2 Read primitive and the bounded fd cache
 
