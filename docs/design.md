@@ -1362,7 +1362,7 @@ Integration needs no cleanup step: runners are ephemeral.
 **`publish.yml`, job `binaries` (D36 revised).**
 
 - Matrix: `amd64` on `ubuntu-latest` (`x86_64-unknown-linux-musl`) and `arm64` on `ubuntu-24.04-arm` (`aarch64-unknown-linux-musl`). A guarded step installs rustup where the runner image lacks it.
-- Steps: `mise run build:musl`; copy the binary to `unjam-linux-<arch>`; `actions/attest-build-provenance@v4` on it (permissions `id-token: write`, `attestations: write`); `actions/upload-artifact@v7`.
+- Steps: `mise run build:musl`; copy the binary to `unjam-linux-<arch>`; run it with `--version` and `--batch 2` (tests and integration run on x86_64 only, so this is the one run of the arm64 binary); `actions/attest-build-provenance@v4` on it (permissions `id-token: write`, `attestations: write`); `actions/upload-artifact@v7`.
 - Job `release` (permissions `contents: write`) downloads both with `actions/download-artifact@v8`, writes `checksums.txt` with `sha256sum`, and runs `gh release create <tag> unjam-linux-amd64 unjam-linux-arm64 checksums.txt --verify-tag --generate-notes`. It needs `publish`, so a tag whose version does not match `Cargo.toml` gets no release. `gh` is preinstalled, so no third-party release action is needed.
 
 ---

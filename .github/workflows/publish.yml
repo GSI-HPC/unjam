@@ -84,6 +84,11 @@ jobs:
           install: false
       - run: mise run build:musl
       - run: cp "target/${{ matrix.target }}/release/unjam" "unjam-linux-${{ matrix.arch }}"
+      # Tests and integration run on x86_64 only: run the shipped binary on its own arch once.
+      - name: Smoke-test the binary
+        run: |
+          "./unjam-linux-${{ matrix.arch }}" --version
+          "./unjam-linux-${{ matrix.arch }}" --batch 2 > /dev/null
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         with:
           subject-path: unjam-linux-${{ matrix.arch }}
