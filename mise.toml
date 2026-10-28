@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 # SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
 
-# Development tools and tasks; CI runs the same tasks. Rust itself comes from rust-toolchain.toml
-# through rustup, not from mise. Every tool is pinned.
+# Development tools and tasks; CI runs the same tasks. Every tool is pinned.
 [tools]
-"cargo:cargo-release" = "1.1.6"  # 1.1.7 declares rust_version 1.97 > pinned 1.93.1
+# Keep equal to rust-toolchain.toml: mise exports RUSTUP_TOOLCHAIN, which overrides that file.
+rust = "1.93.1"  # components come from rust-toolchain.toml
+# Prebuilt binary: no source build, so no Perl or OpenSSL needed. 1.1.7 declares rust_version 1.97.
+"github:crate-ci/cargo-release" = "1.1.6"
 "cargo:clippy-sarif" = "0.8.0"
 "cargo:sarif-fmt" = "0.8.0"
 "cargo:cargo-deny" = "0.20.2"    # declares rust_version 1.88 ≤ pinned 1.93.1
