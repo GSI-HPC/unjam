@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+#
+# Size budgets, enforced by tests/budget.rs (module lines) and scripts/size.sh (binary, crates).
+#
+# Module lines: `<file under src/> <code lines>`. Code lines exclude blank lines, comment lines,
+# the trailing #[cfg(test)] module and lines between `// budget: data` and `// budget: end`
+# (compiled-in data such as the theme table). A module may exceed its number by 10 %; the sum
+# of all modules may not exceed `total`. Modules listed here but not yet written are skipped;
+# every file in src/ must have a line. A budget is raised only in the PR that needs it, with a
+# one-line reason here.
+main.rs     125
+model.rs    160
+source.rs    95
+cgroup.rs   190
+procfs.rs   130
+agent.rs    275
+wire.rs     200
+slurm.rs    175
+record.rs   330
+state.rs    360
+tui.rs      600
+theme.rs     60
+total      2900
+
+# Release binary (bytes) and resolved normal dependencies (crates, root excluded) on
+# x86_64-unknown-linux-gnu. Set to the core-host-view targets; re-baselined from measurement
+# (+5 %) by the change that needs it. Measured with clap alone: 556,672 bytes, 10 crates.
+binary_bytes 2097152
+crates         80
