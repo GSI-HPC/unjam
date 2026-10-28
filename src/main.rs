@@ -5,7 +5,7 @@ use std::{io::Write as _, path::PathBuf, process::ExitCode, time::Duration};
 
 use clap::{Args, Parser, Subcommand};
 
-/// The sampler, the shared run loop and the output path.
+/// The sampler, the shared run loop, the output path and the local-mode backend.
 mod agent;
 /// The cgroup v2 source, discovery and the Slurm job filter.
 mod cgroup;
@@ -157,7 +157,7 @@ fn viewer(cli: Cli) -> Result<(), String> {
     let interval_ms = u32::try_from(iv).unwrap_or(u32::MAX).clamp(100, 60_000) / 100 * 100;
     let source = "unjam".into();
     let opts = tui::Opts { source, interval_ms, rules: cli.rules, theme, local: true };
-    tui::local(opts, cli.root, cli.batch)
+    agent::local(opts, cli.root, cli.batch)
 }
 
 /// Entry point: dispatches the command line; errors go to stderr with exit code 1.

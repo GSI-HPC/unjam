@@ -13,6 +13,7 @@ use std::{fs, thread};
 
 use crate::model::{Control, Ent, Event, NA, Rule, TaskSet, What, effective, next_due, upsert};
 use crate::source::{self, Env, Files, Slot, Source, Target};
+use crate::tui::{self, App, Msg};
 use crate::{cgroup, procfs, wire};
 
 /// Discovery walk period while anything is sampled: at most 1 Hz (§5.3).
@@ -541,6 +542,39 @@ pub fn main(root: Option<PathBuf>, keepalive: u64) -> Result<(), String> {
         Err(e) if e.kind() != io::ErrorKind::BrokenPipe => Err(format!("agent: {e}")),
         _ => Ok(()),
     }
+}
+
+/// The local sampler's stdout: each written buffer (whole lines) becomes one `Msg::Lines`.
+struct Pipe(SyncSender<Msg>);
+
+impl Write for Pipe {
+    /// Forwards the buffer; fails like a closed pipe once the viewer is gone.
+    fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+        self.0.send(Msg::Lines(b.to_vec())).map_err(|_| io::ErrorKind::BrokenPipe)?;
+        Ok(b.len())
+    }
+
+    /// Nothing is buffered.
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Local mode (§3.4): this module's sampler and loop on a thread, feeding the viewer the same
+/// text lines a remote agent sends.
+pub fn local(opts: tui::Opts, root: Option<PathBuf>, batch: Option<u32>) -> Result<(), String> {
+    let (env, sopts) = setup(root, false, 2048)?;
+    let ((tx, rx), (ctl, ctl_rx)) = (mpsc::sync_channel(64), mpsc::channel());
+    let (out, err) = (Pipe(tx.clone()), tx.clone());
+    thread::spawn(move || {
+        let (mut out, mut s) = (Out::spawn(out, 0, 1), Sampler::new(env, sopts));
+        if let Err(e) = run(&ctl_rx, &mut out, &mut s, u64::MAX) {
+            let _ = err.send(Msg::Stderr(format!("sampler: {e}")));
+        }
+    });
+    let mut app = App::new(opts, ctl);
+    app.start(1);
+    tui::view(&mut app, &tx, &rx, batch).map_err(|e| format!("tui: {e}"))
 }
 
 #[cfg(test)]

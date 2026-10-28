@@ -23,7 +23,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row as TRow, Table};
 use ratatui::{DefaultTerminal, Frame};
 
-use crate::agent::{self, Out, Sampler};
 use crate::model::{Control, Event, Kind, NA, Rule, TaskSet, What, effective, upsert};
 use crate::source::{Files, Slot, kv};
 use crate::state::{self, HIST, Key, Layout, NCOL, Row, State, View};
@@ -377,41 +376,9 @@ fn now_ms() -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(0)
 }
 
-/// The local sampler's stdout: each written buffer (whole lines) becomes one `Msg::Lines`.
-struct Pipe(SyncSender<Msg>);
-
-impl Write for Pipe {
-    /// Forwards the buffer; fails like a closed pipe once the viewer is gone.
-    fn write(&mut self, b: &[u8]) -> io::Result<usize> {
-        self.0.send(Msg::Lines(b.to_vec())).map_err(|_| io::ErrorKind::BrokenPipe)?;
-        Ok(b.len())
-    }
-
-    /// Nothing is buffered.
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-/// Local mode (§3.4): the agent's sampler and loop on a thread, feeding the same text path.
-pub fn local(opts: Opts, root: Option<PathBuf>, batch: Option<u32>) -> Result<(), String> {
-    let (env, sopts) = agent::setup(root, false, 2048)?;
-    let ((tx, rx), (ctl, ctl_rx)) = (mpsc::sync_channel(64), mpsc::channel());
-    let (out, err) = (Pipe(tx.clone()), tx.clone());
-    thread::spawn(move || {
-        let (mut out, mut s) = (Out::spawn(out, 0, 1), Sampler::new(env, sopts));
-        if let Err(e) = agent::run(&ctl_rx, &mut out, &mut s, u64::MAX) {
-            let _ = err.send(Msg::Stderr(format!("sampler: {e}")));
-        }
-    });
-    let mut app = App::new(opts, ctl);
-    app.start(1);
-    view(app, &tx, &rx, batch).map_err(|e| format!("tui: {e}"))
-}
-
 /// Runs a viewer: the ticker, then `--batch` snapshots or the terminal with its input thread.
 pub fn view(
-    mut app: App,
+    app: &mut App,
     tx: &SyncSender<Msg>,
     rx: &Receiver<Msg>,
     batch: Option<u32>,
@@ -429,7 +396,7 @@ pub fn view(
             app.handle(m);
             if tick && app.ticks > seen {
                 (seen, left) = (app.ticks, left - 1);
-                snapshot(&app, out)?;
+                snapshot(app, out)?;
             }
         }
         return Ok(());
@@ -437,7 +404,7 @@ pub fn view(
     let (ktx, krx) = mpsc::channel();
     thread::spawn(move || input(&ktx, &keys));
     let mut term = ratatui::try_init()?;
-    let res = event_loop(&mut app, [rx, &krx], &mut term);
+    let res = event_loop(app, [rx, &krx], &mut term);
     ratatui::restore();
     res
 }
@@ -782,6 +749,7 @@ pub fn snapshot(app: &App, w: &mut dyn Write) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::sync::mpsc;
 
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
