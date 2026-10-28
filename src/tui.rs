@@ -399,9 +399,7 @@ impl App {
     /// interval; off restarts at `p` (§6.3).
     fn retarget(&mut self, row: Option<Target>, key: char) {
         let mut targets: Vec<_> = self.marks.iter().map(|m| (m.1.clone(), m.2.clone())).collect();
-        if targets.is_empty() {
-            targets.extend(row);
-        }
+        targets.extend(row.filter(|_| self.marks.is_empty()));
         for (tasks, pattern) in targets {
             let (iv, what) = level(&self.view.rules, &tasks, &pattern);
             let (iv, what) = match (key, what) {
@@ -594,24 +592,16 @@ fn title(app: &App) -> [String; 2] {
     let layout = ["step", if local { "tree" } else { "node" }, "flat"][app.view.layout as usize];
     let (iv, s, sort) =
         (interval(app.opts.interval_ms, What::Cg), app.now / 1000 % 86_400, SORTS[app.view.sort]);
-    let (arrow, clock) = (
-        if app.view.desc { '▼' } else { '▲' },
-        format!("{:02}:{:02}:{:02}Z", s / 3600, s / 60 % 60, s % 60),
-    );
+    let arrow = if app.view.desc { '▼' } else { '▲' };
+    let clock = format!("{:02}:{:02}:{:02}Z", s / 3600, s / 60 % 60, s % 60);
     let mode = match (&app.replay, &app.rec) {
         (Some(_), _) => ["  [⏸]", "  [▶]"][usize::from(app.playing)],
         (_, Some(_)) => "  ● rec",
         _ => "",
     };
     let l0 = format!(" {src}{mode}  {procs} procs  {iv}  {layout}  sort {sort} {arrow}  {clock}");
-    let [cpu, rss, inb, msg, out] = [
-        ("%", m.tui[0]),
-        ("B", m.tui[1]),
-        ("B/s", m.rate[0]),
-        ("1", m.rate[1]),
-        ("B/s", m.rate[2]),
-    ]
-    .map(|(u, v)| fmt(u, v));
+    let (cpu, rss) = (fmt("%", m.tui[0]), fmt("B", m.tui[1]));
+    let [inb, msg, out] = [("B/s", 0), ("1", 1), ("B/s", 2)].map(|(u, i)| fmt(u, m.rate[i]));
     let mut l1 = format!(" tui {cpu} {rss} · in {inb} {msg} msg/s · out {out}");
     let top = nodes.iter().max_by(|a, b| a.agent[0].total_cmp(&b.agent[0])).filter(|_| !local);
     if let Some(n) = top {
