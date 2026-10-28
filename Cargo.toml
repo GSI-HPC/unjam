@@ -5,6 +5,7 @@
 name = "unjam"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
 description = "Utility for Node/Job Analysis and Monitoring"
 repository = "https://github.com/GSI-HPC/unjam"
 homepage = "https://github.com/GSI-HPC/unjam"
@@ -12,6 +13,17 @@ readme = "README.md"
 license = "LGPL-3.0-or-later"
 keywords = ["hpc", "monitoring", "slurm"]
 categories = ["command-line-utilities"]
+# Development-only files; tests/ is excluded as a whole because tests/budget.rs reads docs/.
+exclude = [
+  "tests/**",
+  ".claude/**",
+  ".github/**",
+  "docs/**",
+  "scripts/**",
+  "CLAUDE.md",
+  "mise.toml",
+  "deny.toml",
+]
 
 [package.metadata.release]
 publish = false
@@ -20,4 +32,40 @@ sign-tag = true
 push-remote = "upstream"
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
+# CLI; repo convention "clap derive only". No color/suggestions/wrap_help → no anstream/strsim/terminal_size.
+clap = { version = "4.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+allow_attributes_without_reason = "deny" # every #[allow] states its justification
+print_stdout = "deny"                    # agent stdout is the protocol; recorder stdout is the app's
+print_stderr = "warn"                    # go through the one log helper
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "warn"
+expect_used = "warn"
+mem_forget = "deny"
+too_many_lines = "warn"                  # threshold in clippy.toml
+missing_errors_doc = "allow"             # binary crate, no public API
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+
+[profile.release]
+opt-level = 3        # agent/TUI parse hot paths; "s" saves too little to matter
+lto = "fat"
+codegen-units = 1
+panic = "abort"      # no unwind tables; ratatui::init's panic hook restores the terminal before abort
+strip = "symbols"
+debug = false
+incremental = false
+
+[profile.dev.package."*"]
+opt-level = 1        # arrow record/replay tests are very slow at opt-level 0

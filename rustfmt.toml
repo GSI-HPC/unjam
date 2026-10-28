@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+
+# Stable options only.
+style_edition = "2024"
+max_width = 100
+use_small_heuristics = "Max"
+use_field_init_shorthand = true
+use_try_shorthand = true
+newline_style = "Unix"

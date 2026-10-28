@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 # SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
 
+# Single source of the development toolchain; the MSRV (rust-version in Cargo.toml) is 1.88.
 [toolchain]
 channel = "1.93.1"
+components = ["rustfmt", "clippy"]

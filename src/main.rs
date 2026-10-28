@@ -8,6 +8,7 @@ use clap::Parser;
 #[command(version, about)]
 struct Cli {}
 
+/// Entry point: parses the command line; the modes arrive with the code that implements them.
 fn main() {
     let _cli = Cli::parse();
 }
