@@ -11,7 +11,7 @@
 # one-line reason here.
 main.rs     130  # record subcommand, --replay/--at, ExitCode passthrough
 model.rs    160
-source.rs   135  # Slot::Missing (absent files not retried per tick) and the polling self-check
+source.rs   135  # Slot::Missing (absent files retried once per 10 s) and the polling self-check
 cgroup.rs   160  # measured 158; lowered to keep the module sum at the total cap
 procfs.rs   145  # Ident for P lines plus the host, btime, auxv and limits readers
 agent.rs    450  # stored P identity for S resyncs, pid reuse and moves, T in the writer path

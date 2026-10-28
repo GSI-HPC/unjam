@@ -16,7 +16,7 @@ pub const ESRCH: i32 = 3;
 const ENODEV: i32 = 19;
 
 /// One entity's cached file. `Missing` remembers an absent or unreadable file (controller not
-/// enabled, old kernel, no permission) so it is not retried before the next discovery walk.
+/// enabled, old kernel, no permission) so it is not retried every tick (the walk retries it).
 pub enum Slot {
     Empty,
     Open(File),

@@ -329,7 +329,7 @@ Level semantics (§6): `o` reads nothing, `c` reads cgroup files, `p` adds proce
 | Agent self, each tick | `/proc/self/stat` (utime + stime for self-CPU reporting) | 1 |
 | Record mode, each tick | `cgroup.events` of each `user/*` sibling, own `task_*/cgroup.procs` | 1 each |
 
-A missing file (controller not enabled, old kernel) gives NA. The file is not retried until the next discovery walk.
+A missing file (controller not enabled, old kernel) gives NA. The file is retried by the first discovery walk of each 10 s period, not by every walk, so a node without the io and pids controllers does not pay a failed open per absent file per tick.
 
 ### 5.4 Cost per tick (estimates, **UNVERIFIED** until measured)
 

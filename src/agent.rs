@@ -239,14 +239,16 @@ impl Sampler {
     }
 
     /// Discovery: `X` for vanished cgroups first, then `G` for new ones, parents first (§4.2).
+    /// Absent files are retried on the first walk of each `OFF_WALK_MS` period, not every walk.
     fn walk(&mut self, now: u64, emit: Emit) {
+        let retry = self.walked.is_none_or(|w| w / OFF_WALK_MS != now / OFF_WALK_MS);
         self.walked = Some(now);
         self.seen = self.seen.wrapping_add(1);
         let found = cgroup::walk(&self.opts.root, self.opts.exclude.as_deref());
         for (_, ino, _) in &found {
             let Some(c) = self.cgs.get_mut(ino) else { continue };
             c.seen = self.seen;
-            for s in c.slots.iter_mut().filter(|s| matches!(s, Slot::Missing)) {
+            for s in c.slots.iter_mut().filter(|s| retry && matches!(s, Slot::Missing)) {
                 *s = Slot::Empty;
             }
         }
@@ -765,9 +767,26 @@ mod tests {
         let na: Vec<usize> =
             g[3..].iter().enumerate().filter(|v| *v.1 == "-").map(|v| v.0).collect();
         assert_eq!(na, [5, 9, 10, 11, 12, 13, 14]);
-        let missing =
-            s.cgs.values().flat_map(|c| c.slots.iter()).filter(|s| matches!(s, Slot::Missing));
-        assert_eq!(missing.count(), 6, "absent files are not retried every tick");
+        let missing = |s: &Sampler| {
+            s.cgs
+                .values()
+                .flat_map(|c| c.slots.iter())
+                .filter(|s| matches!(s, Slot::Missing))
+                .count()
+        };
+        assert_eq!(missing(&s), 6);
+        let task = s.opts.root.join("step_0/user/task_1");
+        fs::write(task.join("pids.current"), "7\n").unwrap();
+        let pids = |tick: &[String]| tick[0].split('\t').nth(3 + 11).map(str::to_owned);
+        let again = lines(|e| {
+            s.tick(2000, e);
+        });
+        assert_eq!(pids(&again).as_deref(), Some("-"), "not retried by the next walk");
+        assert_eq!(missing(&s), 6);
+        let later = lines(|e| {
+            s.tick(10_000, e);
+        });
+        assert_eq!(pids(&later).as_deref(), Some("7"), "retried once per OFF_WALK_MS");
     }
 
     #[test]
