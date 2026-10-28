@@ -143,10 +143,10 @@ agent stderr ──> srun stderr ──> TUI stderr-reader thread ──> log ri
 - **`SLURM_LOCALID == 0`, or no Slurm at all:**
   1. Spawn the app as a child with inherited stdio. The recorder never writes to stdout (`clippy::print_stdout = "deny"`).
   2. Determine the scope. If the own cgroup is `…/step_<S>/user/task_<T>`, the scope is `…/step_<S>/user` (every task of the step on this node). Otherwise (outside Slurm) the scope is the own cgroup. The docs recommend wrapping the command in `systemd-run --user --scope`.
-  3. Sample the whole scope at `-i` (default 5 s) with processes on. Rows go straight from the `Sampler` into `record::Writer`, with no wire encode or decode in the job.
-  4. **Lifetime.** Stop when all of these hold: (a) the child has exited; (b) every other child directory of `user/` reports `populated 0` in `cgroup.events`; (c) the own task cgroup's `cgroup.procs` holds only our own pid. Rule (c) catches daemonized descendants left in our own task cgroup. Outside Slurm, only (a) and (c) apply.
+  3. Sample the whole scope at `-i` (default 5 s) with processes on. Sampler events feed a local `state::State`, the viewer's store, and `record::Writer` writes each tick from it as a complete snapshot, with no wire encode or decode in the job. `--root DIR` records a cgroup subtree instead of the own scope (tests, and use outside Slurm); then only (a) applies.
+  4. **Lifetime.** Stop when all of these hold: (a) the child has exited; (b) every other child directory of `user/` reports `populated 0` in `cgroup.events`; (c) the own task cgroup's `cgroup.procs` holds only our own pid and the pids that were there before the app started. Rule (c) catches daemonized descendants left in our own task cgroup. Outside Slurm, only (a) and (c) apply.
   5. Write the final batch and the end-of-stream marker, then exit with the child's code, or 128+signal.
-- **Signals.** `signal_hook::flag::register` for SIGTERM, SIGINT and SIGHUP sets a flag. Signals are **not** forwarded: with `proctrack/cgroup`, Slurm already signals every process in the step, so forwarding would deliver signals such as USR1 twice. The recorder keeps sampling until the lifetime rule holds, so the app's shutdown phase is recorded too.
+- **Signals.** `signal_hook::flag::register` for SIGTERM, SIGINT and SIGHUP sets a flag. Signals are **not** forwarded: where Slurm signals every process in the step, forwarding would deliver signals such as USR1 twice. The recorder keeps sampling until the lifetime rule holds, so the app's shutdown phase is recorded too, but at most 5 s after the signal: `scancel --signal=TERM` reaches only the task leader (the recorder) on Slurm 26.05, so the app may never stop, and the journal must be finished before `KillWait` ends in SIGKILL. The recorder then exits with 128 + signal and Slurm reaps the rest of the step.
 - **Output pattern.** Tokens `%j` (`SLURM_JOB_ID`), `%s` (`SLURM_STEP_ID`), `%n` (hostname), `%%`. A missing value becomes `na`. The default is `unjam-%j.%s-%n.arrows`. Files are opened with `File::create_new` and are never overwritten.
 
 ### 3.6 Replay and offline conversion
@@ -538,7 +538,7 @@ srun's I/O thread throughput and CPU at 1k tasks are **UNVERIFIED**. They will b
 | `ppid` | `UInt32` | yes | Keyframe column |
 | `path` | `Utf8` | yes | Cgroup path relative to the root; keyframe column |
 | `comm`, `cmdline` | `Utf8` | yes | Keyframe columns |
-| one `UInt64` per descriptor, named by `Metric.name` (`cg_cpu_usage_usec`, `p_rss_bytes`, …) | `UInt64` | yes | Field metadata `unjam.unit`, `unjam.kind`, `unjam.source`. NA becomes null |
+| one `UInt64` per descriptor, named by `Metric.name` (`cg_cpu_usage_usec`, `p_rss_bytes`, …) | `UInt64` | yes | Field metadata `unjam.unit`, `unjam.kind` (`counter` or `gauge`), `unjam.source` (`cgroup` or `proc`, from the entity the metric belongs to). NA becomes null |
 
 - **Schema metadata:** `unjam.schema=1`, `unjam.version`, `unjam.host`, `unjam.job`, `unjam.step`, `unjam.root`, `unjam.interval_ms`, `unjam.btime`.
 - **Evolution rules.**
@@ -570,7 +570,7 @@ srun's I/O thread throughput and CPU at 1k tasks are **UNVERIFIED**. They will b
 
 ### 8.5 Recording in the TUI (D41)
 
-- `r` starts or stops recording in a live viewer; `--slurm --record DIR` starts it at launch.
+- `r` starts or stops recording in a live viewer; `--slurm --record DIR` starts it at launch. Without `--record`, `r` records into `unjam-rec-<secs>` in the current directory.
 - The TUI feeds the events it receives into `record::Writer`, one `.arrows` file per node (`DIR/<host>.arrows`, created with `File::create_new`). The schema metadata carries `unjam.source=tui`, so a reader can tell such a file from a `record` journal. Batching, keyframes and crash safety are those of §8.3; replay reads both.
 - Values arrive at the rule intervals that are active, so a TUI recording is as sparse or dense as the view was. About 50 LOC.
 
@@ -1136,8 +1136,8 @@ slurm:
 | 3 | Selective: `unjam --slurm=$J --batch 3 --rule $'0\tstep_0\t500\tp' --rule $'1-2\t.\t2000\tc'` (R-line text without the leading `R\t`, §3.1) | Node 0 shows process rows at INT 500 ms. Nodes 1 and 2 show cgroups only |
 | 4 | Teardown and survival | (a) After `--batch` exits, `squeue -s -j $J -h` shows no `unjam` step within 5 s and the job is still `RUNNING`. (b) `unjam --slurm=$J --interval 1s --batch 25`. After 3 s, `sind ssh worker-2 -- pkill -u alice -f 'unjam agent'`. The last snapshot (≥ 15 s after the kill, past `WaitTime=10`) shows node 2 stale and nodes 0 and 1 with fresh `T`. This checks `--kill-on-bad-exit=0` and `--wait=0` on a `--jobid` step (§3.2). (c) `unjam --slurm=$J --agent-keepalive 5` is started and SIGKILLed: the step is gone within 15 s |
 | 5 | Framing stress: 3 nodes × 500 sleeper processes, `--rule $'*\t.\t100\tp' --budget 64M --batch 30` (30 s; one snapshot per second) | Footer `errors=0`. Bytes per second and fd-cache hit ratio recorded into `docs/perf.md`. Agent RSS < 16 MiB (`T` and `ps`) |
-| 6 | Record: `sbatch -N2 --ntasks-per-node=1 --mem=256M --wrap 'srun /data/…/unjam record -i 200ms -o /home/alice/rec-%j-%n.arrows -- sh -c "dd if=/dev/zero of=/dev/null bs=1M count=3000; exit 3"'` | 2 files. Job exit code 3. `uv run --with pyarrow==21.0.0 tests/sind/check_record.py` (pinned version **UNVERIFIED**): columns and units metadata present; rows > 0; `comm == "dd"` rows exist; `cg_cpu_usage_usec` non-decreasing per `cg`; with `EXTRA`, `cg_io_read_bytes` and `cg_pids_current` non-null on cgroup rows (null without it); the §8.1 Parquet recipe runs and `pq.read_table` gives the IPC row count. `unjam --replay … --batch 1 --at end` lists `dd` |
-| 7 | Record kill: `scancel $J` during record | `check_record.py --truncated` reads ≥ 1 complete batch. `unjam --replay … --batch 1 --at end` succeeds and warns "truncated at byte N" |
+| 6 | Record: `sbatch -N2 --ntasks-per-node=1 --mem=256M --wrap 'srun /data/…/unjam record -i 200ms -o /home/alice/rec-%j-%n.arrows -- sh -c "dd if=/dev/zero of=/dev/null bs=1M count=20000; exit 3"'` | 2 files. Job exit code 3. `uv run --with pyarrow==21.0.0 tests/sind/check_record.py` (pinned version **UNVERIFIED**): columns and units metadata present; rows > 0; `comm == "dd"` rows exist; `cg_cpu_usage_usec` non-decreasing per `cg`; with `EXTRA`, `cg_io_read_bytes` and `cg_pids_current` non-null on cgroup rows (null without it); the §8.1 Parquet recipe runs and `pq.read_table` gives the IPC row count. `unjam --replay … --batch 1 --at end` lists `dd` |
+| 7 | Record kill, twice, 13 s into `record -- sleep 300`: (TERM) `scancel --signal=TERM $J`; (KILL) `pkill -KILL` of the recorder on its node | TERM: `check_record.py` reads a complete journal, replay warns nothing. KILL: `check_record.py --truncated` reads ≥ 1 complete batch, and `unjam --replay … --batch 1 --at end` succeeds and warns "truncated at byte N" once |
 | 8 | Broadcast: copy the binary to `/var/tmp/unjam-local` on the submitter only (node-local, exec allowed; sind mounts `/tmp` `noexec`), then `/var/tmp/unjam-local --slurm=$J --bcast=/var/tmp --batch 2` as alice | 3 nodes report. After teardown, no `/var/tmp/unjam.$J.*` file is left on any worker (`--unlink-self`) |
 
 1k-node fan-out is covered synthetically by the mux unit test. The real srun throughput at many tasks is measured once on a production cluster in phase 5 (Q10).
@@ -1210,7 +1210,7 @@ Open:
 | D16 | Record writes an IPC journal (10 s or 8,192-row keyframed batches); replay reads `.arrows` only | Parquet only (segmented); 65,536-row batches; in-job conversion | Crash-safe with about 2–3 MB of in-job memory (65,536 rows would be about 16 MB). One replay path. Never extends the step |
 | D17 | Wide schema generated from descriptors; names append-only | Fixed wide columns; narrow EAV | No code change per source, analyst-friendly, good compression. EAV bloats IPC (Utf8 name per value) |
 | D18 | Record lifetime: child exited, siblings `populated 0`, own task cgroup holds only self | Scan for leftover processes; child exit only | Cheap and exact; catches daemonized descendants |
-| D19 | No signal forwarding in `record` | Forward TERM, USR1 and others | Slurm already signals every process in the step; forwarding would deliver signals twice |
+| D19 | No signal forwarding in `record`; finish at most 5 s after a signal | Forward TERM, USR1 and others | Where Slurm signals the whole step, forwarding would deliver signals twice; where it signals only the task leader, the 5 s grace still finishes the journal before `KillWait` |
 | D20 | Teardown: EOF, then `scancel` step, then SIGKILL; agent keepalive | SIGTERM via rustix | No libc. Orphan-proof even if srun dies uncleanly |
 | D21 | Last matching rule wins; `Off` takes interval `-` | Most-specific match; interval 0 = off | Predictable and cheap. Removes the clamp contradiction |
 | D22 | No metric masks (`cols`) and no column chooser in v1 | extensible's masks and chooser | Per-subtree rule intervals bound cost; the Detail view shows everything; all-NA columns hide themselves; YAGNI |

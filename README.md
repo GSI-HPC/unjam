@@ -46,8 +46,18 @@ Keys: `↑↓` move, `←→` fold, `v` layout (step, node, flat), `s` sort, `/`
 
 `unjam record` writes one Arrow IPC stream (`.arrows`, LZ4-compressed) per node. Every batch
 covers at most 10 s or 8,192 rows and decodes on its own, so a killed job leaves a readable
-prefix. In the TUI, `r` (or `--record DIR` with `--slurm`) records what the viewer receives,
-one file per node.
+prefix. `-o` takes `%j` (job), `%s` (step), `%n` (host) and `%%`; existing files are never
+overwritten. `-i` sets the interval (default 5s), `--no-procs` records cgroups only. The
+recorder keeps sampling until the app and everything it left in the step are gone, and exits
+with the app's exit code. After SIGTERM it finishes the journal within 5 s and exits with
+128 + signal.
+
+In the TUI, `r` (or `--record DIR` with `--slurm`) records what the viewer receives into
+`DIR/<host>.arrows` (default DIR `unjam-rec-<secs>`); `r` again stops.
+
+`unjam --replay FILE...` shows recordings on one shared timeline. Keys: `space` play/pause,
+`,` `.` one tick, `<` `>` 60 s, `g` `G` start/end. `--at TIME` starts at `start`, `end`,
+`+DUR`, `-DUR` or `HH:MM[:SS]` (UTC); with `--batch N` it prints N snapshots from there.
 
 Columns: `ts`, `kind` (1 = cgroup, 2 = process), `cg`, `pid`, `start`, `ppid`, `path`, `comm`,
 `cmdline`, and one `UInt64` column per metric (such as `cg_cpu_usage_usec` or `p_rss_bytes`)
