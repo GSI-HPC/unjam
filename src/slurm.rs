@@ -179,14 +179,11 @@ impl Remote {
     /// agents' step, wait 3 s more, then SIGKILL.
     pub fn stop(mut self, step: Option<&str>) {
         let mut gone = |ms: u64| {
-            let t = Instant::now();
-            while t.elapsed() < Duration::from_millis(ms) {
-                if !matches!(self.0.try_wait(), Ok(None)) {
-                    return true;
-                }
+            let end = Instant::now() + Duration::from_millis(ms);
+            while matches!(self.0.try_wait(), Ok(None)) && Instant::now() < end {
                 thread::sleep(Duration::from_millis(50));
             }
-            false
+            !matches!(self.0.try_wait(), Ok(None))
         };
         if gone(3000) {
             return;
