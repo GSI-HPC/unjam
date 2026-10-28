@@ -1,0 +1,15 @@
+anon 3670016
+file 1835008
+kernel 28672
+kernel_stack 16384
+pagetables 8192
+sock 0
+shmem 0
+file_mapped 28672
+file_dirty 0
+anon_thp 0
+inactive_anon 0
+active_anon 0
+inactive_file 0
+active_file 0
+unevictable 0

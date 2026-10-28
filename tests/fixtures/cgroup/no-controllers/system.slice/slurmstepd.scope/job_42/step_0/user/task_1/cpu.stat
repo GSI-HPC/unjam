@@ -1,0 +1,9 @@
+usage_usec 1000003
+user_usec 800001
+system_usec 200002
+core_sched.force_idle_usec 0
+nr_periods 0
+nr_throttled 0
+throttled_usec 7
+nr_bursts 0
+burst_usec 0

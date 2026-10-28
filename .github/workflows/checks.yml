@@ -8,6 +8,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Every job runs the same `mise run` task as a local check and installs only the tools it needs.
+  MISE_TASK_RUN_AUTO_INSTALL: "false"
 
 jobs:
   reuse:
@@ -15,33 +17,35 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: fsfe/reuse-action@v6
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: pipx:reuse
+      - run: mise run reuse
 
   fmt:
     name: Format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - run: rustup component add rustfmt
-      - run: cargo fmt --check
+      - uses: jdx/mise-action@v5
+        with:
+          install: false
+      - run: mise run fmt
 
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       security-events: write
     steps:
       - uses: actions/checkout@v6
-      - run: rustup component add clippy
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: cargo:clippy-sarif cargo:sarif-fmt
       - uses: Swatinem/rust-cache@v2
-      - name: Install SARIF tools
-        run: cargo install clippy-sarif sarif-fmt
       - name: Run clippy
-        run: >
-          cargo clippy --all-targets --all-features --message-format=json -- -D warnings
-          | clippy-sarif
-          | tee clippy-results.sarif
-          | sarif-fmt
+        run: mise run lint:sarif
       - name: Upload analysis results to GitHub
         uses: github/codeql-action/upload-sarif@v4
         with:
@@ -54,11 +58,54 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - run: cargo build
+      - uses: jdx/mise-action@v5
+        with:
+          install: false
+      - uses: Swatinem/rust-cache@v2
+      - run: mise run build
 
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - run: cargo test
+      - uses: jdx/mise-action@v5
+        with:
+          install: false
+      - uses: Swatinem/rust-cache@v2
+      - run: mise run test
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: jdx/mise-action@v5
+        with:
+          install: false
+      - uses: Swatinem/rust-cache@v2
+      - run: mise run msrv
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: cargo:cargo-deny
+      - run: mise run deny
+
+  size:
+    name: Size and unsafe ledger
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: jdx/mise-action@v5
+        with:
+          install: false
+      - uses: Swatinem/rust-cache@v2
+      - run: mise run size
+      - run: mise run size:self-test
+      - run: mise run unsafe-deps
+      - run: mise run unsafe-deps:self-test

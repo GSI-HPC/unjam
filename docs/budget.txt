@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+#
+# Size budgets, enforced by tests/budget.rs (module lines) and scripts/size.sh (binary, crates).
+#
+# Module lines: `<file under src/> <code lines>`. Code lines exclude blank lines, comment lines,
+# the trailing #[cfg(test)] module and lines between `// budget: data` and `// budget: end`
+# (compiled-in data such as the theme table). A module may exceed its number by 10 %; the sum
+# of all modules may not exceed `total`. Modules listed here but not yet written are skipped;
+# every file in src/ must have a line. A budget is raised only in the PR that needs it, with a
+# one-line reason here.
+main.rs     130  # record subcommand, --replay/--at, ExitCode passthrough
+model.rs    160
+source.rs   135  # Slot::Missing (absent files not retried per tick) and the polling self-check
+cgroup.rs   160  # measured 158; lowered to keep the module sum at the total cap
+procfs.rs   145  # Ident for P lines plus the host, btime, auxv and limits readers
+agent.rs    450  # stored P identity for S resyncs, pid reuse and moves, T in the writer path
+wire.rs     200
+slurm.rs    175
+record.rs   560  # journal writer/reader, replay tracks with seek, run_record, TUI recording (D41)
+state.rs    457  # rows of three layouts with folded ranges, PIDS fallback, history ring (D39, D41)
+tui.rs      660  # replay cursor and keys, 'r' recording, signal teardown
+theme.rs     60
+total      3460  # record and replay: journal writer/reader, replay and the recorder (§10.2)
+
+# Release binary (bytes) and resolved normal dependencies (crates, root excluded) on
+# x86_64-unknown-linux-gnu. Re-baselined from measurement (+5 %) by the change that needs it.
+# Measured with arrow-ipc/array/schema and signal-hook (record and replay): 3,466,568 bytes,
+# 90 crates.
+binary_bytes 3639896
+crates         95

@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+
+# No msrv key: clippy reads rust-version from Cargo.toml.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+too-many-lines-threshold = 60
