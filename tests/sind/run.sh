@@ -268,6 +268,107 @@ for n in 0 1 2; do
 	fi
 done
 
+# Waits up to 120 s until job $1 has left the queue.
+wait_done() {
+	local deadline=$((SECONDS + 120))
+	while [ -n "$(as_alice squeue -h -j "$1" -o %T 2>/dev/null)" ]; do
+		[ "$SECONDS" -lt "$deadline" ] || return 1
+		sleep 2
+	done
+}
+
+# Copies alice's files matching $1 (a glob under /home/alice) to $OUT/rec; prints their names.
+fetch() {
+	mkdir -p "$OUT/rec"
+	as_alice sh -c "cd /home/alice && tar -cf - $1" | tar -C "$OUT/rec" -xvf -
+}
+
+pyarrow() { uv run -q --with pyarrow==21.0.0 "$@"; }
+LOCAL_BIN=target/$(uname -m)-unknown-linux-musl/release/unjam
+extra=${EXTRA:+--extra}
+
+# IT 6: record. One recorder per node next to the app; the job's exit code is the app's. The
+# journals are checked with pyarrow, converted with the README's Parquet recipe and replayed.
+R=$(as_alice sbatch --parsable -N2 --ntasks-per-node=1 --mem=256M -o /dev/null --wrap \
+	"srun $BIN record -i 200ms -o /home/alice/rec-%j-%n.arrows -- sh -c 'dd if=/dev/zero of=/dev/null bs=1M count=20000; exit 3'")
+wait_done "$R" || not_ok "IT 6: job $R still queued"
+code=$(as_alice scontrol show job "$R" | sed -n 's/.* ExitCode=\([0-9]*\):.*/\1/p')
+[ "$code" = 3 ] && ok "IT 6: job exit code 3 passed through" || not_ok "IT 6: job exit code ${code:-?}"
+files=$(fetch "rec-$R-*.arrows" | sed "s|^|$OUT/rec/|")
+if [ "$(wc -w <<<"$files")" -eq 2 ]; then ok "IT 6: two journals"; else not_ok "IT 6: journals: $files"; fi
+for f in $files; do
+	pyarrow python -c "import sys,pyarrow as pa,pyarrow.parquet as pq; \
+pq.write_table(pa.ipc.open_stream(sys.argv[1]).read_all(), sys.argv[2], compression='lz4')" \
+		"$f" "${f%.arrows}.parquet" || not_ok "IT 6: Parquet recipe on $f"
+done
+# shellcheck disable=SC2086 # word splitting intended
+if pyarrow tests/sind/check_record.py --comm dd $extra $files; then
+	ok "IT 6: pyarrow reads the journals, metadata, monotonic counters, Parquet row counts"
+else
+	not_ok "IT 6: check_record.py"
+fi
+# shellcheck disable=SC2086
+if "$LOCAL_BIN" --replay $files --batch 1 --at end >"$OUT/sind-it6.txt" 2>&1 &&
+	grep -q '^nodes=2 ' "$OUT/sind-it6.txt" && grep -q 'dd if=/dev/zero' "$OUT/sind-it6.txt"; then
+	ok "IT 6: --replay --batch lists dd on 2 nodes"
+else
+	not_ok "IT 6: --replay --batch lists dd on 2 nodes"
+	cat "$OUT/sind-it6.txt"
+fi
+
+# IT 6b: lifetime rule. The app exits at once but leaves a daemonized sleep in its task cgroup;
+# the recorder (and so the step) waits for it.
+t0=$SECONDS
+as_alice srun -N1 "$BIN" record -i 200ms -o /home/alice/daemon-%j.arrows -- sh -c 'setsid sleep 4 & exit 0'
+if [ $((SECONDS - t0)) -ge 4 ]; then
+	ok "IT 6b: the recorder waits for a daemonized descendant"
+else
+	not_ok "IT 6b: the step ended after $((SECONDS - t0)) s, before the daemon"
+fi
+
+# IT 6c: TUI recording. The viewer writes what it receives, one journal per node, which
+# replays like a record journal.
+attach it6c "$J" --batch 3 --record "/home/alice/tui-$J" || not_ok "IT 6c: unjam --record"
+files=$(fetch "tui-$J/*.arrows" | sed "s|^|$OUT/rec/|")
+# shellcheck disable=SC2086
+if [ "$(wc -w <<<"$files")" -eq 3 ] && pyarrow tests/sind/check_record.py --source tui $extra $files &&
+	"$LOCAL_BIN" --replay $files --batch 1 --at end >"$OUT/sind-it6c-replay.txt" 2>&1 &&
+	grep -q '^nodes=3 ' "$OUT/sind-it6c-replay.txt" && grep -q 'sleep 600' "$OUT/sind-it6c-replay.txt"; then
+	ok "IT 6c: --record DIR writes 3 journals that replay with sleep 600"
+else
+	not_ok "IT 6c: --record DIR journals ($files)"
+	cat "$OUT/sind-it6c-replay.txt" 2>/dev/null || true
+fi
+
+# IT 7: a cancelled job. SIGTERM (scancel) reaches only the recorder: it writes its open batch
+# and the end of stream within its 5 s grace and exits, and Slurm reaps the app. SIGKILL of the
+# recorder itself after more than one 10 s batch: a readable prefix remains, and replay warns
+# "truncated at byte N".
+for sig in TERM KILL; do
+	K=$(as_alice sbatch --parsable -N1 -n1 -w worker-0 --mem=256M -o /dev/null --wrap \
+		"srun $BIN record -i 200ms -o /home/alice/kill-$sig-%j.arrows -- sleep 300")
+	wait_running "$K" || not_ok "IT 7: job $K not running"
+	sleep 13
+	if [ "$sig" = TERM ]; then
+		as_alice scancel --signal=TERM "$K"
+	else
+		on_worker 0 pkill -KILL -f "'^$BIN record'"
+	fi
+	wait_done "$K" || as_alice scancel "$K"
+	f=$OUT/rec/$(fetch "kill-$sig-$K.arrows")
+	trunc=${sig/TERM/}
+	"$LOCAL_BIN" --replay "$f" --batch 1 --at end >"$OUT/sind-it7-$sig.txt" 2>&1 || true
+	warned=$(grep -c 'truncated at byte [0-9]' "$OUT/sind-it7-$sig.txt" || true)
+	# shellcheck disable=SC2086
+	if pyarrow tests/sind/check_record.py ${trunc:+--truncated} --comm sleep $extra "$f" &&
+		grep -q '^nodes=1 ' "$OUT/sind-it7-$sig.txt" && [ "$warned" -eq "$([ -n "$trunc" ] && echo 1 || echo 0)" ]; then
+		ok "IT 7: SIG$sig leaves a readable journal (truncation warnings: $warned)"
+	else
+		not_ok "IT 7: SIG$sig journal"
+		cat "$OUT/sind-it7-$sig.txt"
+	fi
+done
+
 # IT 5: framing stress, 3 nodes × 500 processes at 100 ms. No decode errors; agent RSS < 16 MiB.
 F=$(as_alice sbatch --parsable -N3 --ntasks-per-node=1 --cpus-per-task=1 --mem=256M \
 	--wrap 'srun sh -c "for i in \$(seq 500); do sleep 900 & done; wait"')

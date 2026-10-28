@@ -41,7 +41,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: jdx/mise-action@v5
         with:
-          install: false
+          # uv for IT 6/7 (pyarrow); everything else the tests need is on the runner.
+          install_args: pipx:uv
       - uses: Swatinem/rust-cache@v2
       # Static binary: the Rocky Linux node images may have an older glibc than the runner.
       - run: mise run build:musl
