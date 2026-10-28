@@ -152,12 +152,8 @@ fn parse_dur(s: &str) -> Result<Duration, String> {
 
 /// `4M`, `512K`, `1G` or plain bytes, for `--budget`.
 fn parse_size(s: &str) -> Result<u64, String> {
-    let (num, shift) = match s.as_bytes().last() {
-        Some(b'K') => (&s[..s.len() - 1], 10),
-        Some(b'M') => (&s[..s.len() - 1], 20),
-        Some(b'G') => (&s[..s.len() - 1], 30),
-        _ => (s, 0),
-    };
+    let num = s.strip_suffix(['K', 'M', 'G']).unwrap_or(s);
+    let shift = 10 * ["", "K", "M", "G"].iter().position(|&u| u == &s[num.len()..]).unwrap_or(0);
     num.parse::<u64>().map(|n| n << shift).map_err(|_| format!("bad size: {s:?}"))
 }
 
@@ -310,5 +306,7 @@ mod tests {
         assert!(parse("agent --batch 1").is_err());
         assert_eq!(parse_size("4M"), Ok(4 << 20));
         assert!(parse_size("4X").is_err());
+        assert_eq!((parse_size("2G"), parse_size("512")), (Ok(2 << 30), Ok(512)));
+        assert!(parse_size("4KK").is_err() && parse_size("K").is_err());
     }
 }
