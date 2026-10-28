@@ -3,6 +3,10 @@
 
 use clap::Parser;
 
+/// Metric descriptors, the interchange event and the sampling rules.
+#[allow(dead_code, reason = "no command uses the model yet")]
+mod model;
+
 /// unjam - Utility for Node/Job Analysis and Monitoring
 #[derive(Parser)]
 #[command(version, about)]
