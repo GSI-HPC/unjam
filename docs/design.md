@@ -147,7 +147,7 @@ agent stderr ──> srun stderr ──> TUI stderr-reader thread ──> log ri
   4. **Lifetime.** Stop when all of these hold: (a) the child has exited; (b) every other child directory of `user/` reports `populated 0` in `cgroup.events`; (c) the own task cgroup's `cgroup.procs` holds only our own pid and the pids that were there before the app started. Rule (c) catches daemonized descendants left in our own task cgroup. Outside Slurm, only (a) and (c) apply.
   5. Write the final batch and the end-of-stream marker, then exit with the child's code, or 128+signal.
 - **Signals.** `signal_hook::flag::register` for SIGTERM, SIGINT and SIGHUP sets a flag. Signals are **not** forwarded: where Slurm signals every process in the step, forwarding would deliver signals such as USR1 twice. The recorder keeps sampling until the lifetime rule holds, so the app's shutdown phase is recorded too, but at most 5 s after the signal: `scancel --signal=TERM` reaches only the task leader (the recorder) on Slurm 26.05, so the app may never stop, and the journal must be finished before `KillWait` ends in SIGKILL. The recorder then exits with 128 + signal and Slurm reaps the rest of the step.
-- **Output pattern.** Tokens `%j` (`SLURM_JOB_ID`), `%s` (`SLURM_STEP_ID`), `%n` (hostname), `%%`. A missing value becomes `na`. The default is `unjam-%j.%s-%n.arrows`. Files are opened with `File::create_new` and are never overwritten.
+- **Output pattern.** Tokens `%j` (`SLURM_JOB_ID`), `%s` (`SLURM_STEP_ID`), `%n` (hostname), `%%`. A missing value becomes `na`. The default is `unjam-%j.%s-%n.arrows`. Files are created new with mode 0600 (they hold command lines) and are never overwritten.
 
 ### 3.6 Replay and offline conversion
 
@@ -551,7 +551,7 @@ srun's I/O thread throughput and CPU at 1k tasks are **UNVERIFIED**. They will b
 
 ### 8.3 Lifecycle and crash safety
 
-1. `File::create_new` → `BufWriter` → `StreamWriter::try_new_with_options(…, IpcWriteOptions::default().try_with_compression(Some(CompressionType::LZ4_FRAME)))`. The schema message is written at once.
+1. Create new with mode 0600 (`create_new`, `OpenOptionsExt::mode`) → `BufWriter` → `StreamWriter::try_new_with_options(…, IpcWriteOptions::default().try_with_compression(Some(CompressionType::LZ4_FRAME)))`. The schema message is written at once.
 2. Rows go into arrow-array builders. A batch is cut every **10 s or 8,192 rows**, whichever comes first, then written and flushed.
    - Value memory at the row cap: 8,192 rows × about 30 UInt64 columns × 8 B ≈ 2.0 MB. Validity bitmaps, builder over-allocation and the Utf8 keyframe columns add about 20–50 %, so the bound is about 3 MB.
    - Typically about 100 KB. At 1,000 entities and a 5 s interval, a 10 s batch holds 2,000 rows.
@@ -573,7 +573,7 @@ srun's I/O thread throughput and CPU at 1k tasks are **UNVERIFIED**. They will b
 ### 8.5 Recording in the TUI (D41)
 
 - `r` starts or stops recording in a live viewer; `--slurm --record DIR` starts it at launch. Without `--record`, `r` records into `unjam-rec-<secs>` in the current directory.
-- The TUI feeds the events it receives into `record::Writer`, one `.arrows` file per node (`DIR/<host>.arrows`, created with `File::create_new`). The schema metadata carries `unjam.source=tui`, so a reader can tell such a file from a `record` journal. Batching, keyframes and crash safety are those of §8.3; replay reads both.
+- The TUI feeds the events it receives into `record::Writer`, one `.arrows` file per node (`DIR/<host>.arrows`, created new with mode 0600; a missing `DIR` is created with mode 0700, since the files hold other users' command lines when root records). The schema metadata carries `unjam.source=tui`, so a reader can tell such a file from a `record` journal. Batching, keyframes and crash safety are those of §8.3; replay reads both.
 - Values arrive at the rule intervals that are active, so a TUI recording is as sparse or dense as the view was. About 50 LOC.
 
 ### 8.6 Interop claims (each tested in IT 6)

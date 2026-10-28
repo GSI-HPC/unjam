@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -98,8 +99,9 @@ pub struct Writer {
 }
 
 impl Writer {
-    /// Creates `path` (never overwriting) and writes the schema message at once. Node `i`'s
-    /// identity and the `meta` pairs become `unjam.*` schema metadata.
+    /// Creates `path` (never overwriting; owner-only, as it holds command lines) and writes the
+    /// schema message at once. Node `i`'s identity and the `meta` pairs become `unjam.*` schema
+    /// metadata.
     pub fn create(path: &Path, st: &State, i: usize, meta: &[(&str, String)]) -> io::Result<Self> {
         let n = &st.nodes[i];
         let btime = if n.btime == NA { "na".into() } else { n.btime.to_string() };
@@ -108,7 +110,8 @@ impl Writer {
         let all = meta.iter().cloned().chain(fixed).chain(node);
         let schema = schema(&st.cols, all.map(|(k, v)| (format!("unjam.{k}"), v)).collect());
         let lz4 = IpcWriteOptions::default().try_with_compression(Some(CompressionType::LZ4_FRAME));
-        let file = BufWriter::new(File::create_new(path)?);
+        let file =
+            BufWriter::new(File::options().write(true).create_new(true).mode(0o600).open(path)?);
         let mut w =
             StreamWriter::try_new_with_options(file, &schema, lz4.map_err(io::Error::other)?)
                 .map_err(io::Error::other)?;
@@ -530,9 +533,10 @@ pub struct Rec {
 }
 
 impl Rec {
-    /// A recording into `dir` (created if missing) of a viewer on `job`.
+    /// A recording into `dir` (created owner-only if missing) of a viewer on `job`.
     pub fn new(dir: PathBuf, job: &str, interval_ms: u32) -> Result<Self, String> {
-        fs::create_dir_all(&dir).map_err(|e| format!("record {}: {e}", dir.display()))?;
+        let made = fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir);
+        made.map_err(|e| format!("record {}: {e}", dir.display()))?;
         let iv = interval_ms.to_string();
         let meta = [("source", "tui".into()), ("job", job.into()), ("interval_ms", iv)];
         Ok(Self { dir, meta, files: HashMap::new() })
@@ -817,6 +821,18 @@ mod tests {
             .unwrap()
             .map(Result::unwrap)
             .collect()
+    }
+
+    #[test]
+    fn journals_and_recording_dirs_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp("mode");
+        let rec = Rec::new(dir.0.join("a/b"), "42", 1000).unwrap();
+        let (path, _) = journal(&rec.dir, "n1", 1);
+        for p in [&dir.0.join("a"), &rec.dir, &path] {
+            let mode = fs::metadata(p).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "{}: {mode:o}", p.display());
+        }
     }
 
     #[test]
