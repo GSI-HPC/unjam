@@ -65,7 +65,7 @@ This is the living design of the repository. It started as the reviewed round-on
 - **Input thread (D38).** In every viewer mode a dedicated thread blocks in `crossterm::event::read()` and queues `Msg::Key` and `Msg::Resize` on an unbounded key queue, then wakes the main thread through the channel it blocks on (§7.3). `q` (outside filter editing) and Ctrl-C set the quit flag in the input thread itself.
 - `--rule` takes the text of a control-protocol `R` line (§6.2) **without** the leading `R\t`, for example `--rule $'*\t.\t1000\tp'`. It replaces the default rules. It is the hook the integration tests use.
 - `--agent-keepalive SECS` (hidden, for tests) is forwarded to every agent as `--keepalive SECS`. The `srun_args` golden tests cover it.
-- `--batch N` prints N text snapshots (`top -b`) using `state::rows` and exits. It replaces capture-and-assert scripts in the sind tests. Its footer reports `nodes=… stale=… errors=… dropped=…`.
+- `--batch N` prints N text snapshots (`top -b`) using `state::rows` and exits. It replaces capture-and-assert scripts in the sind tests. Its footer reports `nodes=… stale=… errors=… dropped=…`. Names from agents and journals reach the terminal unfiltered here, so every control character (ESC, DEL, C1) except the line breaks is printed as `?`.
 - There is no async runtime: std threads plus `std::sync::mpsc` only (ADR D3).
 
 ### 3.2 Attach: launch sequence and exact srun line

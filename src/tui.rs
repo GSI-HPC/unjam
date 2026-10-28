@@ -826,7 +826,8 @@ fn help(app: &App) -> Vec<String> {
 }
 
 /// One `--batch` snapshot (`top -b`): header, every row of the current layout as text, and a
-/// footer with node, stale, error and drop counts.
+/// footer with node, stale, error and drop counts. Names come from agents and journals and go
+/// straight to a terminal, so every control char (ESC, DEL, C1) but `\n` becomes `?`.
 pub fn snapshot(app: &App, w: &mut dyn Write) -> io::Result<()> {
     let rows = state::rows(&app.st, &app.view, usize::MAX);
     let (cols, [l0, l1]) = (shown(&rows), title(app));
@@ -848,6 +849,7 @@ pub fn snapshot(app: &App, w: &mut dyn Write) -> io::Result<()> {
     let stale = (0..).zip(nodes).filter(|&(i, _)| app.stale(i)).count();
     let errors: u64 = nodes.iter().map(|x| x.errors).sum();
     let dropped: u64 = nodes.iter().map(|x| u64::from(x.dropped)).sum();
+    let out = out.replace(|c: char| c.is_control() && c != '\n', "?");
     writeln!(w, "{out}nodes={n} stale={stale} errors={errors} dropped={dropped}\n")
 }
 
@@ -1012,6 +1014,19 @@ mod tests {
         let mut out = Vec::new();
         snapshot(&app, &mut out).unwrap();
         golden("batch-local.txt", &String::from_utf8(out).unwrap());
+    }
+
+    #[test]
+    fn batch_snapshot_replaces_terminal_controls() {
+        let (mut app, _rx) = app(false, "mono");
+        host(&mut app, 0, "n\u{1b}]0;PWNED\u{7}", 1);
+        feed(&mut app, 0, &["P 30 1 3 1 x\u{7f} \u{9b}2J".into()]);
+        app.st.derive();
+        let mut out = Vec::new();
+        snapshot(&app, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(!out.chars().any(|c| c.is_control() && c != '\n'), "{out:?}");
+        assert!(out.contains("n?]0;PWNED?"), "{out}");
     }
 
     #[test]
