@@ -4,8 +4,11 @@
 use clap::Parser;
 
 /// Metric descriptors, the interchange event and the sampling rules.
-#[allow(dead_code, reason = "no command uses the model yet")]
+#[allow(dead_code, reason = "no command uses the protocol yet")]
 mod model;
+/// The agent ↔ TUI text codecs.
+#[allow(dead_code, reason = "no command uses the protocol yet")]
+mod wire;
 
 /// unjam - Utility for Node/Job Analysis and Monitoring
 #[derive(Parser)]
