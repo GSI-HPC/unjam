@@ -8,8 +8,20 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
 
   - package-ecosystem: cargo
     directory: /
     schedule:
       interval: monthly
+    groups:
+      arrow:
+        patterns: ["arrow-*"]
+      tui:
+        patterns: ["ratatui*", "crossterm", "signal-hook"]
+    ignore:
+      # crossterm 0.29 requires signal-hook ^0.3.17; 0.4 would add a second copy (docs/deps.md).
+      - dependency-name: signal-hook
+        versions: [">=0.4"]

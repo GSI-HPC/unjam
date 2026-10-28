@@ -7,10 +7,17 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Weekly, to catch changes in the sind node images and tools.
+    - cron: "0 4 * * 1"
 
 permissions:
+  contents: read
   security-events: write
 
 jobs:
   checks:
     uses: ./.github/workflows/checks.yml
+
+  integration:
+    uses: ./.github/workflows/integration.yml

@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+
+name: Integration
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  sind:
+    name: sind (Slurm ${{ matrix.slurm }}${{ matrix.extra && ', io+pids' || '' }}${{ matrix.jobidpaths && ', JobIdPaths' || '' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 25.11 as a default site leaves it: no io and pids controllers in job cgroups.
+          - slurm: "25.11"
+          # 26.05 default: SLUID job directories.
+          - slurm: "26.05"
+            extra: "yes"
+          # 26.05 with job_<id> directories.
+          - slurm: "26.05"
+            extra: "yes"
+            jobidpaths: "yes"
+    env:
+      # One realm: each matrix job has its own runner and Docker daemon (sind guides/ci-cd.md).
+      SIND_REALM: unjam-it
+      SIND_PROGRESS: plain
+      SIND_PROGRESS_LOG: ${{ github.workspace }}/sind-events.jsonl
+      MISE_TASK_RUN_AUTO_INSTALL: "false"
+      SLURM: ${{ matrix.slurm }}
+      EXTRA: ${{ matrix.extra }}
+      JOBIDPATHS: ${{ matrix.jobidpaths }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: jdx/mise-action@v5
+        with:
+          install: false
+      - uses: Swatinem/rust-cache@v2
+      # Static binary: the Rocky Linux node images may have an older glibc than the runner.
+      - run: mise run build:musl
+      - run: mise run it:cluster
+      - uses: GSI-HPC/sind-action@v2
+        with:
+          version: v0.15.0
+          wait: 10m
+          realm: ${{ env.SIND_REALM }}
+          clusters: |
+            - ${{ github.workspace }}/target/sind-cluster.yaml
+      - run: mise run it:test
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sind-${{ strategy.job-index }}
+          path: |
+            target/sind-*
+            sind-events.jsonl
+          if-no-files-found: ignore
