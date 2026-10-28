@@ -161,8 +161,9 @@ fn control(mut w: ChildStdin, ctl: &Receiver<String>) {
 }
 
 /// The stdout reader (§7.3): whole lines in chunks of up to 64 KiB, `Msg::End` at EOF. A
-/// "line" that fills the whole buffer is junk and dropped.
-fn lines(mut r: impl Read, tx: &SyncSender<Msg>) {
+/// "line" that fills the whole buffer is junk: its first 64 KiB are dropped, and its tail
+/// arrives as a line of its own that fails to decode. Agents never write such lines.
+pub fn lines(mut r: impl Read, tx: &SyncSender<Msg>) {
     let (mut buf, mut keep) = (vec![0; 1 << 16], 0);
     while let Ok(n @ 1..) = r.read(&mut buf[keep..]) {
         let end = keep + n;
@@ -241,7 +242,7 @@ pub fn view(arg: &str, a: &SlurmArgs, opts: Opts, batch: Option<u32>) -> Result<
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use clap::Parser;
 
     use super::*;
@@ -317,5 +318,52 @@ mod tests {
         lines(&data[..], &tx);
         let got: Vec<_> = rx.try_iter().collect();
         assert!(matches!(&got[..], [Msg::Lines(b), Msg::End] if b == b"0\tT 1\n1\tT 2\n"));
+    }
+
+    /// Serves a byte string in reads of 1 to 70,000 bytes, so lines straddle reads and the
+    /// reader's 64 KiB buffer, as on a busy srun pipe.
+    pub(crate) struct Trickle<'a>(pub &'a [u8], pub u64);
+
+    impl Read for Trickle<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.1 = self
+                .1
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let n = usize::try_from(self.1 >> 33).unwrap() % 70_000 + 1;
+            let (head, rest) = self.0.split_at(n.min(buf.len()).min(self.0.len()));
+            buf[..head.len()].copy_from_slice(head);
+            self.0 = rest;
+            Ok(head.len())
+        }
+    }
+
+    /// Runs the reader over `r` and returns the chunks it sent, checking that `Msg::End` comes last.
+    fn chunks(r: impl Read) -> Vec<Vec<u8>> {
+        let (tx, rx) = mpsc::sync_channel(1 << 12);
+        lines(r, &tx);
+        let mut got: Vec<_> = rx.try_iter().collect();
+        assert!(matches!(got.pop(), Some(Msg::End)));
+        got.into_iter()
+            .map(|m| if let Msg::Lines(b) = m { b } else { panic!("not Lines") })
+            .collect()
+    }
+
+    #[test]
+    fn reader_carries_partial_lines_across_short_reads() {
+        let line = |i: usize| format!("{}\tT {i}{}\n", i % 1000, "x".repeat(i % 997));
+        let data: Vec<u8> = (0..4000).flat_map(|i| line(i).into_bytes()).collect();
+        let got = chunks(Trickle(&data, 7));
+        assert!(got.len() > 30 && got.iter().all(|c| c.ends_with(b"\n")));
+        assert!(got.concat() == data, "every line arrives whole and in order");
+    }
+
+    #[test]
+    fn reader_drops_the_head_of_an_overlong_line() {
+        let mut data = b"a\n".to_vec();
+        data.extend(vec![b'x'; (1 << 16) + 10]);
+        data.extend(b"\nb\n");
+        let got = chunks(&data[..]);
+        assert_eq!(got, [b"a\n".to_vec(), b"xxxxxxxxxx\nb\n".to_vec()]);
     }
 }

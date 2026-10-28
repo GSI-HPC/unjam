@@ -1015,20 +1015,23 @@ mod tests {
         stdout
     }
 
-    /// The TUI side: 64 KiB reads, split at the last newline, `split_node`, `parse`, apply.
+    /// The TUI side: srun stdout through the real reader in short reads, `split_node`, `parse`,
+    /// apply.
     fn demux(stdout: &[u8]) -> State {
-        let mut got = State::new();
-        let (mut rem, mut vals) = (Vec::new(), Vec::new());
-        for piece in stdout.chunks(65_536) {
-            rem.extend_from_slice(piece);
-            let cut = rem.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
-            for line in rem[..cut].split_inclusive(|&b| b == b'\n') {
-                let (node, rest) = wire::split_node(line).unwrap();
-                got.apply(node, &wire::parse(rest, &mut vals).unwrap(), 0).unwrap();
+        let (tx, rx) = mpsc::sync_channel(4);
+        let (mut got, mut vals, mut seen) = (State::new(), Vec::new(), 0);
+        thread::scope(|sc| {
+            sc.spawn(move || crate::slurm::lines(crate::slurm::tests::Trickle(stdout, 3), &tx));
+            for msg in rx {
+                let Msg::Lines(b) = msg else { continue };
+                seen += b.len();
+                for line in b.split_inclusive(|&b| b == b'\n') {
+                    let (node, rest) = wire::split_node(line).unwrap();
+                    got.apply(node, &wire::parse(rest, &mut vals).unwrap(), 0).unwrap();
+                }
             }
-            rem.drain(..cut);
-        }
-        assert!(rem.is_empty());
+        });
+        assert_eq!(seen, stdout.len());
         got
     }
 
