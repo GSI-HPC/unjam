@@ -668,7 +668,7 @@ fn bar(t: &Theme, hist: &[u16]) -> Vec<Span<'static>> {
     let span = |h: u16| {
         let lvl = if h == 0 { 0 } else { 1 + (u32::from(h) * 7 / scale).min(7) as usize };
         let style = if h == 0 { t.dim } else { Style::new().fg(t.heat[band(f64::from(h))]) };
-        Span::styled(t.glyphs.bars[lvl].to_string(), style)
+        Span::styled(t.glyphs.bars[lvl], style)
     };
     hist.iter().map(|&h| span(h)).collect()
 }
@@ -716,8 +716,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped bar widths")]
 fn strip_line(app: &App, t: &Theme, width: u16) -> Vec<Span<'static>> {
     let (nodes, [used, total, ncpu]) = (&app.st.nodes, app.mon.host);
-    let glyph =
-        |i: usize, style: Style, n| Span::styled(t.glyphs.bars[i].to_string().repeat(n), style);
+    let glyph = |i: usize, style: Style| Span::styled(t.glyphs.bars[i], style);
     let heat = |pm: f64| Style::new().fg(t.heat[band(pm)]);
     if !app.opts.local {
         let per = nodes.len().div_ceil(usize::from(width.saturating_sub(7)).max(1)).max(1);
@@ -725,7 +724,7 @@ fn strip_line(app: &App, t: &Theme, width: u16) -> Vec<Span<'static>> {
         let max = |c: &[state::Node]| c.iter().filter_map(cpu).max_by(f64::total_cmp);
         let cells = nodes
             .chunks(per)
-            .map(|c| max(c).map_or(glyph(0, t.dim, 1), |us| glyph(8, heat(us / 1e3), 1)));
+            .map(|c| max(c).map_or(glyph(0, t.dim), |us| glyph(8, heat(us / 1e3))));
         return [Span::styled(" NODES ", t.dim)].into_iter().chain(cells).collect();
     }
     let v = nodes.first().and_then(state::Node::root_vals);
@@ -735,7 +734,8 @@ fn strip_line(app: &App, t: &Theme, width: u16) -> Vec<Span<'static>> {
     let full = if total > 0.0 { (used / total * 16.0).clamp(0.0, 16.0) as usize } else { 0 };
     let mut spans = vec![Span::styled(" CPU ", t.dim)];
     spans.extend(bar(t, &hist));
-    let mem = [glyph(8, heat(0.0), full), glyph(0, t.dim, 16 - full)];
+    let gauge = |i: usize, style, n| Span::styled(t.glyphs.bars[i].repeat(n), style);
+    let mem = [gauge(8, heat(0.0), full), gauge(0, t.dim, 16 - full)];
     spans.extend([Span::raw(format!(" {}  ", fmt("%", cpu))), Span::styled("MEM ", t.dim)]);
     spans.extend(mem);
     spans.push(Span::raw(format!(" {}/{}", fmt("B", used), fmt("B", total))));
