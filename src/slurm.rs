@@ -229,7 +229,7 @@ pub fn view(arg: &str, a: &SlurmArgs, opts: Opts, batch: Option<u32>) -> Result<
         app.record();
     }
     drop(ctl);
-    let res = tui::view(&mut app, &tx, &rx, batch);
+    let res = tui::view(&mut app, &tx, &rx, batch, &mut io::stdout());
     let step = app.st.nodes.iter().find(|n| n.step.contains('.')).map(|n| n.step.clone());
     let log = || app.log.iter().rev().cloned().collect::<Vec<_>>().join("\n");
     let failed = app.st.nodes.is_empty().then(log);

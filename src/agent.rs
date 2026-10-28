@@ -592,7 +592,7 @@ pub fn local(opts: tui::Opts, root: Option<PathBuf>, batch: Option<u32>) -> Resu
     });
     let mut app = App::new(opts, ctl);
     app.start(1);
-    tui::view(&mut app, &tx, &rx, batch).map_err(|e| format!("tui: {e}"))
+    tui::view(&mut app, &tx, &rx, batch, &mut io::stdout()).map_err(|e| format!("tui: {e}"))
 }
 
 #[cfg(test)]

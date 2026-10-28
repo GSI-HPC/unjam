@@ -471,12 +471,14 @@ pub fn default_rules(nodes: u32, interval_ms: u32) -> Vec<Rule> {
     text.iter().filter_map(|t| Rule::parse(t).ok()).collect()
 }
 
-/// Runs a viewer: the ticker, then `--batch` snapshots or the terminal with its input thread.
+/// Runs a viewer: the ticker, then `--batch` snapshots to `out` or the terminal with its input
+/// thread. SIGTERM and SIGHUP quit; the recording is finished on every exit, errors included.
 pub fn view(
     app: &mut App,
     tx: &SyncSender<Msg>,
     rx: &Receiver<Msg>,
     batch: Option<u32>,
+    out: &mut dyn Write,
 ) -> io::Result<()> {
     let (tick, keys) = (tx.clone(), tx.clone());
     thread::spawn(move || {
@@ -484,32 +486,32 @@ pub fn view(
             thread::sleep(Duration::from_secs(1));
         }
     });
-    if let Some(mut left) = batch {
-        let (mut seen, out) = (0, &mut io::stdout().lock());
-        while let Some(m) = (left > 0).then(|| rx.recv().ok()).flatten() {
+    for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGHUP] {
+        signal_hook::flag::register(sig, Arc::clone(&QUIT))?;
+    }
+    let res = if let Some(mut left) = batch {
+        let (mut seen, mut res) = (0, Ok(()));
+        while let Some(m) = (left > 0 && !QUIT.load(Relaxed)).then(|| rx.recv().ok()).flatten() {
             let tick = matches!(m, Msg::Tick);
             app.handle(m);
             if tick && app.ticks > seen {
-                (seen, left) = (app.ticks, left - 1);
-                snapshot(app, out)?;
+                (seen, left, res) = (app.ticks, left - 1, snapshot(app, out));
             }
-            left *= u32::from(!app.ended);
+            left *= u32::from(!app.ended && res.is_ok());
         }
+        res
     } else {
         let (ktx, krx) = mpsc::channel();
         thread::spawn(move || input(&ktx, &keys));
-        for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGHUP] {
-            signal_hook::flag::register(sig, Arc::clone(&QUIT))?;
-        }
         let mut term = ratatui::try_init()?;
         let res = event_loop(app, [rx, &krx], &mut term);
         ratatui::restore();
-        res?;
-    }
+        res
+    };
     if app.rec.is_some() {
         app.record();
     }
-    Ok(())
+    res
 }
 
 /// The input thread (D38): blocks on terminal events; `q`, Ctrl-C (or a dead terminal) set the
@@ -1030,6 +1032,29 @@ mod tests {
             st.nodes[0].procs.get(&50).map(|p| p.vals.v[2])
         };
         assert_eq!([rss(), rss(), rss()], [None, Some(777), None], "pid 50 lives for tick 2000");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_batch_write_still_finishes_the_recording() {
+        let dir = std::env::temp_dir().join(format!("unjam-tui-fin-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (mut app, _ctl) = app(false, "mono");
+        app.rec_dir = Some(dir.clone());
+        app.record();
+        let (tx, rx) = mpsc::sync_channel(64);
+        let lines = ["H 1 0.1 n1 42.0 1 0", "G 1 0 ", "T 1000 0 0 0 -", "T 2000 0 0 0 -"];
+        let mut wire = String::new();
+        for l in lines {
+            let _ = writeln!(wire, "0\t{}", l.replace(' ', "\t"));
+        }
+        tx.send(Msg::Lines(wire.into_bytes())).unwrap();
+        tx.send(Msg::Tick).unwrap();
+        let mut full: &mut [u8] = &mut [];
+        assert!(view(&mut app, &tx, &rx, Some(5), &mut full).is_err(), "like EPIPE under `| head`");
+        let (r, warns) = Reader::open(&[dir.join("n1.arrows")]).unwrap();
+        assert!(warns.is_empty(), "the end-of-stream marker is written: {warns:?}");
+        assert_eq!(r.times, [1000, 2000]);
         fs::remove_dir_all(&dir).unwrap();
     }
 

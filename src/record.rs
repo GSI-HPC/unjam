@@ -512,7 +512,8 @@ pub fn replay(
     let Some(n) = n else {
         app.log.extend(warns);
         app.replay = Some(r);
-        return tui::view(&mut app, &tx, &rx, None).map_err(|e| format!("tui: {e}"));
+        let res = tui::view(&mut app, &tx, &rx, None, &mut io::sink());
+        return res.map_err(|e| format!("tui: {e}"));
     };
     let mut err = io::stderr().lock();
     for w in &warns {
