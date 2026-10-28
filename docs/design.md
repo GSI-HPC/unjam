@@ -677,7 +677,7 @@ pub struct Theme {
     pub heat: [Color; 4],                      // value bands: idle, low, high, saturated
     pub glyphs: Glyphs,
 }
-pub struct Glyphs { pub open: &'static str, pub closed: &'static str, pub guide: [&'static str; 3] }
+pub struct Glyphs { pub open: &'static str, pub closed: &'static str, pub guide: [&'static str; 2] }
 pub const THEMES: &[Theme] = &[NORD, NIGHT, MOCHA, GRUVBOX, SOLAR, AMBER, MONO];
 ```
 

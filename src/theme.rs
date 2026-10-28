@@ -32,8 +32,8 @@ pub struct Theme {
 pub struct Glyphs {
     pub open: &'static str,
     pub closed: &'static str,
-    /// Process tree guides: middle child, last child, continuation.
-    pub guide: [&'static str; 3],
+    /// Process tree guides: middle child, last child.
+    pub guide: [&'static str; 2],
     /// Bar levels from empty (no or zero samples) to full, for history bars and the heat strip.
     pub bars: [char; 9],
 }
@@ -42,7 +42,7 @@ pub struct Glyphs {
 const UNI: Glyphs = Glyphs {
     open: "▾ ",
     closed: "▸ ",
-    guide: ["├ ", "└ ", "│ "],
+    guide: ["├ ", "└ "],
     bars: ['·', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'],
 };
 
