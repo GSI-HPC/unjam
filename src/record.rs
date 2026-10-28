@@ -620,19 +620,20 @@ fn quiet(sc: &Scope, before: &[u32]) -> bool {
 
 /// `unjam record`: tasks with `SLURM_LOCALID` ≠ 0 become the app (`exec`). Otherwise the app
 /// runs as a child while the scope is sampled into the journal until the lifetime rule holds;
-/// if recording cannot start, the app runs unrecorded. Signals set a flag that cuts the open
-/// batch and are not forwarded (D19); recording then ends at the lifetime rule or after
-/// `GRACE_MS`, whichever comes first. Returns the app's exit code, or 128 + signal (§3.5).
+/// if recording cannot start, the app runs unrecorded after a warning on stderr. Signals set a
+/// flag that cuts the open batch and are not forwarded (D19); recording then ends at the
+/// lifetime rule or after `GRACE_MS`, whichever comes first. Returns the app's exit code, or
+/// 128 + signal (§3.5).
 pub fn run_record(a: &RecordArgs) -> Result<ExitCode, String> {
     let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
     let mut app = Command::new(&a.cmd[0]);
     app.args(&a.cmd[1..]);
-    let started =
-        if var("SLURM_LOCALID").is_some_and(|l| l != "0") { None } else { Some(start(a, &var)) };
-    let (sc, mut st, mut s, mut w) = match started {
-        Some(Ok(x)) => x,
-        Some(Err(e)) => return Err(format!("{e}; {}: {}", a.cmd[0], app.exec())),
-        None => return Err(format!("{}: {}", a.cmd[0], app.exec())),
+    let started = var("SLURM_LOCALID").is_none_or(|l| l == "0").then(|| start(a, &var));
+    if let Some(Err(e)) = &started {
+        let _ = writeln!(io::stderr(), "unjam: record: {e}; running unrecorded");
+    }
+    let Some(Ok((sc, mut st, mut s, mut w))) = started else {
+        return Err(format!("{}: {}", a.cmd[0], app.exec()));
     };
     let sig = Arc::new(AtomicUsize::new(0));
     for n in [SIGTERM, SIGINT, SIGHUP] {

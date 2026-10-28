@@ -148,6 +148,7 @@ agent stderr ──> srun stderr ──> TUI stderr-reader thread ──> log ri
   5. Write the final batch and the end-of-stream marker, then exit with the child's code, or 128+signal.
 - **Signals.** `signal_hook::flag::register` for SIGTERM, SIGINT and SIGHUP sets a flag. Signals are **not** forwarded: where Slurm signals every process in the step, forwarding would deliver signals such as USR1 twice. The recorder keeps sampling until the lifetime rule holds, so the app's shutdown phase is recorded too, but at most 5 s after the signal: `scancel --signal=TERM` reaches only the task leader (the recorder) on Slurm 26.05, so the app may never stop, and the journal must be finished before `KillWait` ends in SIGKILL. The recorder then exits with 128 + signal and Slurm reaps the rest of the step.
 - **Output pattern.** Tokens `%j` (`SLURM_JOB_ID`), `%s` (`SLURM_STEP_ID`), `%n` (hostname), `%%`. A missing value becomes `na`. The default is `unjam-%j.%s-%n.arrows`. Files are created new with mode 0600 (they hold command lines) and are never overwritten.
+- **Fallback.** If recording cannot start (the output file exists, its directory is missing, no cgroup2 scope), the recorder prints `unjam: record: <reason>; running unrecorded` to stderr and `exec`s the app, so the job still runs.
 
 ### 3.6 Replay and offline conversion
 
