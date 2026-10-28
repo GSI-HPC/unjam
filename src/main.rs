@@ -119,6 +119,9 @@ enum Cmd {
         /// Exit after this many seconds without control input.
         #[arg(long, default_value_t = 120)]
         keepalive: u64,
+        /// Remove the own executable at start (a copy made by srun --bcast).
+        #[arg(long)]
+        unlink_self: bool,
     },
 }
 
@@ -164,7 +167,9 @@ fn viewer(cli: Cli) -> Result<(), String> {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let res = match cli.cmd {
-        Some(Cmd::Agent { root, keepalive }) => agent::main(root, keepalive),
+        Some(Cmd::Agent { root, keepalive, unlink_self }) => {
+            agent::main(root, keepalive, unlink_self)
+        }
         Some(Cmd::Record { .. }) => Err("record is not available in this build yet".into()),
         None => viewer(cli),
     };
@@ -274,7 +279,10 @@ mod tests {
         assert_eq!(cmd, ["srun", "./a.out", "-n", "4"]);
         assert!(parse("record").is_err(), "a command is required");
         let cli = parse("agent --keepalive 5").unwrap();
-        assert!(matches!(cli.cmd, Some(Cmd::Agent { keepalive: 5, root: None })));
+        assert!(matches!(
+            cli.cmd,
+            Some(Cmd::Agent { keepalive: 5, root: None, unlink_self: false })
+        ));
         assert!(parse("agent --batch 1").is_err());
         assert_eq!(parse_size("4M"), Ok(4 << 20));
         assert!(parse_size("4X").is_err());

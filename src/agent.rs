@@ -531,8 +531,14 @@ pub fn setup(root: Option<PathBuf>, job: bool, cap: usize) -> Result<(Env, Opts)
     Ok((env, Opts { node, ntasks, step, root, exclude, cap }))
 }
 
-/// `unjam agent`: one sampler on this node, stdin as control, stdout as output.
-pub fn main(root: Option<PathBuf>, keepalive: u64) -> Result<(), String> {
+/// `unjam agent`: one sampler on this node, stdin as control, stdout as output. `unlink`
+/// removes an `srun --bcast` copy (`unjam.<job>.<uid>`) of the own binary at start (D36).
+pub fn main(root: Option<PathBuf>, keepalive: u64, unlink: bool) -> Result<(), String> {
+    let copy =
+        |e: &PathBuf| e.file_name().is_some_and(|n| n.as_encoded_bytes().starts_with(b"unjam."));
+    if let Some(exe) = std::env::current_exe().ok().filter(|e| unlink && copy(e)) {
+        fs::remove_file(&exe).map_err(|e| format!("--unlink-self {}: {e}", exe.display()))?;
+    }
     let (env, opts) = setup(root, true, 1024)?;
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || io::stdin().lines().map_while(Result::ok).try_for_each(|l| tx.send(l)));
