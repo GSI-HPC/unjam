@@ -868,6 +868,13 @@ mod tests {
         }
         assert_eq!(crate::alloc_count::allocs() - before, 0);
         assert_eq!(s.core.files.open, 8 * 11 + 3 * 2 + 1, "the warm path reads cached fds only");
+        // The discovery walk, which runs on nearly every due tick, is the allocating part.
+        let entries: u64 =
+            s.cgs.values().map(|c| fs::read_dir(&c.dir).unwrap().count() as u64).sum();
+        let before = crate::alloc_count::allocs();
+        s.tick(2000, &mut emit);
+        let walk = crate::alloc_count::allocs() - before;
+        assert!(walk <= 2 * entries, "{walk} allocations for {entries} directory entries");
     }
 
     /// Blocks every write until the test drops the sender, then records what was written.

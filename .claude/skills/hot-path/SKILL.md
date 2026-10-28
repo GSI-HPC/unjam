@@ -8,7 +8,8 @@ description: Use when editing src/agent.rs, src/source.rs, src/cgroup.rs, src/pr
 ## Budgets (steady state, per tick)
 | Item | Budget |
 |---|---|
-| Heap allocations in Sampler::tick + wire::write | 0 (test `alloc_count` must pass) |
+| Heap allocations in Sampler::sample + wire::write | 0 (test `zero_allocations_per_steady_state_tick` must pass) |
+| Heap allocations of the discovery walk (runs in `tick` at most 1 Hz) | ≤ 2 per directory entry (std `read_dir` names; same test) |
 | Syscalls per cgroup at level c (all files cached / none cached) | ≤ 10 / ≤ 30 |
 | Extra syscalls per cgroup at level p (`cgroup.procs`) | ≤ 1 / ≤ 3 |
 | Syscalls per process at level p (cached / uncached) | ≤ 2 / ≤ 6 |

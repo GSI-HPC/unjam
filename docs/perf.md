@@ -28,6 +28,12 @@ commit, the machine (sind worker, Slurm line, kernel) and the command that produ
 |---|---|---|---|---|---|
 | — | — | — | — | — | |
 
+## Allocations (unit test, fixtures)
+
+| Commit | Fixture | Sample + encode | Discovery walk | Notes |
+|---|---|---|---|---|
+| — | 25.11, 8 cgroups at `p`, 3 processes | 0 | 143 per walk (2 per directory for `read_dir`, 1 name per entry, 1 path per cgroup) | Walk builds paths for directories only (335 when every entry built one). A real cgroup directory has about 40–60 entries, so about 50 per cgroup per walk (estimate) |
+
 ## Integration measurements
 
 | Commit | Test | Bytes/s into the TUI | Agent CPU | Agent RSS | Errors | Notes |

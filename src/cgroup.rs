@@ -140,9 +140,9 @@ pub fn walk(root: &Path, exclude: Option<&Path>) -> Vec<(PathBuf, u64, u64)> {
 /// The recursive part of `walk`; a directory that vanished meanwhile is skipped.
 fn descend(dir: &Path, ino: u64, exclude: Option<&Path>, found: &mut Vec<(PathBuf, u64, u64)>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
-    for e in entries.flatten() {
+    for e in entries.flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())) {
         let path = e.path();
-        if e.file_type().is_ok_and(|t| t.is_dir()) && exclude != Some(path.as_path()) {
+        if exclude != Some(path.as_path()) {
             found.push((path.clone(), e.ino(), ino));
             descend(&path, e.ino(), exclude, found);
         }

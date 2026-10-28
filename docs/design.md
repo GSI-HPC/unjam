@@ -1074,7 +1074,7 @@ Measured after record and replay: 3,466,568 bytes (3.31 MiB, 2 % over the target
 | Slurm layout | `job_root` and `record_root` on 25.11, 26.05-SLUID, `node1_slurmstepd.scope` and a `0::/` namespace root (must fail); rejection of non-step paths and of v1 format |
 | Rules | `pattern_match`, `effective` and `TaskSet` tables. `Rule::parse` rejects `- p`, `500 o` and the removed level `d`. `next_due` table including `now` on an exact multiple, which must return the *next* multiple. `--rule` text is parsed with an `R\t` prefix |
 | Sampler | Timer grouping. Pid reuse: rewriting `start` gives `x` then `P`. Cgroup recreation: new inode gives `X` then `G`. Structure-only `Off`. `Files` tiers: past `cap − cap/8`, cold files take the uncached path while hot files are still cached, and at `cap` both are uncached. Self-check failure gives cap 0 (forced via `Env`). The fork-storm fallback applies `R * . <longest> c`, which `Rule::parse` accepts |
-| Zero allocation | `alloc_count`: after a warm-up tick, 100 ticks over the 25.11 fixture allocate 0 times in the sampler and encoder |
+| Zero allocation | `alloc_count`: after a warm-up tick, 100 samples (`Sampler::sample`, a tick without its discovery walk) over the 25.11 fixture allocate 0 times in the sampler and encoder. The walk, which runs on nearly every due tick, allocates for std `read_dir` and its entry names only; the same test bounds it at 2 per directory entry |
 | Writer path | A blocked writer drops values and keeps structure; the budget limits bytes per second; the stagger delay formula |
 | Wire | Round trip for every variant; the 1000-byte cap; value splitting with `first`; sanitizing; extra trailing fields on `H`/`D`/`T` ignored |
 | Mux (graft) | 1000 simulated agents over fixture data. Output is cut into ≤ 1024-byte whole-line chunks (slurmstepd semantics), interleaved randomly into one reader, and fed through `split_node`, `parse` and `State`. Each node's `State` must equal the reference exactly. Also: one injected corrupt line triggers exactly one `S` |
@@ -1392,7 +1392,7 @@ Integration needs no cleanup step: runners are ephemeral.
 **Acceptance:**
 
 1. `unjam` shows the cgroup tree with processes on a developer host and on a sind worker. `unjam --batch 2` output passes the golden test.
-2. All unit tests in §14.1 for parsers, sampler, wire (including mux at 1000 agents), state and draw pass. The `alloc_count` test shows 0 allocations per steady-state tick.
+2. All unit tests in §14.1 for parsers, sampler, wire (including mux at 1000 agents), state and draw pass. The `alloc_count` test shows 0 allocations per steady-state sample and at most 2 per directory entry for the discovery walk.
 3. On a sind worker, `strace -c` and bench numbers are within the hot-path budgets and recorded in `docs/perf.md`. That includes the per-file read cost of `cpu.stat`, `io.stat` and `memory.stat` (which settles K13 and D12) and the fd-cache hit ratio. The fd-cache self-check passes on real procfs and kernfs, and the forced-failure fallback is tested.
 4. Key latency stays below 50 ms while sampling 2,000 synthetic processes (manual check plus the bounded-decode unit test).
 5. LOC within budget (≈ 1,700 for the phase-3 modules). Binary and crate count gates are re-baselined.
