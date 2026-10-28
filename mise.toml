@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+
+# Development tools and tasks; CI runs the same tasks. Rust itself comes from rust-toolchain.toml
+# through rustup, not from mise. Every tool is pinned.
+[tools]
+"cargo:cargo-release" = "1.1.6"  # 1.1.7 declares rust_version 1.97 > pinned 1.93.1
+"cargo:clippy-sarif" = "0.8.0"
+"cargo:sarif-fmt" = "0.8.0"
+"cargo:cargo-deny" = "0.20.2"    # declares rust_version 1.88 ≤ pinned 1.93.1
+"pipx:reuse" = "6.2.0"
+
+# Tasks use inline tables: a [tasks.<name>] header cannot carry a key on its own line.
+[tasks]
+fmt = { run = "cargo fmt --check" }
+lint = { run = "cargo clippy --all-targets --locked -- -D warnings" }
+"lint:sarif" = { run = "cargo clippy --all-targets --locked --message-format=json -- -D warnings | clippy-sarif | tee clippy-results.sarif | sarif-fmt" }
+test = { run = "cargo test --locked" }  # includes tests/budget.rs
+build = { run = "cargo build --release --locked" }
+# Static release binary for this machine's architecture (publish.yml `binaries` job).
+"build:musl" = { run = [
+  "rustup target add \"$(uname -m)-unknown-linux-musl\"",
+  "cargo build --release --locked --target \"$(uname -m)-unknown-linux-musl\"",
+] }
+size = { depends = ["build"], run = "scripts/size.sh target/release/unjam" }
+"size:self-test" = { depends = ["build"], run = "scripts/size.sh --self-test target/release/unjam" }
+unsafe-deps = { run = "scripts/unsafe-deps.sh" }
+"unsafe-deps:self-test" = { run = "scripts/unsafe-deps.sh --self-test" }
+msrv = { run = [
+  "rustup toolchain install 1.88 --profile minimal",
+  "cargo +1.88 check --locked --all-targets",
+] }
+reuse = { run = "reuse lint" }
+deny = { run = "cargo deny --locked check" }
+bench = { run = "cargo test --release --locked -- --ignored bench_ --nocapture" }  # report only
+check = { depends = ["fmt", "lint", "test", "reuse", "deny", "size", "unsafe-deps"] }
+release = { run = "cargo release" }

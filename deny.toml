@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+
+# cargo-deny: licenses, bans, advisories and sources (`mise run deny`).
+
+[graph]
+# Only the targets we ship. Without this, cargo-deny resolves every target, and wasm-only
+# crates (arrow → ahash compile-time-rng → const-random-macro → tiny-keccak, CC0-1.0) fail the
+# license check.
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+  "x86_64-unknown-linux-musl",
+  "aarch64-unknown-linux-musl",
+]
+
+[advisories]
+
+[licenses]
+# The allow-list covers the planned dependencies (ratatui, arrow) before they are added.
+unused-allowed-license = "allow"
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "LGPL-3.0-or-later",
+]
+
+[bans]
+multiple-versions = "warn"
+# No async runtime and no C-building -sys crates (a cc or pkg-config build script); the named
+# ones are the known offenders, the rest is the lean-deps review. linux-raw-sys (pure-Rust
+# bindings via rustix) is exempt. serde_json: the wire is text and has no JSON.
+deny = [
+  { name = "tokio" },
+  { name = "openssl-sys" },
+  { name = "zstd-sys" },
+  { name = "libz-sys" },
+  { name = "serde_json" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
