@@ -542,11 +542,12 @@ impl Rec {
         Ok(Self { dir, meta, files: HashMap::new() })
     }
 
-    /// Writes node `i`'s last complete tick, creating `DIR/<host>.arrows` on first use; a
-    /// node whose file cannot be created is skipped from then on.
+    /// Writes node `i`'s last complete tick, creating `DIR/<host>.arrows` on first use (`/` in
+    /// the agent-reported host becomes `_`, so the file stays in `DIR`); a node whose file
+    /// cannot be created is skipped from then on.
     pub fn node(&mut self, st: &State, i: u32) -> Result<(), String> {
         let n = &st.nodes[i as usize];
-        let path = self.dir.join(format!("{}.arrows", n.host));
+        let path = self.dir.join(format!("{}.arrows", n.host.replace('/', "_")));
         let e = |x: io::Error| format!("record {}: {x}", path.display());
         if n.prev[0] == 0 || n.host.is_empty() {
             return Ok(());
@@ -833,6 +834,23 @@ mod tests {
             let mode = fs::metadata(p).unwrap().permissions().mode();
             assert_eq!(mode & 0o077, 0, "{}: {mode:o}", p.display());
         }
+    }
+
+    #[test]
+    fn a_host_name_cannot_leave_the_recording_dir() {
+        let dir = tmp("host");
+        let mut st = State::new();
+        for (i, host) in (0..).zip(["../../x", "/abs"]) {
+            hello(&mut st, i, host);
+            tick(&mut st, i, 1);
+        }
+        let rec = Rec::new(dir.0.join("rec"), "42", 1000).unwrap();
+        assert!(rec.finish(&st).is_empty());
+        let mut names: Vec<_> = fs::read_dir(dir.0.join("rec")).unwrap().flatten().collect();
+        names.sort_by_key(fs::DirEntry::file_name);
+        let names: Vec<_> = names.iter().map(|e| e.file_name().into_string().unwrap()).collect();
+        assert_eq!(names, [".._.._x.arrows", "_abs.arrows"]);
+        assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 1, "nothing outside rec/");
     }
 
     #[test]
