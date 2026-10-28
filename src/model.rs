@@ -203,6 +203,16 @@ pub fn effective(rules: &[Rule], task: u32, path: &str) -> (u32, What) {
         .map_or((0, What::Off), |r| (r.interval_ms, r.what))
 }
 
+/// Applies an `R` line to a rule list: replaces the rule with the same task set and pattern in
+/// place, else appends. The agent and the TUI both use it, so the agent's list is the TUI's
+/// list restricted to the rules that apply to it, and both resolve every path alike (§6.2).
+pub fn upsert(rules: &mut Vec<Rule>, r: Rule) {
+    match rules.iter_mut().find(|x| x.tasks == r.tasks && x.pattern == r.pattern) {
+        Some(x) => *x = r,
+        None => rules.push(r),
+    }
+}
+
 /// Wall-clock phase alignment: the next multiple of `interval_ms` strictly after `now_ms`, so a
 /// tick on an exact multiple schedules the following one (§6.1).
 pub fn next_due(now_ms: u64, interval_ms: u32) -> u64 {
@@ -296,6 +306,27 @@ mod tests {
             assert_eq!(effective(&rules, task, path), want, "{task} {path}");
         }
         assert_eq!(effective(&[], 0, ""), (0, What::Off));
+    }
+
+    #[test]
+    fn upsert_keeps_agent_lists_in_step_with_the_tui() {
+        let seq = ["*\t.\t2000\tc", "*\t*/user\t-\to", "*\t.\t1000\tc", "1\tstep_0/user\t500\tp"];
+        let seq =
+            seq.iter().chain(&["0-1\t.\t500\tp", "*\t*/user\t300\tp", "1\tstep_0/user\t-\to"]);
+        let (mut tui, mut agents) = (vec![], [(0, vec![]), (1, vec![])]);
+        for r in seq.map(|s| rule(s)) {
+            for (_, list) in agents.iter_mut().filter(|a| r.tasks.contains(a.0)) {
+                upsert(list, r.clone());
+            }
+            upsert(&mut tui, r);
+            for (t, list) in &agents {
+                for path in ["", "step_0", "step_0/user", "step_0/user/task_0", "step_1/user"] {
+                    assert_eq!(effective(&tui, *t, path), effective(list, *t, path), "{t} {path}");
+                }
+            }
+        }
+        assert_eq!(effective(&tui, 0, "step_0/user/task_0"), (500, What::Procs));
+        assert_eq!(tui.len(), 4);
     }
 
     #[test]

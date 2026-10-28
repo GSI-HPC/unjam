@@ -419,7 +419,7 @@ K                                                                 keepalive
 ```
 
 - `tasks` is `*` or ranges such as `0-15,32,40-41`, matched against `SLURM_PROCID` (0 locally). Agents ignore lines whose set does not include them.
-- An `R` with an existing pattern replaces that rule in place, so each agent's rule list stays bounded. The TUI keeps the authoritative list and re-sends it after `S`.
+- An `R` with the task set and pattern of an existing rule replaces that rule in place, so each agent's rule list stays bounded. Agent and TUI apply `R` with the same `model::upsert`, so an agent's list is the TUI's list restricted to the rules that apply to it. The TUI keeps the authoritative list and re-sends it after `S`.
 - `--rule TEXT` is parsed as `R\t` + TEXT by the same `Rule::parse`.
 - Malformed lines produce one `W` line and change nothing.
 
