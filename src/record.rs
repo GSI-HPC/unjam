@@ -684,11 +684,8 @@ fn start(
     let (mut s, mut st, now) = (Sampler::new(env, opts), State::new(), now_ms());
     let ms = model::interval_ms(a.interval.as_millis());
     let what = if a.no_procs { What::Cg } else { What::Procs };
-    s.control(
-        Control::Rule(Rule { tasks: TaskSet::All, pattern: ".".into(), interval_ms: ms, what }),
-        now,
-        &mut |_| {},
-    );
+    let rule = Rule { tasks: TaskSet::All, pattern: ".".into(), interval_ms: ms, what };
+    s.control(Control::Rule(rule), now, &mut |_| {});
     s.snapshot(now, &mut |e| st.apply(0, e, now).unwrap_or_default());
     let path = expand(&a.output, job.as_deref(), step.as_deref(), &st.nodes[0].host);
     let job = job.unwrap_or_else(|| "na".into());
