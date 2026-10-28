@@ -24,7 +24,7 @@ theme.rs     60
 total      2900
 
 # Release binary (bytes) and resolved normal dependencies (crates, root excluded) on
-# x86_64-unknown-linux-gnu. Set to the core-host-view targets; re-baselined from measurement
-# (+5 %) by the change that needs it. Measured with clap alone: 556,672 bytes, 10 crates.
-binary_bytes 2097152
-crates         80
+# x86_64-unknown-linux-gnu. Re-baselined from measurement (+5 %) by the change that needs it.
+# Measured with clap and ratatui (host view): 1,335,576 bytes, 66 crates.
+binary_bytes 1402355
+crates         70

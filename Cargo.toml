@@ -34,6 +34,10 @@ push-remote = "upstream"
 [dependencies]
 # CLI; repo convention "clap derive only". No color/suggestions/wrap_help → no anstream/strsim/terminal_size.
 clap = { version = "4.6", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+# TUI (owner-accepted). Only the crossterm 0.29 backend; no all-widgets/macros/layout-cache of our own choosing.
+# NOTE: ratatui's crossterm backend pulls ratatui-crossterm with default features, whose defaults are
+# crossterm_0_29 + underline-color (→ ratatui-core/underline-color), so underline-color IS enabled; counted in budgets (D27).
+ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_29"] }
 
 [lints.rust]
 unsafe_code = "deny"
