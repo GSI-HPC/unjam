@@ -13,25 +13,25 @@ env:
 
 permissions:
   contents: read
-  security-events: write
 
 jobs:
-  checks:
+  verify:
+    name: Verify the tag
     if: github.repository == 'GSI-HPC/unjam'
-    uses: ./.github/workflows/checks.yml
-
-  integration:
     if: github.repository == 'GSI-HPC/unjam'
-    uses: ./.github/workflows/integration.yml
-
-  publish:
-    name: Publish to crates.io
-    if: github.repository == 'GSI-HPC/unjam'
-    needs: [checks, integration]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Verify tag matches Cargo.toml version
+        with:
+          fetch-depth: 0
+      - name: Tagged commit is on main
+        run: |
+          git fetch origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Tag $GITHUB_REF_NAME is not on main"
+            exit 1
+          fi
+      - name: Tag matches Cargo.toml version
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml)
@@ -39,13 +39,22 @@ jobs:
             echo "::error::Tag v$TAG does not match Cargo.toml version $VERSION"
             exit 1
           fi
-      - run: cargo publish
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: CHANGELOG has a section for the version
+        run: scripts/changelog-section.sh "${GITHUB_REF_NAME#v}" > /dev/null
+
+  checks:
+    needs: verify
+    permissions:
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/checks.yml
+
+  integration:
+    needs: verify
+    uses: ./.github/workflows/integration.yml
 
   binaries:
     name: Static binary (${{ matrix.arch }})
-    if: github.repository == 'GSI-HPC/unjam'
     needs: [checks, integration]
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -86,22 +95,41 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: GitHub Release
-    if: github.repository == 'GSI-HPC/unjam'
-    needs: [publish, binaries]
+    name: Draft GitHub release
+    needs: binaries
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v6
       - uses: actions/download-artifact@v8
         with:
           pattern: unjam-linux-*
           merge-multiple: true
       - run: sha256sum unjam-linux-amd64 unjam-linux-arm64 > checksums.txt
-      - name: Create the release with the binaries
-        run: >
-          gh release create "$GITHUB_REF_NAME"
-          unjam-linux-amd64 unjam-linux-arm64 checksums.txt
-          --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --verify-tag --generate-notes
+      - name: Create the draft release with the binaries
+        run: |
+          scripts/changelog-section.sh "${GITHUB_REF_NAME#v}" > notes.md
+          gh release create "$GITHUB_REF_NAME" \
+            unjam-linux-amd64 unjam-linux-arm64 checksums.txt \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --verify-tag \
+            --draft --notes-file notes.md
         env:
           GH_TOKEN: ${{ github.token }}
+
+  # crates.io cannot be undone: publish last, after the environment's reviewer approves.
+  publish:
+    name: Publish to crates.io
+    needs: release
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

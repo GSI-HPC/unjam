@@ -73,4 +73,13 @@ cargo release minor  # 0.1.0 → 0.2.0
 cargo release major  # 0.1.0 → 1.0.0
 ```
 
-This bumps the version in `Cargo.toml`, commits, tags, and pushes to `upstream`. CI then runs the checks and integration tests, publishes to [crates.io](https://crates.io/), and attaches static x86_64 and aarch64 binaries with build provenance attestations and checksums to the GitHub release.
+This bumps the version in `Cargo.toml`, commits, tags, and pushes to `upstream`. Add a `## [X.Y.Z] - DATE` section to `CHANGELOG.md` in the same commit: it becomes the release notes, and the tag job fails without it.
+
+CI then runs the following steps for the tag, which must be on `main`:
+
+1. Run the checks and integration tests.
+2. Build static x86_64 and aarch64 binaries with build provenance attestations and checksums.
+3. Create a **draft** GitHub release with the binaries and the CHANGELOG section as notes.
+4. Wait for a reviewer of the `crates-io` environment to approve, then publish to [crates.io](https://crates.io/) with Trusted Publishing.
+
+Publish the draft release by hand after the crate is on crates.io.
