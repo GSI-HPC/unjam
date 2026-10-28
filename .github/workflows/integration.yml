@@ -38,16 +38,16 @@ jobs:
       EXTRA: ${{ matrix.extra }}
       JOBIDPATHS: ${{ matrix.jobidpaths }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: jdx/mise-action@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d  # v5.2.4
         with:
           # uv for IT 6/7 (pyarrow); everything else the tests need is on the runner.
           install_args: pipx:uv
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2.9.3
       # Static binary: the Rocky Linux node images may have an older glibc than the runner.
       - run: mise run build:musl
       - run: mise run it:cluster
-      - uses: GSI-HPC/sind-action@v2
+      - uses: GSI-HPC/sind-action@d91e0e13e9c63bcce0b83ce7d61674954d7ae2d7  # v2.2.0
         with:
           version: v0.15.0
           wait: 10m
@@ -57,7 +57,7 @@ jobs:
       - run: mise run it:test
       - name: Upload diagnostics
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: sind-${{ strategy.job-index }}
           path: |
