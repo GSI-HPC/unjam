@@ -23,6 +23,7 @@ use arrow_ipc::writer::{IpcWriteOptions, StreamWriter};
 use arrow_ipc::{CompressionType, reader::StreamReader};
 use arrow_schema::DataType::{self, Timestamp, UInt8, UInt32, UInt64, Utf8};
 use arrow_schema::{Field, Schema, SchemaRef, TimeUnit};
+use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 
 use crate::agent::{Opts, Sampler, now_ms};
 use crate::model::{self, Control, Ent, Event, Kind, NA, Rule, TaskSet, What};
@@ -532,11 +533,8 @@ impl Rec {
     /// A recording into `dir` (created if missing) of a viewer on `job`.
     pub fn new(dir: PathBuf, job: &str, interval_ms: u32) -> Result<Self, String> {
         fs::create_dir_all(&dir).map_err(|e| format!("record {}: {e}", dir.display()))?;
-        let meta = [
-            ("source", "tui".into()),
-            ("job", job.into()),
-            ("interval_ms", interval_ms.to_string()),
-        ];
+        let iv = interval_ms.to_string();
+        let meta = [("source", "tui".into()), ("job", job.into()), ("interval_ms", iv)];
         Ok(Self { dir, meta, files: HashMap::new() })
     }
 
@@ -632,9 +630,7 @@ pub fn run_record(a: &RecordArgs) -> Result<ExitCode, String> {
         None => return Err(format!("{}: {}", a.cmd[0], app.exec())),
     };
     let sig = Arc::new(AtomicUsize::new(0));
-    for n in
-        [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT, signal_hook::consts::SIGHUP]
-    {
+    for n in [SIGTERM, SIGINT, SIGHUP] {
         let reg = signal_hook::flag::register_usize(n, Arc::clone(&sig), n.unsigned_abs() as usize);
         reg.map_err(|e| format!("signals: {e}"))?;
     }
@@ -688,13 +684,9 @@ fn start(
     );
     s.snapshot(now, &mut |e| st.apply(0, e, now).unwrap_or_default());
     let path = expand(&a.output, job.as_deref(), step.as_deref(), &st.nodes[0].host);
+    let job = job.unwrap_or_else(|| "na".into());
     let (root, ms) = (sc.root.display().to_string(), ms.to_string());
-    let meta = [
-        ("source", "record".into()),
-        ("job", job.unwrap_or_else(|| "na".into())),
-        ("root", root),
-        ("interval_ms", ms),
-    ];
+    let meta = [("source", "record".into()), ("job", job), ("root", root), ("interval_ms", ms)];
     let w = Writer::create(&path, &st, 0, &meta).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok((sc, st, s, w))
 }

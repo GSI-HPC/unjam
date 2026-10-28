@@ -229,8 +229,7 @@ impl Sampler {
         if self.walked.is_none() {
             return self.walk(now, emit);
         }
-        let mut cgs: Vec<(&str, u64, u64)> =
-            self.cgs.iter().map(|(&id, c)| (&*c.rel, id, c.parent)).collect();
+        let mut cgs: Vec<_> = self.cgs.iter().map(|(&id, c)| (&*c.rel, id, c.parent)).collect();
         cgs.sort_unstable();
         for (path, id, parent) in cgs {
             emit(&Event::Cg { id, parent, path });
