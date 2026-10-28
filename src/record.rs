@@ -38,6 +38,9 @@ pub const MAX_ROWS: usize = 8192;
 const MAX_MS: u64 = 10_000;
 /// Fixed columns before the metric columns: ts, kind, cg, pid, start, ppid, path, comm, cmdline.
 const FIXED: usize = 9;
+/// History a backward seek replays: twice the longest rule interval (60 s), so the sample
+/// before the cursor's of every entity, and with it its rates, is applied (§8.4).
+const BACK_MS: u64 = 120_000;
 /// Milliseconds per day, for `--at HH:MM`.
 const DAY: u64 = 86_400_000;
 /// Recording after a signal at most: Slurm may signal only the task leader, so the app may never
@@ -447,15 +450,15 @@ impl Reader {
     }
 
     /// Moves the cursor to tick `k`. Forward applies the ticks in between; backward rebuilds
-    /// each node from two batches before the one holding the tick, so rates span the batch
-    /// boundary. Each node shows its last tick at or before the cursor.
+    /// each node from the batch holding `BACK_MS` before the tick, so rates span batch
+    /// boundaries. Each node shows its last tick at or before the cursor.
     pub fn goto(&mut self, st: &mut State, k: usize) -> Result<(), String> {
         let k = k.min(self.times.len() - 1);
         let (t, back) = (self.times[k], k < self.at || self.at == usize::MAX);
         for (i, tr) in (0..).zip(&mut self.tracks) {
             if back {
                 tr.reset(st, i);
-                tr.next = tr.index.partition_point(|e| e.1 <= t).saturating_sub(2);
+                tr.next = tr.index.partition_point(|e| e.1 + BACK_MS <= t).saturating_sub(1);
             }
             tr.advance(st, i, t)?;
         }
@@ -989,6 +992,33 @@ mod tests {
             let want = [0, 3, 7].map(|s| 1_001_000 + k as u64 * 1000 + s);
             assert_eq!(shown, want, "every node advances one tick per step");
         }
+    }
+
+    #[test]
+    fn backward_seek_keeps_the_rates_of_slow_entities() {
+        let dir = tmp("slow");
+        let (mut st, path) = (State::new(), dir.0.join("slow.arrows"));
+        hello(&mut st, 0, "slow");
+        let mut w = None;
+        for t in 1..=100 {
+            let mut l = vec![format!("T {} 0 0 0 -", 1_000_000 + t * 1000)];
+            let cgs = [1, 2].into_iter().chain((t % 30 == 0).then_some(3));
+            l.extend(cgs.map(|c| format!("g {c} 0 {} 4096 1", c * t * 1000)));
+            feed(&mut st, 0, &l);
+            let w = w.get_or_insert_with(|| Writer::create(&path, &st, 0, &[]).unwrap());
+            w.node(&st, 0).unwrap();
+        }
+        w.unwrap().finish().unwrap();
+        let paths = [path];
+        let ((mut lin, _), (mut seek, _)) =
+            (Reader::open(&paths).unwrap(), Reader::open(&paths).unwrap());
+        let (mut a, mut b) = (State::new(), State::new());
+        for k in 0..=94 {
+            lin.goto(&mut a, k).unwrap();
+        }
+        seek.goto(&mut b, 99).unwrap();
+        seek.goto(&mut b, 94).unwrap();
+        assert_eq!(dump(&b.nodes[0]), dump(&a.nodes[0]), "cgroup 3 is sampled every 30 s");
     }
 
     #[test]
