@@ -19,7 +19,7 @@ use crate::{cgroup, procfs, wire};
 /// Discovery walk period while anything is sampled: at most 1 Hz (§5.3).
 const WALK_MS: u64 = 1000;
 /// Structure rescan period while every subtree is `Off`.
-const OFF_WALK_MS: u64 = 10_000;
+pub const OFF_WALK_MS: u64 = 10_000;
 /// Buffered structure beyond this applies the fork-storm self-rule (§7.5).
 const PENDING_CAP: usize = 1 << 20;
 /// Writer queue depth in buffers (§7.5).

@@ -23,12 +23,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row as TRow, Table};
 use ratatui::{DefaultTerminal, Frame};
 
+use crate::agent::{OFF_WALK_MS, now_ms};
 use crate::model::{self, Control, Event, Kind, NA, Rule, TaskSet, What, effective, upsert};
 use crate::record::{Reader, Rec};
 use crate::source::{Files, Slot, kv};
 use crate::state::{self, HIST, Key, Layout, NCOL, Row, State, View};
 use crate::theme::{THEMES, Theme};
-use crate::{agent::now_ms, procfs, wire};
+use crate::{procfs, wire};
 
 /// What the main thread blocks on (D38): terminal events, data, the end of srun's output and
 /// the 1 Hz tick.
@@ -420,11 +421,16 @@ impl App {
         }
     }
 
-    /// Whether a node sent no `T` for 3 × the longest rule interval (§7.4), or srun ended.
-    fn stale(&self, i: usize) -> bool {
-        let longest = self.view.rules.iter().map(|r| r.interval_ms).max().unwrap_or(0).max(1000);
-        let n = self.st.nodes.get(i);
-        self.ended || n.is_some_and(|n| self.now.saturating_sub(n.seen) > 3 * u64::from(longest))
+    /// Whether node `i` sent no `T` for 3 × its longest active interval (§7.4), or srun ended.
+    /// Its newest `.` off rule shadows all older ones; with no active rule its agent only
+    /// rescans, every `OFF_WALK_MS`.
+    fn stale(&self, i: u32) -> bool {
+        let mine = self.view.rules.iter().rev().filter(|r| r.tasks.contains(i));
+        let live = mine.take_while(|r| r.what > What::Off || &*r.pattern != ".");
+        let longest = live.filter(|r| r.what > What::Off).map(|r| r.interval_ms.max(1000)).max();
+        let limit = 3 * longest.map_or(OFF_WALK_MS, u64::from);
+        let n = self.st.nodes.get(i as usize);
+        self.ended || n.is_some_and(|n| self.now.saturating_sub(n.seen) > limit)
     }
 }
 
@@ -580,7 +586,7 @@ fn shown(rows: &[Row]) -> Vec<usize> {
 fn title(app: &App) -> [String; 2] {
     let (nodes, m, local) = (&app.st.nodes, &app.mon, app.opts.local);
     let procs: usize = nodes.iter().map(|n| n.procs.len()).sum();
-    let stale = (0..nodes.len()).filter(|&i| app.stale(i)).count();
+    let stale = (0..).zip(nodes).filter(|&(i, _)| app.stale(i)).count();
     let (seen, all) = (nodes.len(), (app.expect as usize).max(nodes.len()));
     let src = match nodes.first() {
         Some(n) if local => format!("unjam  {}", n.host),
@@ -752,7 +758,7 @@ fn table(f: &mut Frame, app: &App, t: &Theme, vis: &[Row], area: Rect) {
         cells.push(Cell::from(Line::from(bar(t, &r.hist[HIST - usize::from(hw)..]))));
         cells.extend(cols.iter().map(|&c| Cell::from(Line::from(take(5 + c)).right_aligned())));
         cells.push(Cell::from(take(4)));
-        let stale = matches!(r.key, Key::Cg(..) | Key::Proc(..)) && app.stale(r.node as usize);
+        let stale = matches!(r.key, Key::Cg(..) | Key::Proc(..)) && app.stale(r.node);
         let at = if app.scroll + i == app.cursor { 2 } else { usize::from(stale) };
         let look = [Style::new(), t.warn, t.selected][at];
         TRow::new(cells).style(look)
@@ -826,8 +832,8 @@ pub fn snapshot(app: &App, w: &mut dyn Write) -> io::Result<()> {
         line(&mut out, &(tx[0].clone() + &tx[1]), [&tx[2], &tx[3], &tx[4]], &|c| tx[5 + c].clone());
     }
     let (nodes, n) = (&app.st.nodes, app.st.nodes.len());
-    let (stale, errors) =
-        ((0..n).filter(|&i| app.stale(i)).count(), nodes.iter().map(|x| x.errors).sum::<u64>());
+    let stale = (0..).zip(nodes).filter(|&(i, _)| app.stale(i)).count();
+    let errors: u64 = nodes.iter().map(|x| x.errors).sum();
     let dropped: u64 = nodes.iter().map(|x| u64::from(x.dropped)).sum();
     writeln!(w, "{out}nodes={n} stale={stale} errors={errors} dropped={dropped}\n")
 }
@@ -1057,6 +1063,28 @@ mod tests {
         assert!(app.ended && app.stale(0));
         assert!(title(&app)[0].contains(" 1/4 nodes (ended) "), "{}", title(&app)[0]);
         assert!(app.log.front().unwrap().starts_with("srun ended"));
+    }
+
+    #[test]
+    fn a_node_with_every_subtree_off_is_stale_only_after_its_rescans() {
+        let (mut app, _rx) = app(false, "mono");
+        for (i, n) in ["n1", "n2"].iter().enumerate() {
+            host(&mut app, u32::try_from(i).unwrap(), n, 1);
+        }
+        app.now = app.st.nodes[0].seen + 5_000;
+        assert!(app.stale(0) && app.stale(1), "1 s ticks: stale after 3 s");
+        upsert(&mut app.view.rules, Rule::parse("0\t.\t-\to").unwrap());
+        assert!(!app.stale(0) && app.stale(1), "node 0 is off: it reports every 10 s");
+        upsert(&mut app.view.rules, Rule::parse("0\tuser.slice\t2000\tc").unwrap());
+        assert!(!app.stale(0), "an active subtree again: 3 × 2 s");
+        app.now += 2_000;
+        assert!(app.stale(0));
+        for r in ["*\t.\t-\to", "0\tuser.slice\t-\to"] {
+            upsert(&mut app.view.rules, Rule::parse(r).unwrap());
+        }
+        assert!(!app.stale(0) && !app.stale(1), "everything off: 3 × 10 s");
+        app.now += 24_000;
+        assert!(app.stale(0) && app.stale(1));
     }
 
     #[test]
