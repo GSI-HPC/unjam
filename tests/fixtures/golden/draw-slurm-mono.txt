@@ -13,4 +13,4 @@ NAME                               PID     CPU      CPU%   MEM    PIDS     INT W
     ▾ n3                                   ▃▃▃▃▃▄▄▄  51.0%   1.0G     12    1s p
       ▾ sshd.service                       ▃▃▃▃▃▄▄▄  51.0%    32M      2    1s p
         └ sshd: /usr/sbin/sshd -D       10 ▂▂▃▃▃▃▃▃  42.5%   8.0M      3
- ↑↓ move ←→ fold ␣ mark p what +/- rate 0 reset v layout s sort / filter t theme
+ ↑↓ move ←→ fold ␣ mark p what +/- rate v layout s sort / filter r record t them

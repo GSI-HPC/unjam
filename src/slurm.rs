@@ -195,9 +195,6 @@ impl Remote {
 /// `unjam --slurm[=JOBID]`: resolves the job, starts one agent per node and runs the viewer on
 /// their output, then tears down. Exits 1 with srun's stderr tail if no agent ever reported.
 pub fn view(arg: &str, a: &SlurmArgs, opts: Opts, batch: Option<u32>) -> Result<(), String> {
-    if a.record.is_some() {
-        return Err("--record is not available in this build yet".into());
-    }
     let job = job(arg, a.nodelist.as_deref())?;
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     let argv = srun_args(&job, a, exe, fs::metadata("/proc/self").map_or(0, |m| m.uid()));
@@ -210,6 +207,10 @@ pub fn view(arg: &str, a: &SlurmArgs, opts: Opts, batch: Option<u32>) -> Result<
     let mut app = App::new(Opts { source: job.id.clone(), ..opts }, ctl.clone());
     app.budget = a.budget;
     app.start(job.nodes);
+    if let Some(dir) = a.record.clone() {
+        app.rec_dir = Some(dir);
+        app.record();
+    }
     drop(ctl);
     let res = tui::view(&mut app, &tx, &rx, batch);
     let step = app.st.nodes.iter().find(|n| n.step.contains('.')).map(|n| n.step.clone());

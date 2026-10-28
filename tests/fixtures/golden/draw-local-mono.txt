@@ -11,4 +11,4 @@ NAME                                           PID     CPU history      CPU%   M
 
 
 
- ↑↓ move ←→ fold ␣ mark p what +/- rate 0 reset v layout s sort / filter t theme ? help q quit
+ ↑↓ move ←→ fold ␣ mark p what +/- rate v layout s sort / filter r record t theme ? help q quit

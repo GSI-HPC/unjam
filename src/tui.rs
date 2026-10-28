@@ -25,7 +25,7 @@ use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row as TRow, Table};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::model::{Control, Event, Kind, NA, Rule, TaskSet, What, effective, upsert};
-use crate::record::Reader;
+use crate::record::{Reader, Rec};
 use crate::source::{Files, Slot, kv};
 use crate::state::{self, HIST, Key, Layout, NCOL, Row, State, View};
 use crate::theme::{THEMES, Theme};
@@ -53,8 +53,7 @@ const COLS: [(&str, &str, u16); NCOL] = [
 /// Sort columns cycled by `s`: NAME, the value columns, then NODE (not in local mode).
 const SORTS: [&str; NCOL + 2] = ["NAME", "CPU%", "MEM", "IO-R/s", "IO-W/s", "PIDS", "NODE"];
 /// Key hints for the footer and the help pane.
-const HINTS: &str = "↑↓ move ←→ fold ␣ mark p what +/- rate 0 reset v layout s sort / filter \
-                     t theme ? help q quit";
+const HINTS: &str = "↑↓ move ←→ fold ␣ mark p what +/- rate v layout s sort / filter r record t theme ? help q quit";
 /// Replay key hints.
 const REPLAY: &str = "␣ play , . tick < > 60s g G start/end";
 /// Set by Ctrl-C in the input thread, by `q`, SIGTERM and SIGHUP: quits even while a draw
@@ -112,9 +111,11 @@ pub struct App {
     pub now: u64,
     ticks: u64,
     vals: Vec<u64>,
-    /// Replay: the reader and whether it plays.
+    /// Replay: the reader and whether it plays; live: the recording and its `--record` DIR.
     pub replay: Option<Reader>,
     playing: bool,
+    rec: Option<Rec>,
+    pub rec_dir: Option<PathBuf>,
 }
 
 impl App {
@@ -152,6 +153,8 @@ impl App {
             vals,
             replay: None,
             playing: false,
+            rec: None,
+            rec_dir: None,
         }
     }
 
@@ -197,8 +200,11 @@ impl App {
             let (ok, warn) = match wire::parse(rest, &mut self.vals) {
                 Some(Event::Warn(w)) => (true, Some(format!("node {node}: {w}"))),
                 Some(ev) => {
-                    self.ticks += u64::from(matches!(ev, Event::Tick { .. }));
-                    (self.st.apply(node, &ev, self.now).is_ok(), None)
+                    let tick = matches!(ev, Event::Tick { .. });
+                    let rec = self.rec.as_mut().filter(|_| tick);
+                    self.ticks += u64::from(tick);
+                    let err = rec.and_then(|r| r.node(&self.st, node).err());
+                    (self.st.apply(node, &ev, self.now).is_ok(), err)
                 }
                 None => (false, None),
             };
@@ -273,6 +279,22 @@ impl App {
             _ => return false,
         }
         true
+    }
+
+    /// `r`: starts recording into the `--record` DIR (first time) or `unjam-rec-<secs>`, or
+    /// stops and closes the journals (§8.5).
+    pub fn record(&mut self) {
+        if let Some(r) = self.rec.take() {
+            let dir = r.dir.display().to_string();
+            r.finish(&self.st).into_iter().for_each(|e| self.log(e));
+            return self.log(format!("recording stopped: {dir}"));
+        }
+        let dir =
+            self.rec_dir.take().unwrap_or_else(|| format!("unjam-rec-{}", now_ms() / 1000).into());
+        match Rec::new(dir, &self.opts.source, self.opts.interval_ms) {
+            Ok(r) => (self.log(format!("recording to {}", r.dir.display())), self.rec = Some(r)).1,
+            Err(e) => self.log(e),
+        }
     }
 
     /// Handles one message; true if the screen must be redrawn at once (keys, resize).
@@ -367,6 +389,7 @@ impl App {
             }
             KeyCode::Char('S') => self.view.desc = !self.view.desc,
             KeyCode::Char('t') => self.opts.theme = (self.opts.theme + 1) % THEMES.len(),
+            KeyCode::Char('r') if self.replay.is_none() => self.record(),
             _ => {}
         }
     }
@@ -471,6 +494,9 @@ pub fn view(
         ratatui::restore();
         res?;
     }
+    if app.rec.is_some() {
+        app.record();
+    }
     Ok(())
 }
 
@@ -573,9 +599,10 @@ fn title(app: &App) -> [String; 2] {
         if app.view.desc { '▼' } else { '▲' },
         format!("{:02}:{:02}:{:02}Z", s / 3600, s / 60 % 60, s % 60),
     );
-    let mode = match &app.replay {
-        Some(_) => ["  [⏸]", "  [▶]"][usize::from(app.playing)],
-        None => "",
+    let mode = match (&app.replay, &app.rec) {
+        (Some(_), _) => ["  [⏸]", "  [▶]"][usize::from(app.playing)],
+        (_, Some(_)) => "  ● rec",
+        _ => "",
     };
     let l0 = format!(" {src}{mode}  {procs} procs  {iv}  {layout}  sort {sort} {arrow}  {clock}");
     let [cpu, rss, inb, msg, out] = [
@@ -775,7 +802,7 @@ fn detail(app: &App, r: &Row) -> Vec<String> {
 
 /// Help pane: bindings, the per-node self-monitoring table and the log tail.
 fn help(app: &App) -> Vec<String> {
-    let keys = " Enter detail  a clear marks  S reverse sort  Esc close";
+    let keys = " Enter detail  a clear marks  0 reset rules  S reverse sort  Esc close";
     let mut out = vec![format!(" {HINTS}"), keys.into(), String::new()];
     out.push(format!(" {:<16}     CPU     RSS     OUT/s   MSG/s  DROP   ERR SKEW ms", "NODE"));
     for n in &app.st.nodes {

@@ -521,6 +521,56 @@ fn snapshots(app: &mut App, r: &mut Reader, n: u32, out: &mut dyn Write) -> Resu
     Ok(())
 }
 
+/// TUI recording (D41): one journal per node in `dir`, fed the ticks the viewer receives.
+pub struct Rec {
+    pub dir: PathBuf,
+    meta: [(&'static str, String); 3],
+    files: HashMap<u32, Option<Writer>>,
+}
+
+impl Rec {
+    /// A recording into `dir` (created if missing) of a viewer on `job`.
+    pub fn new(dir: PathBuf, job: &str, interval_ms: u32) -> Result<Self, String> {
+        fs::create_dir_all(&dir).map_err(|e| format!("record {}: {e}", dir.display()))?;
+        let meta = [
+            ("source", "tui".into()),
+            ("job", job.into()),
+            ("interval_ms", interval_ms.to_string()),
+        ];
+        Ok(Self { dir, meta, files: HashMap::new() })
+    }
+
+    /// Writes node `i`'s last complete tick, creating `DIR/<host>.arrows` on first use; a
+    /// node whose file cannot be created is skipped from then on.
+    pub fn node(&mut self, st: &State, i: u32) -> Result<(), String> {
+        let n = &st.nodes[i as usize];
+        let path = self.dir.join(format!("{}.arrows", n.host));
+        let e = |x: io::Error| format!("record {}: {x}", path.display());
+        if n.prev[0] == 0 || n.host.is_empty() {
+            return Ok(());
+        }
+        if !self.files.contains_key(&i) {
+            let (w, err) = match Writer::create(&path, st, i as usize, &self.meta) {
+                Ok(w) => (Some(w), Ok(())),
+                Err(x) => (None, Err(e(x))),
+            };
+            self.files.insert(i, w);
+            err?;
+        }
+        let Some(Some(w)) = self.files.get_mut(&i) else { return Ok(()) };
+        w.node(st, i as usize).map_err(e)
+    }
+
+    /// Writes every node's last tick and closes the journals; returns the errors.
+    pub fn finish(mut self, st: &State) -> Vec<String> {
+        let nodes = 0..u32::try_from(st.nodes.len()).unwrap_or(0);
+        let mut errs: Vec<String> = nodes.filter_map(|i| self.node(st, i).err()).collect();
+        let done = self.files.into_values().flatten().map(Writer::finish);
+        errs.extend(done.filter_map(Result::err).map(|e| format!("record: {e}")));
+        errs
+    }
+}
+
 /// What the recorder samples, and the cgroups its lifetime rule watches.
 struct Scope {
     root: PathBuf,
