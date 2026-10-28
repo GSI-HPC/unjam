@@ -341,11 +341,7 @@ impl Sampler {
             w.clear();
         }
         let Core { files, env, .. } = &mut self.core;
-        let s =
-            files.read(&mut self.me, true, &env.proc_root, "self/stat").ok().and_then(procfs::stat);
-        let us =
-            |s: &procfs::Stat| (s.utime + s.stime).saturating_mul(1_000_000) / env.clk_tck.max(1);
-        s.map_or((NA, NA), |s| (us(&s), s.rss.saturating_mul(env.page_size)))
+        procfs::usage(files, &mut self.me, env).unwrap_or((NA, NA))
     }
 
     /// Samples the due cgroups and their processes: the allocation-free steady state.

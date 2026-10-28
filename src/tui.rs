@@ -8,7 +8,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, LazyLock};
@@ -26,7 +26,7 @@ use ratatui::{DefaultTerminal, Frame};
 use crate::agent::{OFF_WALK_MS, now_ms};
 use crate::model::{self, Control, Event, Kind, NA, Rule, TaskSet, What, effective, upsert};
 use crate::record::{Reader, Rec};
-use crate::source::{Files, Slot, kv};
+use crate::source::{Env, Files, Slot, kv};
 use crate::state::{self, HIST, Key, Layout, NCOL, Row, State, View};
 use crate::theme::{THEMES, Theme};
 use crate::{procfs, wire};
@@ -76,8 +76,8 @@ pub struct Opts {
 
 /// The TUI's own cost and data rates for the self-monitoring header (D40).
 struct Mon {
-    /// Cached `/proc/self/stat`, page size and clock ticks.
-    stat: (Files, Slot, [u64; 2]),
+    /// Cached `/proc/self/stat` and the page size and clock ticks to read it with.
+    stat: (Files, Slot, Env),
     /// Time and own CPU µs at the last tick; own CPU % and RSS bytes.
     at: [u64; 2],
     tui: [f64; 2],
@@ -124,7 +124,7 @@ impl App {
     pub fn new(opts: Opts, ctl: Sender<String>) -> Self {
         let env = procfs::env("/proc".into(), PathBuf::new());
         let ncpu = thread::available_parallelism().map_or(1, usize::from) as f64;
-        let stat = (Files::new(1), Slot::Empty, [env.page_size, env.clk_tck.max(1)]);
+        let stat = (Files::new(1), Slot::Empty, env);
         let (at, tui, count, rate) = ([now_ms(), 0], [f64::NAN; 2], [0; 3], [0.0; 3]);
         let mon = Mon { stat, at, tui, count, rate, host: [f64::NAN, f64::NAN, ncpu] };
         let layout = if opts.local { Layout::Node } else { Layout::Step };
@@ -230,11 +230,9 @@ impl App {
     fn tick(&mut self) {
         let (now, m) = (now_ms(), &mut self.mon);
         let dt = (now.saturating_sub(m.at[0]) as f64 / 1000.0).max(0.001);
-        let (files, slot, [page, clk]) = &mut m.stat;
-        let stat = files.read(slot, true, Path::new("/proc"), "self/stat").ok();
-        if let Some(s) = stat.and_then(procfs::stat) {
-            let us = (s.utime + s.stime) * 1_000_000 / *clk;
-            m.tui = [us.saturating_sub(m.at[1]) as f64 / dt / 1e4, (s.rss * *page) as f64];
+        let (files, slot, env) = &mut m.stat;
+        if let Some((us, rss)) = procfs::usage(files, slot, env) {
+            m.tui = [us.saturating_sub(m.at[1]) as f64 / dt / 1e4, rss as f64];
             m.at[1] = us;
         }
         m.at[0] = now;

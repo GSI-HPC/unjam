@@ -169,6 +169,14 @@ pub fn nofile(text: &str) -> Option<u64> {
     if soft == "unlimited" { Some(u64::MAX) } else { soft.parse().ok() }
 }
 
+/// Own CPU µs (utime + stime) and RSS bytes from a cached `/proc/self/stat`: the agent's `T`
+/// line and the TUI header share this one conversion.
+pub fn usage(files: &mut Files, slot: &mut Slot, env: &Env) -> Option<(u64, u64)> {
+    let s = stat(files.read(slot, true, &env.proc_root, "self/stat").ok()?)?;
+    let us = (s.utime + s.stime).saturating_mul(1_000_000) / env.clk_tck.max(1);
+    Some((us, s.rss.saturating_mul(env.page_size)))
+}
+
 /// Builds the sampling environment, reading the constants from `proc_root`.
 pub fn env(proc_root: PathBuf, self_cg: PathBuf) -> Env {
     let (page_size, clk_tck) = auxv(&fs::read(proc_root.join("self/auxv")).unwrap_or_default());
