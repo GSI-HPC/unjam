@@ -59,6 +59,7 @@ In the TUI, `r` (or `--record DIR` with `--slurm`) records what the viewer recei
 `unjam --replay FILE...` shows recordings on one shared timeline. Keys: `space` play/pause,
 `,` `.` one tick, `<` `>` 60 s, `g` `G` start/end. `--at TIME` starts at `start`, `end`,
 `+DUR`, `-DUR` or `HH:MM[:SS]` (UTC); with `--batch N` it prints N snapshots from there.
+Replay only files you trust: a crafted journal can make the Arrow decoder abort unjam.
 
 Columns: `ts`, `kind` (1 = cgroup, 2 = process), `cg`, `pid`, `start`, `ppid`, `path`, `comm`,
 `cmdline`, and one `UInt64` column per metric (such as `cg_cpu_usage_usec` or `p_rss_bytes`)
