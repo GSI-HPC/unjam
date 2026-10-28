@@ -137,7 +137,6 @@ pub fn sanitize(s: &str, max: usize, out: &mut Vec<u8>) {
 }
 
 /// Demultiplexes a received line by the node prefix that the agent wrote itself (D6).
-#[cfg_attr(not(test), expect(dead_code, reason = "the TUI receive path decodes; not wired yet"))]
 pub fn split_node(line: &[u8]) -> Option<(u32, &[u8])> {
     let tab = line.iter().position(|&b| b == b'\t')?;
     let node = u32::try_from(field(std::str::from_utf8(&line[..tab]).ok()?)?).ok()?;
@@ -147,7 +146,6 @@ pub fn split_node(line: &[u8]) -> Option<(u32, &[u8])> {
 /// Decodes one line (after `split_node`, with or without `\n`). Values land in `vals`, which the
 /// event borrows. Extra trailing fields are ignored, so `H`, `D` and `T` can grow without a
 /// proto bump; `None` means malformed.
-#[cfg_attr(not(test), expect(dead_code, reason = "the TUI receive path decodes; not wired yet"))]
 pub fn parse<'a>(line: &'a [u8], vals: &'a mut Vec<u64>) -> Option<Event<'a>> {
     let line = std::str::from_utf8(line.strip_suffix(b"\n").unwrap_or(line)).ok()?;
     let (tag, rest) = line.split_once('\t').unwrap_or((line, ""));
@@ -231,7 +229,6 @@ fn field(s: &str) -> Option<u64> {
 }
 
 /// Encodes a control line (`R`, `C`, `S`, `B` or `K`, §6.2) with its `\n`.
-#[cfg_attr(not(test), expect(dead_code, reason = "the TUI sends control lines; not wired yet"))]
 pub fn write_control(buf: &mut String, c: &Control) {
     let _ = match c {
         Control::Rule(r) => writeln!(buf, "R\t{r}"),

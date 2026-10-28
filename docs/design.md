@@ -62,7 +62,7 @@ This is the living design of the repository. It started as the reviewed round-on
 
 - **CLI shape (D43).** One viewer command with a data-source flag; `record` and the hidden `agent` stay subcommands. `--slurm` and `--replay` form one mutually exclusive clap group. `--slurm` uses `num_args(0..=1)` with `require_equals(true)`: `--slurm=123` is valid, `--slurm 123` is an error. The Slurm-only flags (`--nodelist`, `--budget`, `--agent`, `--agent-keepalive`, `--srun-arg`, `--bcast`, `--record DIR`, `--print-srun`) use clap `requires = "slurm"`.
 - **Job resolution** when `--slurm` has no value: 1. `$SLURM_JOB_ID`; 2. the only running job from `squeue --me`; 3. otherwise print the running jobs and exit 2. A future job picker replaces step 3 without a CLI change.
-- **Input thread (D38).** In every viewer mode a dedicated thread blocks in `crossterm::event::read()` and sends `Msg::Key` and `Msg::Resize` into the channel the main thread blocks on (§7.3).
+- **Input thread (D38).** In every viewer mode a dedicated thread blocks in `crossterm::event::read()` and queues `Msg::Key` and `Msg::Resize` on an unbounded key queue, then wakes the main thread through the channel it blocks on (§7.3). `q` (outside filter editing) and Ctrl-C set the quit flag in the input thread itself.
 - `--rule` takes the text of a control-protocol `R` line (§6.2) **without** the leading `R\t`, for example `--rule $'*\t.\t1000\tp'`. It replaces the default rules. It is the hook the integration tests use.
 - `--agent-keepalive SECS` (hidden, for tests) is forwarded to every agent as `--keepalive SECS`. The `srun_args` golden tests cover it.
 - `--batch N` prints N text snapshots (`top -b`) using `state::rows` and exits. It replaces capture-and-assert scripts in the sind tests. Its footer reports `nodes=… stale=… errors=… dropped=…`.
@@ -475,7 +475,7 @@ Verified in Slurm 25.11 source:
 
 ### 7.3 TUI receive path
 
-- **One channel (D38).** The main thread blocks on a single `sync_channel(64)` of `Msg::{Key, Resize, Lines, Stderr, Tick}`. One blocking `recv` is simpler than polling with timeouts.
+- **One channel (D38).** The main thread blocks on a single `sync_channel(64)` of `Msg::{Key, Resize, Lines, Stderr, Tick}`. One blocking `recv` is simpler than polling with timeouts. Keys travel on a separate unbounded queue that the main thread drains before each decode batch; the input thread only `try_send`s a wake-up into the channel, so a key never waits behind 64 queued line chunks and the input thread never blocks.
 - **Input thread.** Blocks in `crossterm::event::read()` and sends `Msg::Key` and `Msg::Resize`. A draw that blocks on a slow terminal (ssh) does not delay key reading, and `q` or Ctrl-C set a quit flag at once.
 - **stdout reader thread.** `read()` into a 64 KiB buffer, split at the last `\n`, keep the remainder, and send whole-line chunks as `Msg::Lines`. It counts bytes for the header's `in` rate. The bounded channel makes srun's pipe fill up, which pushes back to the agents, whose writer threads absorb it (§7.5).
 - **Main thread.** Handles keys first. Then, for each line: `wire::split_node` gives the node (and counts the line), `wire::parse(line, &mut vals)` gives an `Event`, and `State::apply` stores it. Decode work per batch is capped at 10 ms, after which pending keys are handled again, so key latency stays under about 50 ms even during an 8 MB attach burst. `Msg::Tick` (1 Hz) drives the self-monitoring sample and staleness.
@@ -621,7 +621,7 @@ The mock assumes `EnableExtraControllers=io,pids`. Without it, IO-R/s and IO-W/s
   - **node**: node → cgroup tree → processes.
   - **flat**: one row per process, or per task cgroup where processes are `Off`, with a NODE column and one global sort. In local mode this is the classic `top`.
   - Local mode has no node level: `v` toggles between the cgroup tree and flat.
-- **Sort.** The sort column orders siblings only; a row never leaves its parent. Tree layouts sort every sibling set at every level by the row's own value; flat has one sibling set, so its sort is global. Counter → rate, Gauge → value, NA always last in both directions, NAME and NODE in natural order, ties in natural order. The cursor follows its entity across redraws.
+- **Sort.** The sort column orders siblings only; a row never leaves its parent. Tree layouts sort every sibling set at every level by the row's own value; flat has one sibling set, so its sort is global. Counter → rate, Gauge → value, NA always last in both directions, NAME and NODE in natural order (NODE sorts by host, then NAME), ties in natural order. The cursor follows its entity across redraws.
 - **Folded node ranges (D41, step layout).** Under a step, the top nodes by the sort column fill the window, and the remaining nodes collapse into one aggregate row such as `n0418 … n1024 (606 folded)`. Unfolding it lists them. About 25 LOC.
 - **Not in round one:** a "by command" layout and a RANK column. Rank labels ("rank 0-95") need `SLURM_PROCID` from `/proc/<pid>/environ` once per new task, which is not designed yet.
 - **Detail** (`Enter`): every column the node announced, including future-source metrics, shown raw and as a rate, plus the full path or cmdline. Where a value is NA because a controller is absent, it says so.
@@ -642,7 +642,7 @@ The mock assumes `EnableExtraControllers=io,pids`. Without it, IO-R/s and IO-W/s
 | `+` / `-` | Halve / double the interval of the marked or cursor rows. Sends `R` |
 | `0` | Reset rules to the defaults (`C *` plus the defaults) |
 | `v` | Next layout: step → node → flat (local: tree ↔ flat) |
-| `s` / `S` | Next sort column / reverse |
+| `s` / `S` | Next sort column (NAME, the value columns, then NODE when attached) / reverse |
 | `/` | Substring filter on name, comm or path; `Esc` clears |
 | `r` | Start or stop recording what the TUI receives (§8.5) |
 | `t` | Next theme |
@@ -851,7 +851,7 @@ Every item carries a `///` doc stating why it exists, enforced by `tests/budget.
 | `State::derive(node)` | PIDS fallback: subtree sum of `p_threads` where `cg_pids_current` is NA |
 | `state::rate(kind, v, pv, dt) -> Option<f64>` | Counter → rate, Gauge → value |
 | `state::rows(&State, &View, h, &mut Vec<Row>)` | Visible-window walk over the layout's level order with partial sibling sort, cross-node sums and folded node ranges |
-| `tui::input(tx: SyncSender<Msg>, quit: &AtomicBool)` | Input thread: blocking `event::read()`, sets the quit flag on `q`/Ctrl-C (D38) |
+| `tui::input(keys: &Sender<Msg>, wake: &SyncSender<Msg>)` | Input thread: blocking `event::read()`, queues keys and wakes the main thread, sets the quit flag on `q`/Ctrl-C (D38) |
 | `tui::run(App, rx: Receiver<Msg>) -> io::Result<()>` | Loop: block on `Msg`, keys first, bounded decode, replay step, draw at ≤ 4 Hz |
 | `tui::on_key(&mut App, KeyEvent)` | Bindings → view changes or `Control` |
 | `tui::draw(&mut Frame, &App)` | Header with self-monitoring, heat strip, table with history bars (hiding all-NA default columns), footer, overlays |

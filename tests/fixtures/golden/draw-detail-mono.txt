@@ -1,0 +1,14 @@
+ unjam  vm  2 procs  1s  tree  sort CPU% ▼  12:00:00Z
+ tui - - ·┌──────────────────────────────────────────────────────────────────────────────┐
+ CPU ▁▁▁▁▁│ cgroup /  (vm)                                                               │
+NAME      │                                                                              │     INT W
+▾ /       │ cg_cpu_usage_usec                   6120000 us   680000 us/s                 │~4    1s p
+  ▾ system│ cg_mem_current_bytes             3221225472 B   3.0G                         │12    1s p
+    ▾ sshd│ cg_io_read_bytes           NA (not announced, or the controller or file is ab│ 2    1s p
+      └ ss│ cg_io_write_bytes          NA (not announced, or the controller or file is ab│ 3
+  ▾ user.s│ cg_pids_current            NA (not announced, or the controller or file is ab│ 3    1s p
+    └ -bas│                                                                              │ 1
+          │                                                                              │
+          └──────────────────────────────────────────────────────────────────────────────┘
+
+ ↑↓ move ←→ fold ␣ mark p what +/- rate 0 reset v layout s sort / filter t theme ? help q quit

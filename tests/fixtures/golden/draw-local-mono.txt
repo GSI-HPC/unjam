@@ -1,0 +1,14 @@
+ unjam  vm  2 procs  1s  tree  sort CPU% ▼  12:00:00Z
+ tui - - · in 0 0 msg/s · out 0 · drop 0 err 0
+ CPU ▁▁▁▁▁▁▁▁▁▁▁▁▁▂▂▂ 17.0%  MEM ██████·········· 3.0G/8.0G
+NAME                                           PID     CPU history      CPU%   MEM    PIDS     INT W
+▾ /                                                    ▁▁▂▂▂▂▃▃▃▄▄▄▄▅▅▅  68.0%   3.0G     ~4    1s p
+  ▾ system.slice                                       ▁▁▁▂▂▂▂▂▃▃▃▃▃▄▄▄  51.0%   1.0G     12    1s p
+    ▾ sshd.service                                     ▁▁▁▂▂▂▂▂▃▃▃▃▃▄▄▄  51.0%    32M      2    1s p
+      └ sshd: /usr/sbin/sshd -D                     10 ▁▁▁▁▂▂▂▂▂▂▃▃▃▃▃▃  42.5%   8.0M      3
+  ▾ user.slice                                         ▁▁▁▁▁▁▁▁▁▁▁▁▁▂▂▂  17.0%   512M      3    1s p
+    └ -bash                                         20 ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁   8.5%   4.0M      1
+
+
+
+ ↑↓ move ←→ fold ␣ mark p what +/- rate 0 reset v layout s sort / filter t theme ? help q quit

@@ -18,8 +18,8 @@ agent.rs    450  # stored P identity for S resyncs, pid reuse and moves, T in th
 wire.rs     200
 slurm.rs    175
 record.rs   330
-state.rs    360
-tui.rs      600
+state.rs    457  # rows of three layouts with folded ranges, PIDS fallback, history ring (D39, D41)
+tui.rs      620  # key queue and quit in the input thread, NODE sort, cursor follow (D38, D39)
 theme.rs     60
 total      2900
 

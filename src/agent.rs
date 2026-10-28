@@ -545,12 +545,10 @@ pub fn main(root: Option<PathBuf>, keepalive: u64) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::BTreeMap,
-        sync::{Arc, Mutex},
-    };
+    use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::state::State;
 
     /// A private copy of the fixture trees that a test may modify.
     struct Tree(PathBuf);
@@ -839,46 +837,6 @@ mod tests {
         assert_eq!(stagger(0, 0, 1000), 0);
     }
 
-    /// Minimal per-node reference decode for the mux test (`State` arrives with the TUI).
-    #[derive(Debug, Default, PartialEq)]
-    struct Node {
-        hello: String,
-        desc: Vec<String>,
-        cgs: BTreeMap<u64, (u64, String, Vec<u64>)>,
-        procs: BTreeMap<u32, (u64, u64, String, String, Vec<u64>)>,
-        ticks: Vec<u64>,
-    }
-
-    impl Node {
-        fn apply(&mut self, ev: &Event) {
-            let put = |dst: &mut Vec<u64>, first: u16, v: &[u64]| {
-                let end = usize::from(first) + v.len();
-                dst.resize(dst.len().max(end), NA);
-                dst[usize::from(first)..end].copy_from_slice(v);
-            };
-            match *ev {
-                Event::Hello { host, step, .. } => self.hello = format!("{host} {step}"),
-                Event::Desc { name, .. } => self.desc.push(name.into()),
-                Event::Tick { ts_ms, .. } => self.ticks.push(ts_ms),
-                Event::Cg { id, parent, path } => {
-                    drop(self.cgs.insert(id, (parent, path.into(), vec![])));
-                }
-                Event::CgVals { id, first, v } => {
-                    put(&mut self.cgs.get_mut(&id).unwrap().2, first, v);
-                }
-                Event::CgGone(id) => drop(self.cgs.remove(&id)),
-                Event::Proc { pid, start, cg, comm, cmd, .. } => {
-                    self.procs.insert(pid, (start, cg, comm.into(), cmd.into(), vec![]));
-                }
-                Event::ProcVals { pid, first, v } => {
-                    put(&mut self.procs.get_mut(&pid).unwrap().4, first, v);
-                }
-                Event::ProcGone(pid) => drop(self.procs.remove(&pid)),
-                Event::Warn(_) => {}
-            }
-        }
-    }
-
     fn xorshift(x: &mut u64) -> u64 {
         *x ^= *x << 13;
         *x ^= *x >> 7;
@@ -888,8 +846,8 @@ mod tests {
 
     /// Re-encodes one agent's stream for `n` nodes with node-specific values; returns the
     /// streams and each node's reference state, decoded directly.
-    fn node_streams(base: &[u8], n: u32) -> (Vec<Vec<u8>>, Vec<Node>) {
-        let mut want: Vec<Node> = (0..n).map(|_| Node::default()).collect();
+    fn node_streams(base: &[u8], n: u32) -> (Vec<Vec<u8>>, State) {
+        let mut want = State::new();
         let mut streams = vec![Vec::new(); n as usize];
         let mut vals = Vec::new();
         for line in base.split_inclusive(|&b| b == b'\n') {
@@ -909,7 +867,7 @@ mod tests {
                     }
                     other => other,
                 };
-                want[node as usize].apply(&ev);
+                want.apply(node, &ev, 0).unwrap();
                 wire::write(&mut streams[node as usize], node, &ev);
             }
         }
@@ -947,15 +905,15 @@ mod tests {
     }
 
     /// The TUI side: 64 KiB reads, split at the last newline, `split_node`, `parse`, apply.
-    fn demux(stdout: &[u8], n: u32) -> Vec<Node> {
-        let mut got: Vec<Node> = (0..n).map(|_| Node::default()).collect();
+    fn demux(stdout: &[u8]) -> State {
+        let mut got = State::new();
         let (mut rem, mut vals) = (Vec::new(), Vec::new());
         for piece in stdout.chunks(65_536) {
             rem.extend_from_slice(piece);
             let cut = rem.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
             for line in rem[..cut].split_inclusive(|&b| b == b'\n') {
                 let (node, rest) = wire::split_node(line).unwrap();
-                got[node as usize].apply(&wire::parse(rest, &mut vals).unwrap());
+                got.apply(node, &wire::parse(rest, &mut vals).unwrap(), 0).unwrap();
             }
             rem.drain(..cut);
         }
@@ -975,9 +933,10 @@ mod tests {
             emit(&Event::Tick { ts_ms: t * 1000, self_cpu_us, out_bytes: 0, dropped: 0, self_rss });
         }
         let (streams, want) = node_streams(&base, 1000);
-        let got = demux(&interleave(streams.iter().map(|s| messages(s)).collect()), 1000);
-        assert_eq!(got[999].ticks, [1000, 2000, 3000]);
-        assert_eq!((got[999].cgs.len(), got[999].procs.len()), (8, 3));
+        let got = demux(&interleave(streams.iter().map(|s| messages(s)).collect()));
+        let last = &got.nodes[999];
+        assert_eq!((last.host.as_str(), last.prev[0]), ("worker-0", 3000));
+        assert_eq!((last.cgs.len(), last.procs.len()), (8, 3));
         assert!(got == want, "every node's state equals its reference");
     }
 }
