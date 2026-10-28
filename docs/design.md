@@ -285,7 +285,7 @@ pub enum Event<'a> {
 
 | File | Purpose |
 |---|---|
-| `/proc/self/cgroup` | Must be the single `0::<path>` line; otherwise exit with "cgroup v2 only" (refuses v1 and hybrid) |
+| `/proc/self/cgroup` | Its `0::<path>` line gives the own cgroup. Hybrid hosts list v1 lines too; they are ignored, and the sampled root must be a cgroup2 directory. No `0::` line, or no cgroup2 at `/sys/fs/cgroup` without `--root`: exit with "cgroup v2 only" |
 | `<cgroot>/cgroup.controllers` | Its existence proves the mount is cgroup2 |
 | `/proc/self/auxv` | `AT_PAGESZ` (6) and `AT_CLKTCK` (17) as u64 pairs. Replaces `sysconf` |
 | `/proc/sys/kernel/hostname` | Host name, sent in `H` |

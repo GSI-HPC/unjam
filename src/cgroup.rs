@@ -141,18 +141,16 @@ fn descend(dir: &Path, ino: u64, exclude: Option<&Path>, found: &mut Vec<(PathBu
     }
 }
 
-/// The path of the single `0::` line of `/proc/self/cgroup`; anything else is v1 or hybrid.
+/// The path of the unified (`0::`) line of `/proc/self/cgroup`. Hybrid hosts list v1 lines
+/// too; whether `/sys/fs/cgroup` really is cgroup2 is checked by `v2_check`.
 fn v2_path(self_cgroup: &str) -> Result<&str, String> {
-    match self_cgroup.lines().collect::<Vec<_>>()[..] {
-        [line] => line.strip_prefix("0::").ok_or_else(v1),
-        _ => Err(v1()),
-    }
+    self_cgroup.lines().find_map(|l| l.strip_prefix("0::")).ok_or_else(v1)
 }
 
 /// The refusal text for v1 and hybrid hierarchies.
 fn v1() -> String {
-    "cgroup v2 only: /proc/self/cgroup shows a v1 or hybrid hierarchy (use --root to point at \
-     a cgroup2 mount)"
+    "cgroup v2 only: no cgroup2 hierarchy at /sys/fs/cgroup (use --root to point at a cgroup2 \
+     mount)"
         .to_owned()
 }
 
@@ -171,10 +169,8 @@ pub fn v2_check(
         Err(_) => root.to_path_buf(),
     };
     if !root.join("cgroup.controllers").is_file() {
-        return Err(format!(
-            "{}: not a cgroup v2 directory (no cgroup.controllers)",
-            root.display()
-        ));
+        let e = format!("{}: not a cgroup v2 directory (no cgroup.controllers)", root.display());
+        return Err(if explicit { e } else { v1() });
     }
     Ok(if own.join("cpu.stat").is_file() { own } else { root.to_path_buf() })
 }
@@ -296,6 +292,10 @@ mod tests {
                 "system.slice/node1_slurmstepd.scope/job_9",
             ),
             ("0::/step_3/user/task_0\n", ""),
+            (
+                "8:pids:/\n1:cpu:/\n0::/system.slice/slurmstepd.scope/job_7/step_3/user/task_0\n",
+                "system.slice/slurmstepd.scope/job_7",
+            ),
         ] {
             let (root, own) = job_root(mount, cg).unwrap();
             assert_eq!(root, mount.join(job), "{cg}");
@@ -307,7 +307,7 @@ mod tests {
             "0::/user.slice/user-1000.slice/session-3.scope\n",
             "0::/system.slice/slurmstepd.scope/job_42/step_3/slurm\n",
             "0::/system.slice/slurmstepd.scope/job_42/step_3/user\n",
-            "12:pids:/\n1:cpu:/\n0::/system.slice/slurmstepd.scope/job_42/step_3/user/task_0\n",
+            "12:pids:/\n1:cpu:/\n",
             "",
         ] {
             assert!(job_root(mount, bad).is_err(), "{bad:?}");
@@ -321,8 +321,11 @@ mod tests {
         let me = "0::/system.slice/slurmstepd.scope/job_42/step_0/user/task_0\n";
         assert_eq!(v2_check(&mount, &root, me, false).unwrap(), root.join("step_0/user/task_0"));
         let hybrid = "8:pids:/\n1:cpu:/\n0::/\n";
-        assert!(v2_check(&mount, &root, hybrid, false).unwrap_err().contains("cgroup v2 only"));
-        assert_eq!(v2_check(&mount, &root, hybrid, true).unwrap(), root, "explicit --root");
+        assert_eq!(v2_check(&mount, &root, hybrid, false).unwrap(), root, "unified line of hybrid");
+        let err = v2_check(&mount, &mount, hybrid, false).unwrap_err();
+        assert!(err.contains("cgroup v2 only"), "{err}");
+        assert!(v2_check(&mount, &root, "1:cpu:/\n", false).unwrap_err().contains("v2 only"));
+        assert_eq!(v2_check(&mount, &root, "1:cpu:/\n", true).unwrap(), root, "explicit --root");
         let not_v2 = v2_check(&mount, &mount.join("nope"), me, true).unwrap_err();
         assert!(not_v2.contains("not a cgroup v2 directory"), "{not_v2}");
     }
