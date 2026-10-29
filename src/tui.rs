@@ -565,12 +565,15 @@ fn event_loop(app: &mut App, rx: [&Receiver<Msg>; 2], t: &mut DefaultTerminal) -
     Ok(())
 }
 
-/// Human-readable value: `%` with one decimal, bytes and B/s with binary suffixes, counts with
-/// decimal ones; NA is `-`, and an unknown unit is shown raw after the number.
+/// Human-readable value: `%` with one decimal below 1000 and in at most six cells above, bytes
+/// and B/s with binary suffixes, counts with decimal ones; NA is `-`, and an unknown unit is
+/// shown raw after the number.
 pub fn fmt(unit: &str, v: f64) -> String {
     let (step, sfx) = match unit {
         _ if v.is_nan() => return "-".into(),
-        "%" => return format!("{v:.1}%"),
+        "%" if v < 1000.0 => return format!("{v:.1}%"),
+        "%" if v < 1e5 => return format!("{v:.0}%"),
+        "%" => return format!("{}%", fmt("1", v)),
         "B" | "B/s" => (1024.0, "KMGTP"),
         "1" => (1000.0, "kMGTP"),
         _ => return format!("{v:.0} {unit}"),
@@ -1256,6 +1259,8 @@ mod tests {
     #[test]
     fn values_and_columns() {
         assert_eq!(fmt("%", 12.345), "12.3%");
+        let pct = [6869.7, 99_999.0, 6_553_600.0].map(|v| fmt("%", v));
+        assert_eq!(pct, ["6870%", "99999%", "6.6M%"], "a 64-core node and a 1024-node job fit");
         assert_eq!(fmt("B", 3.0 * 1024.0 * 1024.0), "3.0M");
         assert_eq!(fmt("B/s", 512.0), "512");
         assert_eq!(fmt("B/s", 20_480.0), "20K/s");
