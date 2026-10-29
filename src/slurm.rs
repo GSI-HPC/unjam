@@ -33,9 +33,14 @@ pub struct Job {
 /// Runs a Slurm command and returns its stdout; its stderr goes to ours.
 fn run(cmd: &str, args: &[&str]) -> Result<String, String> {
     let out = Command::new(cmd).args(args).stderr(Stdio::inherit()).output();
-    let out = out.map_err(|e| format!("{cmd}: {e}"))?;
+    let out = out.map_err(|e| match e.kind() {
+        io::ErrorKind::NotFound => {
+            format!("{cmd} not found in PATH (--slurm needs the Slurm commands)")
+        }
+        _ => format!("{cmd}: {e}"),
+    })?;
     if !out.status.success() {
-        return Err(format!("{cmd} {} failed ({})", args.join(" "), out.status));
+        return Err(format!("{cmd} failed ({})", out.status));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -66,7 +71,8 @@ fn running(mut rows: Vec<Row>, want: &str) -> Result<Row, Vec<Row>> {
 /// single one (D43).
 fn pick(rows: &[Row], what: &str) -> ! {
     let mut e = io::stderr().lock();
-    let _ = writeln!(e, "unjam: {} running jobs {what}; pick one with --slurm=JOBID", rows.len());
+    let n = if rows.is_empty() { "no".into() } else { rows.len().to_string() };
+    let _ = writeln!(e, "unjam: {n} running jobs {what}; pick one with --slurm=JOBID");
     for (id, n, .., name) in rows {
         let _ = writeln!(e, "  {id:>10}  {n:>5} nodes  {name}");
     }
@@ -88,8 +94,11 @@ fn resolve(arg: &str) -> Result<String, String> {
 /// them like [`resolve`]. `--nodelist` sets the agent count (§3.2).
 pub fn job(arg: &str, nodelist: Option<&str>) -> Result<Job, String> {
     let want = resolve(arg)?;
-    let rows = squeue(&[&format!("--jobs={want}")])?;
-    let state = rows.first().map(|r| r.2.clone()).ok_or_else(|| format!("job {want} not found"))?;
+    // squeue fails on an id it does not know, after saying so on stderr.
+    let gone = || format!("job {want} not found (finished, or not visible to you)");
+    let rows = squeue(&[&format!("--jobs={want}")])
+        .map_err(|e| if e.starts_with("squeue failed") { gone() } else { e })?;
+    let state = rows.first().map(|r| r.2.clone()).ok_or_else(gone)?;
     let (id, nodes, _, owner, _) = running(rows, &want).or_else(|r| match r.len() {
         0 => Err(format!("job {want} is {state}, not RUNNING")),
         _ => pick(&r, &format!("in array {want}")),
@@ -212,7 +221,11 @@ pub fn view(arg: &str, a: &SlurmArgs, opts: Opts, batch: Option<u32>) -> Result<
     let uid = fs::metadata("/proc/self").map_or(0, |m| m.uid());
     // A job-private /tmp (job_container/tmpfs) belongs to the job's owner, who could swap the copy.
     if a.bcast.is_some() && job.owner != uid {
-        return Err(format!("--bcast: job owner {} could swap the copy; use --agent", job.owner));
+        let (id, owner) = (&job.id, job.owner);
+        return Err(format!(
+            "--bcast: job {id} belongs to uid {owner}, who could swap the copy; use --agent PATH \
+             (an unjam binary on the nodes) instead"
+        ));
     }
     let argv = srun_args(&job, a, exe, uid, nonce);
     if a.print_srun {

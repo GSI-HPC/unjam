@@ -279,7 +279,8 @@ impl Track {
     fn open(path: &Path) -> Result<(Self, Vec<u64>, Option<u64>), String> {
         let e = |x: &dyn std::fmt::Display| format!("{}: {x}", path.display());
         let file = Counting(BufReader::new(File::open(path).map_err(|x| e(&x))?), 0);
-        let mut r = StreamReader::try_new(file, Some(vec![0])).map_err(|x| e(&x))?;
+        let not = |x| e(&format!("not an unjam recording ({x})"));
+        let mut r = StreamReader::try_new(file, Some(vec![0])).map_err(not)?;
         let (mut index, mut times, mut at) = (vec![], vec![], r.get_ref().1);
         let mut head = vec![0; usize::try_from(at).map_err(|x| e(&x))?];
         File::open(path).and_then(|mut f| f.read_exact(&mut head)).map_err(|x| e(&x))?;
