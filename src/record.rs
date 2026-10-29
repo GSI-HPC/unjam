@@ -578,17 +578,20 @@ pub struct Rec {
     pub dir: PathBuf,
     meta: [(&'static str, String); 3],
     files: HashMap<u32, Option<Writer>>,
+    /// Nodes silent since before this viewer time (stale at the start) are not recorded.
+    since: u64,
 }
 
 impl Rec {
-    /// A recording into `dir` (created owner-only if missing) of a viewer on `job`.
-    pub fn new(dir: PathBuf, job: &str, interval_ms: u32) -> Result<Self, String> {
+    /// A recording into `dir` (created owner-only if missing) of a viewer on `job`, of nodes
+    /// heard from since `since`.
+    pub fn new(dir: PathBuf, job: &str, interval_ms: u32, since: u64) -> Result<Self, String> {
         let made = fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir);
         made.map_err(|e| format!("record {}: {e}", dir.display()))?;
         let dir = dir.canonicalize().unwrap_or(dir);
         let iv = interval_ms.to_string();
         let meta = [("source", "tui".into()), ("job", job.into()), ("interval_ms", iv)];
-        Ok(Self { dir, meta, files: HashMap::new() })
+        Ok(Self { dir, meta, files: HashMap::new(), since })
     }
 
     /// Writes node `i`'s last complete tick, creating `DIR/<host>.arrows` on first use (`/` in
@@ -596,7 +599,7 @@ impl Rec {
     /// cannot be created is skipped from then on.
     pub fn node(&mut self, st: &State, i: u32) -> Result<(), String> {
         let n = &st.nodes[i as usize];
-        if n.prev[0] == 0 || n.host.is_empty() {
+        if n.prev[0] == 0 || n.host.is_empty() || n.seen < self.since {
             return Ok(());
         }
         let path = || self.dir.join(format!("{}.arrows", n.host.replace('/', "_")));
@@ -876,7 +879,7 @@ mod tests {
     fn journals_and_recording_dirs_are_owner_only() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tmp("mode");
-        let rec = Rec::new(dir.0.join("a/b"), "42", 1000).unwrap();
+        let rec = Rec::new(dir.0.join("a/b"), "42", 1000, 0).unwrap();
         let (path, _) = journal(&rec.dir, "n1", 1);
         for p in [&dir.0.join("a"), &rec.dir, &path] {
             let mode = fs::metadata(p).unwrap().permissions().mode();
@@ -892,7 +895,7 @@ mod tests {
             hello(&mut st, i, host);
             tick(&mut st, i, 1, 0);
         }
-        let rec = Rec::new(dir.0.join("rec"), "42", 1000).unwrap();
+        let rec = Rec::new(dir.0.join("rec"), "42", 1000, 0).unwrap();
         assert!(rec.finish(&st).is_empty());
         let mut names: Vec<_> = fs::read_dir(dir.0.join("rec")).unwrap().flatten().collect();
         names.sort_by_key(fs::DirEntry::file_name);

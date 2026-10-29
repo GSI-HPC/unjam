@@ -333,7 +333,8 @@ impl App {
         }
         let dir =
             self.rec_dir.take().unwrap_or_else(|| format!("unjam-rec-{}", now_ms() / 1000).into());
-        match Rec::new(dir, &self.opts.source, self.opts.interval_ms) {
+        let since = self.now.saturating_sub(3 * u64::from(self.opts.interval_ms));
+        match Rec::new(dir, &self.opts.source, self.opts.interval_ms, since) {
             Ok(r) => (self.log(format!("recording to {}", r.dir.display())), self.rec = Some(r)).1,
             Err(e) => self.log(e),
         }
@@ -1273,6 +1274,19 @@ mod tests {
         app.record();
         feed(&mut app, 0, &["T 4000 0 0 0 -".into()]);
         assert!(title(&app)[0].contains("  rec failed  "), "n1.arrows exists: nothing records");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_node_silent_since_before_the_recording_is_not_recorded() {
+        let dir = std::env::temp_dir().join(format!("unjam-tui-old-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (mut app, _rx) = app(false, "mono");
+        feed(&mut app, 0, &["H 1 0.1 n1 42.0 1 0", "G 1 0 ", "T 1000 0 0 0 -"].map(str::to_owned));
+        (app.now, app.rec_dir) = (app.now + 60_000, Some(dir.clone()));
+        app.record();
+        app.record();
+        assert!(dir.is_dir() && !dir.join("n1.arrows").exists());
         fs::remove_dir_all(&dir).unwrap();
     }
 
