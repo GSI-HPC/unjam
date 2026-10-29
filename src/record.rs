@@ -583,14 +583,15 @@ pub struct Rec {
 }
 
 impl Rec {
-    /// A recording into `dir` (created owner-only if missing) of a viewer on `job`, of nodes
-    /// heard from since `since`.
+    /// A recording into `dir` (created owner-only if missing) of a viewer on `job` (its id, the
+    /// first word) of nodes heard from since `since`.
     pub fn new(dir: PathBuf, job: &str, interval_ms: u32, since: u64) -> Result<Self, String> {
         let made = fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir);
         made.map_err(|e| format!("record {}: {e}", dir.display()))?;
         let dir = dir.canonicalize().unwrap_or(dir);
         let iv = interval_ms.to_string();
-        let meta = [("source", "tui".into()), ("job", job.into()), ("interval_ms", iv)];
+        let job = job.split(' ').next().unwrap_or(job).into();
+        let meta = [("source", "tui".into()), ("job", job), ("interval_ms", iv)];
         Ok(Self { dir, meta, files: HashMap::new(), since })
     }
 

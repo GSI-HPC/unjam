@@ -28,6 +28,7 @@ pub struct Job {
     pub id: String,
     pub nodes: u32,
     pub owner: u32,
+    pub name: String,
 }
 
 /// Runs a Slurm command and returns its stdout; its stderr goes to ours.
@@ -99,13 +100,13 @@ pub fn job(arg: &str, nodelist: Option<&str>) -> Result<Job, String> {
     let rows = squeue(&[&format!("--jobs={want}")])
         .map_err(|e| if e.starts_with("squeue failed") { gone() } else { e })?;
     let state = rows.first().map(|r| r.2.clone()).ok_or_else(gone)?;
-    let (id, nodes, _, owner, _) = running(rows, &want).or_else(|r| match r.len() {
+    let (id, nodes, _, owner, name) = running(rows, &want).or_else(|r| match r.len() {
         0 => Err(format!("job {want} is {state}, not RUNNING")),
         _ => pick(&r, &format!("in array {want}")),
     })?;
-    let Some(list) = nodelist else { return Ok(Job { id, nodes, owner }) };
+    let Some(list) = nodelist else { return Ok(Job { id, nodes, owner, name }) };
     let n = run("scontrol", &["show", "hostnames", list])?.lines().count();
-    Ok(Job { id, nodes: u32::try_from(n).unwrap_or(u32::MAX), owner })
+    Ok(Job { id, nodes: u32::try_from(n).unwrap_or(u32::MAX), owner, name })
 }
 
 /// The srun argv, `srun` first (§3.2). With `--bcast` srun copies the agent to
@@ -234,7 +235,9 @@ pub fn view(arg: &str, a: &SlurmArgs, opts: Opts, batch: Option<u32>) -> Result<
     }
     let ((tx, rx), (ctl, ctl_rx)) = (mpsc::sync_channel(64), mpsc::channel());
     let remote = spawn(&argv, &tx, ctl_rx).map_err(|e| format!("srun: {e}"))?;
-    let mut app = App::new(Opts { source: job.id.clone(), ..opts }, ctl.clone());
+    // The job name is the job owner's text: no control chars into the terminal.
+    let source = format!("{} {}", job.id, job.name).trim_end().replace(char::is_control, "?");
+    let mut app = App::new(Opts { source, ..opts }, ctl.clone());
     app.budget = a.budget;
     app.start(job.nodes);
     if let Some(dir) = a.record.clone() {
@@ -265,7 +268,7 @@ pub(crate) mod tests {
     fn argv(flags: &str, nodes: u32) -> String {
         let cli = Cli::try_parse_from(["unjam", "--slurm=42"].into_iter().chain(flags.split(' ')))
             .unwrap();
-        let job = Job { id: "42".into(), nodes, owner: 1000 };
+        let job = Job { id: "42".into(), nodes, owner: 1000, name: "train".into() };
         let v = srun_args(&job, &cli.srun, "/opt/unjam".into(), 1000, 0xbc);
         v.iter().map(|s| s.to_string_lossy()).collect::<Vec<_>>().join(" ")
     }
