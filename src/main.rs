@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
 
-use std::{io::Write as _, path::PathBuf, process::ExitCode, time::Duration};
+use std::io::{IsTerminal as _, Write as _};
+use std::{path::PathBuf, process::ExitCode, time::Duration};
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, error::ErrorKind};
 
 /// The sampler, the shared run loop, the output path and the local-mode backend.
 mod agent;
@@ -38,7 +39,8 @@ mod wire;
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
-    /// Attach to a Slurm job (default: $SLURM_JOB_ID, else your only running job).
+    /// Attach to a Slurm job: --slurm=JOBID (with '='), or --slurm for $SLURM_JOB_ID, else your
+    /// only running job.
     #[arg(long, value_name = "JOBID", num_args = 0..=1, require_equals = true,
           default_missing_value = "", group = "source")]
     slurm: Option<String>,
@@ -51,8 +53,10 @@ struct Cli {
     /// Sampling interval [default: 1s locally, 2s for --slurm].
     #[arg(long, value_parser = parse_dur)]
     interval: Option<Duration>,
-    /// Sampling rule, the text of an R control line without "R<TAB>"; replaces the defaults.
-    #[arg(long = "rule", value_name = "RULE", value_parser = model::Rule::parse)]
+    /// Sampling rule "TASKS PATH INTERVAL LEVEL" (repeatable; replaces the defaults), e.g.
+    /// '* . 2s c' (every task and cgroup, 2 s, cgroups only) or '0 step_0 - o' (task 0's step_0
+    /// off). LEVEL: p processes, c cgroups, o off (interval -).
+    #[arg(long = "rule", value_name = "RULE", value_parser = parse_rule)]
     rules: Vec<model::Rule>,
     /// Colour theme (nord, night, mocha, gruvbox, solar, amber, mono) [env: UNJAM_THEME].
     #[arg(long)]
@@ -69,6 +73,7 @@ struct Cli {
 
 /// Attach-only flags; each requires --slurm (D43).
 #[derive(Args, Debug)]
+#[command(next_help_heading = "Slurm attach (with --slurm)")]
 struct SlurmArgs {
     /// Launch agents on these nodes only.
     #[arg(long, requires = "slurm")]
@@ -86,7 +91,7 @@ struct SlurmArgs {
     #[arg(long, requires = "slurm", allow_hyphen_values = true)]
     srun_arg: Vec<String>,
     /// Copy the agent to DIR/unjam.<job>.<uid> on the nodes with srun --bcast (no shared
-    /// filesystem needed); DIR must allow executables.
+    /// filesystem needed); DIR must allow executables. --bcast=DIR (with '=') [default DIR: /tmp].
     #[arg(long, value_name = "DIR", requires = "slurm", num_args = 0..=1, require_equals = true,
           default_missing_value = "/tmp")]
     bcast: Option<String>,
@@ -154,18 +159,33 @@ fn parse_dur(s: &str) -> Result<Duration, String> {
 fn parse_size(s: &str) -> Result<u64, String> {
     let num = s.strip_suffix(['K', 'M', 'G']).unwrap_or(s);
     let shift = 10 * ["", "K", "M", "G"].iter().position(|&u| u == &s[num.len()..]).unwrap_or(0);
-    num.parse::<u64>().map(|n| n << shift).map_err(|_| format!("bad size: {s:?}"))
+    num.parse::<u64>().map(|n| n << shift).map_err(|_| format!("bad size: {s:?} (use K, M or G)"))
+}
+
+/// `--rule`: the fields of an `R` line split by spaces or tabs; the interval also takes the
+/// units of `--interval` (`2s`).
+fn parse_rule(s: &str) -> Result<model::Rule, String> {
+    let mut f: Vec<String> =
+        s.split([' ', '\t']).filter(|f| !f.is_empty()).map(Into::into).collect();
+    if let Some(i) = f.get_mut(2).filter(|i| *i != "-" && i.parse::<u32>().is_err()) {
+        *i = parse_dur(i)?.as_millis().to_string();
+    }
+    model::Rule::parse(&f.join("\t"))
 }
 
 /// The viewer: resolves theme and interval, then runs the chosen source.
 fn viewer(cli: Cli) -> Result<(), String> {
     let env = |k| std::env::var(k).ok();
     let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
-    let theme = theme::pick(cli.theme.as_deref(), env("UNJAM_THEME").as_deref(), no_color)?;
+    let theme = theme::pick(cli.theme.as_deref(), env("UNJAM_THEME").as_deref(), no_color);
+    let theme = theme.or_else(|e| if cli.srun.print_srun { Ok(0) } else { Err(e) })?;
     let default = Duration::from_secs(if cli.slurm.is_some() { 2 } else { 1 });
     let interval_ms = model::interval_ms(cli.interval.unwrap_or(default).as_millis());
     let (source, local) = ("unjam".into(), cli.slurm.is_none() && cli.replay.is_empty());
     let opts = tui::Opts { source, interval_ms, rules: cli.rules, theme, local };
+    if cli.batch.is_none() && !cli.srun.print_srun && !std::io::stdout().is_terminal() {
+        return Err("stdout is not a terminal; use --batch N (or ssh -t)".into());
+    }
     match &cli.slurm {
         _ if !local && cli.slurm.is_none() => {
             record::replay(&cli.replay, cli.at.as_deref(), opts, cli.batch)
@@ -178,7 +198,16 @@ fn viewer(cli: Cli) -> Result<(), String> {
 /// Entry point: dispatches the command line; errors go to stderr with exit code 1. `record`
 /// passes the app's exit code through.
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = Cli::try_parse().unwrap_or_else(|e| {
+        // `--slurm 4242` reads 4242 as a subcommand: say what was meant.
+        let text = e.to_string();
+        if e.kind() == ErrorKind::ArgumentConflict && text.contains("the subcommand '") {
+            let hint = "hint: --slurm and --bcast take a value only with '=': --slurm=JOBID";
+            let _ = writeln!(std::io::stderr(), "{text}{hint}");
+            std::process::exit(2)
+        }
+        e.exit()
+    });
     let res = match cli.cmd {
         Some(Cmd::Agent { root, keepalive, unlink_self }) => {
             agent::main(root, keepalive, unlink_self).map(|()| ExitCode::SUCCESS)
@@ -237,7 +266,6 @@ mod alloc_count {
 #[cfg(test)]
 mod tests {
     use clap::CommandFactory;
-    use clap::error::ErrorKind;
 
     use super::*;
 
@@ -259,6 +287,8 @@ mod tests {
         let cli = parse("--rule *\t.\t2000\tc --rule 0-3\t*/user\t-\to");
         assert_eq!(cli.unwrap().rules.len(), 2);
         assert!(parse("--rule *\t.\tsoon\tc").is_err());
+        assert!(parse_rule("0-3  step_0 2.5s p").unwrap_err().starts_with("bad duration"));
+        assert_eq!(parse_rule("0-3 step_0 2s p").unwrap().to_string(), "0-3\tstep_0\t2000\tp");
         assert!(parse("--interval 2h").is_err());
     }
 
