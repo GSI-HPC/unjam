@@ -343,7 +343,9 @@ impl App {
             Msg::End => {
                 (self.ended, self.now) = (true, now_ms());
                 self.view.stale = vec![true; self.st.nodes.len()];
-                self.log("srun ended: the job is over or every agent has gone".into());
+                if !self.st.nodes.is_empty() {
+                    self.log("srun ended: the job is over or every agent has gone".into());
+                }
                 QUIT.fetch_or(self.st.nodes.is_empty(), Relaxed);
             }
             Msg::Tick => self.tick(),
