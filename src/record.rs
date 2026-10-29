@@ -550,6 +550,7 @@ impl Rec {
     pub fn new(dir: PathBuf, job: &str, interval_ms: u32) -> Result<Self, String> {
         let made = fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir);
         made.map_err(|e| format!("record {}: {e}", dir.display()))?;
+        let dir = dir.canonicalize().unwrap_or(dir);
         let iv = interval_ms.to_string();
         let meta = [("source", "tui".into()), ("job", job.into()), ("interval_ms", iv)];
         Ok(Self { dir, meta, files: HashMap::new() })
@@ -573,6 +574,11 @@ impl Rec {
         }
         let Some(Some(w)) = self.files.get_mut(&i) else { return Ok(()) };
         w.node(st, i as usize).map_err(e)
+    }
+
+    /// Whether every journal tried so far failed to open: nothing is being recorded.
+    pub fn failed(&self) -> bool {
+        !self.files.is_empty() && self.files.values().all(Option::is_none)
     }
 
     /// Writes every node's last tick and closes the journals; returns the errors.

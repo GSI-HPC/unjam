@@ -549,7 +549,12 @@ pub fn view(
     if app.rec.is_some() {
         app.record();
     }
-    res
+    // The recording's fate, which the TUI showed only in its log, outlives the screen.
+    let rec: Vec<_> = app.log.iter().rev().filter(|l| l.starts_with("record")).collect();
+    let mut err = io::stderr().lock();
+    rec.iter().try_for_each(|l| writeln!(err, "unjam: {l}"))?;
+    let failed = rec.iter().any(|l| l.starts_with("record ") || l.starts_with("record:"));
+    res.and(if failed { Err(io::Error::other("the recording failed")) } else { Ok(()) })
 }
 
 /// The input thread (D38): blocks on terminal events; `q`, Ctrl-C (or a dead terminal) set the
@@ -660,7 +665,7 @@ fn title(app: &App) -> [String; 2] {
     let clock = format!("{:02}:{:02}:{:02}Z", s / 3600, s / 60 % 60, s % 60);
     let mode = match (&app.replay, &app.rec) {
         (Some(_), _) => ["  [⏸]", "  [▶]"][usize::from(app.playing)],
-        (_, Some(_)) => "  ● rec",
+        (_, Some(r)) => ["  ● rec", "  rec failed"][usize::from(r.failed())],
         _ => "",
     };
     let l0 = format!(" {src}{mode}  {procs} procs  {iv}  {layout}  sort {sort} {arrow}  {clock}");
@@ -1190,6 +1195,10 @@ mod tests {
             st.nodes[0].procs.get(&50).map(|p| p.vals.v[2])
         };
         assert_eq!([rss(), rss(), rss()], [None, Some(777), None], "pid 50 lives for tick 2000");
+        app.rec_dir = Some(dir.clone());
+        app.record();
+        feed(&mut app, 0, &["T 4000 0 0 0 -".into()]);
+        assert!(title(&app)[0].contains("  rec failed  "), "n1.arrows exists: nothing records");
         fs::remove_dir_all(&dir).unwrap();
     }
 
