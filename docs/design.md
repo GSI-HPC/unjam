@@ -725,7 +725,7 @@ Counted as code lines, excluding blanks, comments and `#[cfg(test)]` modules. Re
 | agent.rs | 275 | theme.rs | 60 (+ theme data) |
 | | | **Total** | **≈ 2,700** (hard total cap 2,900) |
 
-The table is the plan. As built, the hard total cap is **3,460** (owner decision pending): record and replay measured about 580 lines against the planned 330, and the sampler (agent.rs) about 490 against 275, so `docs/budget.txt` holds the measured module budgets with a one-line reason each and is the authoritative gate. Modules that do not exist yet are skipped by the gate, and every file in `src/` needs a line. Theme data sits between `// budget: data` and `// budget: end` and is not counted. A budget may be re-baselined with a one-line reason in `docs/budget.txt`.
+The table is the plan. As built, the hard total cap is **3,460** (owner decision): record and replay measured about 580 lines against the planned 330, and the sampler (agent.rs) about 490 against 275, so `docs/budget.txt` holds the measured module budgets with a one-line reason each and is the authoritative gate. Modules that do not exist yet are skipped by the gate, and every file in `src/` needs a line. Theme data sits between `// budget: data` and `// budget: end` and is not counted. A budget may be re-baselined with a one-line reason in `docs/budget.txt`.
 
 Changes from the owner review: the three layouts (+50 in state.rs), self-monitoring (+30), the heat strip, CPU history, TUI recording and folded node ranges (+150, D41), `--bcast` with `--unlink-self` (+30) and the input thread (+10).
 
