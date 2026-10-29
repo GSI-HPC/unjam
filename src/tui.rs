@@ -801,7 +801,8 @@ fn strip_line(app: &App, t: &Theme, width: u16) -> Vec<Span<'static>> {
     spans.extend(bar(t, &hist));
     let gauge = |i: usize, style, n| Span::styled(t.glyphs.bars[i].repeat(n), style);
     let mem = [gauge(8, heat(0.0), full), gauge(0, t.dim, 16 - full)];
-    spans.extend([Span::raw(format!(" {}  ", fmt("%", cpu))), Span::styled("MEM ", t.dim)]);
+    let cpu = format!(" {} of {ncpu} CPUs  ", fmt("%", cpu));
+    spans.extend([Span::raw(cpu), Span::styled("MEM ", t.dim)]);
     spans.extend(mem);
     spans.push(Span::raw(format!(" {}/{}", fmt("B", used), fmt("B", total))));
     spans
