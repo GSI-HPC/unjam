@@ -726,6 +726,10 @@ fn bar(t: &Theme, hist: &[u16]) -> Vec<Span<'static>> {
 pub fn draw(f: &mut Frame, app: &mut App) {
     let (t, area) = (&THEMES[app.opts.theme], f.area());
     f.render_widget(Block::new().style(t.base), area);
+    if area.width < 80 || area.height < 8 {
+        let small = format!(" unjam needs at least 80x8 (now {}x{})", area.width, area.height);
+        return f.render_widget(Paragraph::new(small).wrap(Wrap { trim: true }), area);
+    }
     let sizes =
         [1, 1, 1, 0, 1].map(|h| if h == 0 { Constraint::Fill(1) } else { Constraint::Length(h) });
     let [head, mon, strip, body, foot] = Split::vertical(sizes).areas(area);
@@ -803,19 +807,29 @@ fn strip_line(app: &App, t: &Theme, width: u16) -> Vec<Span<'static>> {
     spans
 }
 
-/// The table for the visible rows only; all-NA value columns are hidden for this frame.
+/// The table for the visible rows only; all-NA value columns are hidden for this frame, and
+/// below 100 columns so is INT W when every row shows the same. NAME takes the rest, at most
+/// 72 cells (values stay near their names), and a cut name ends in `…`.
 fn table(f: &mut Frame, app: &App, t: &Theme, vis: &[Row], area: Rect) {
     let (cols, hw) = (shown(vis), if area.width >= 100 { 16 } else { 8 });
     let node = app.view.layout == Layout::Flat && !app.opts.local;
     let cpu = if hw == 16 { "CPU history" } else { "CPU" };
+    let mut tx: Vec<_> = vis.iter().map(|r| texts(app, r)).collect();
+    let mut int = tx.iter().map(|x| &x[4]).filter(|s| !s.is_empty());
+    let int = int.next().is_some_and(|a| hw == 16 || int.any(|b| b != a));
     let mut head = vec![("NAME", 0), ("NODE", 8), ("PID", 7), (cpu, hw)];
     head.retain(|h| node || h.0 != "NODE");
-    head.extend(cols.iter().map(|&c| (COLS[c].0, COLS[c].2)).chain([("  INT W", 7)]));
-    let widths =
-        head.iter().map(|h| if h.1 == 0 { Constraint::Fill(1) } else { Constraint::Length(h.1) });
-    let rows = vis.iter().enumerate().map(|(i, r)| {
-        let mut tx = texts(app, r).map(Some);
-        let mut take = |i: usize| tx[i].take().unwrap_or_default();
+    head.extend(cols.iter().map(|&c| (COLS[c].0, COLS[c].2)));
+    head.extend(int.then_some(("  INT W", 7)));
+    let fixed: u16 = head.iter().map(|h| h.1 + 1).sum();
+    let name = (area.width + 1).saturating_sub(fixed).min(72);
+    let widths = head.iter().map(|h| Constraint::Length(if h.1 == 0 { name } else { h.1 }));
+    let rows = vis.iter().zip(&mut tx).enumerate().map(|(i, (r, tx))| {
+        let room = usize::from(name).saturating_sub(tx[0].chars().count());
+        if tx[1].chars().count() > room {
+            tx[1] = tx[1].chars().take(room.saturating_sub(1)).chain(['…']).collect();
+        }
+        let mut take = |i: usize| std::mem::take(&mut tx[i]);
         let marked = app.marks.iter().any(|m| m.0 == r.key);
         let look = [t.accent, t.base, t.marked]
             [if marked { 2 } else { usize::from(matches!(r.key, Key::Proc(..))) }];
@@ -824,12 +838,14 @@ fn table(f: &mut Frame, app: &App, t: &Theme, vis: &[Row], area: Rect) {
             Span::styled(take(1), look),
         ]))];
         cells.extend(node.then(|| Cell::from(take(2))));
-        cells.push(Cell::from(Line::from(take(3)).right_aligned()).style(t.dim));
+        let at = app.scroll + i == app.cursor;
+        let pid = Cell::from(Line::from(take(3)).right_aligned());
+        cells.push(if at { pid } else { pid.style(t.dim) });
         cells.push(Cell::from(Line::from(bar(t, &r.hist[HIST - usize::from(hw)..]))));
         cells.extend(cols.iter().map(|&c| Cell::from(Line::from(take(5 + c)).right_aligned())));
-        cells.push(Cell::from(take(4)));
+        cells.extend(int.then(|| Cell::from(take(4))));
         let stale = matches!(r.key, Key::Cg(..) | Key::Proc(..)) && app.stale(r.node);
-        let at = if app.scroll + i == app.cursor { 2 } else { usize::from(stale) };
+        let at = if at { 2 } else { usize::from(stale) };
         let look = [Style::new(), t.warn, t.selected][at];
         TRow::new(cells).style(look)
     });
@@ -1044,6 +1060,19 @@ mod tests {
             host(&mut app, u32::try_from(i).unwrap(), n, 3 - i as u64);
         }
         golden("draw-slurm-mono.txt", &text(&frame(&mut app, 80, 16)));
+    }
+
+    #[test]
+    fn names_end_in_an_ellipsis_and_small_terminals_say_so() {
+        let (mut app, _rx) = app(true, "mono");
+        host(&mut app, 0, "vm", 1);
+        let cmd = "python3 train.py --epochs 90 --data /scratch/imagenet";
+        feed(&mut app, 0, &[format!("P 30 1 4 1 python3 {}", cmd.replace(' ', "~"))]);
+        app.st.derive();
+        let narrow = text(&frame(&mut app, 80, 14));
+        assert!(narrow.contains("└ python3 train.py --epochs 90 --da…      30"), "{narrow}");
+        assert!(text(&frame(&mut app, 220, 14)).contains(cmd));
+        assert!(text(&frame(&mut app, 79, 14)).contains("unjam needs at least 80x8 (now 79x14)"));
     }
 
     #[test]
