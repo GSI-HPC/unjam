@@ -99,10 +99,11 @@ struct Mon {
     /// Cached `/proc/self/stat` and (local mode) `/proc/meminfo`, and the page size and clock
     /// ticks to read them with.
     stat: (Files, [Slot; 2], Env),
-    /// Time and own CPU µs at the last tick; own CPU % and RSS bytes.
-    at: [u64; 2],
+    /// Time and own CPU µs at the last tick, and the start of the rate window; own CPU % and
+    /// RSS bytes.
+    at: [u64; 3],
     tui: [f64; 2],
-    /// Bytes in, lines in and control bytes out since the last tick, and their rates.
+    /// Bytes in, lines in and control bytes out in the rate window, and their rates.
     count: [u64; 3],
     rate: [f64; 3],
     /// Host memory used and total, and the CPU count, for the local header bars.
@@ -148,7 +149,7 @@ impl App {
         let env = procfs::env("/proc".into(), PathBuf::new());
         let ncpu = thread::available_parallelism().map_or(1, usize::from) as f64;
         let stat = (Files::new(2), [Slot::Empty, Slot::Empty], env);
-        let (at, tui, count, rate) = ([now_ms(), 0], [f64::NAN; 2], [0; 3], [0.0; 3]);
+        let (at, tui, count, rate) = ([now_ms(), 0, now_ms()], [f64::NAN; 2], [0; 3], [0.0; 3]);
         let mon = Mon { stat, at, tui, count, rate, host: [f64::NAN, f64::NAN, ncpu] };
         let layout = if opts.local { Layout::Node } else { Layout::Step };
         let (toggled, filter, local) = (HashSet::new(), String::new(), opts.local);
@@ -250,7 +251,8 @@ impl App {
         }
     }
 
-    /// The 1 Hz tick: self-monitoring sample, per-node line rates and the PIDS fallback.
+    /// The 1 Hz tick: self-monitoring sample, the PIDS fallback, and the line rates over a
+    /// window of one interval, at least 1 s (agents send in bursts once per interval).
     #[allow(clippy::cast_precision_loss, reason = "display values")]
     fn tick(&mut self) {
         let (now, m) = (now_ms(), &mut self.mon);
@@ -261,11 +263,16 @@ impl App {
             m.at[1] = us;
         }
         m.at[0] = now;
-        for (r, c) in m.rate.iter_mut().zip(&mut m.count) {
-            (*r, *c) = (*c as f64 / dt, 0);
-        }
-        for n in &mut self.st.nodes {
-            (n.agent[3], n.lines) = (n.lines as f64 / dt, 0);
+        let span = now.saturating_sub(m.at[2]);
+        if span >= u64::from(self.opts.interval_ms.max(1000)) {
+            let dt = span as f64 / 1000.0;
+            for (r, c) in m.rate.iter_mut().zip(&mut m.count) {
+                (*r, *c) = (*c as f64 / dt, 0);
+            }
+            for n in &mut self.st.nodes {
+                (n.agent[3], n.lines) = (n.lines as f64 / dt, 0);
+            }
+            m.at[2] = now;
         }
         if self.opts.local {
             let info = files.read(mem, false, &env.proc_root, "meminfo").unwrap_or_default();
@@ -620,6 +627,7 @@ pub fn fmt(unit: &str, v: f64) -> String {
         "%" if v < 1000.0 => return format!("{v:.1}%"),
         "%" if v < 1e5 => return format!("{v:.0}%"),
         "%" => return format!("{}%", fmt("1", v)),
+        "B/s" if v > 0.0 && v < 1024.0 => return format!("{v:.0}B/s"),
         "B" | "B/s" => (1024.0, "KMGTP"),
         "1" => (1000.0, "kMGTP"),
         _ => return format!("{v:.0} {unit}"),
@@ -1410,7 +1418,7 @@ mod tests {
         let pct = [6869.7, 99_999.0, 6_553_600.0].map(|v| fmt("%", v));
         assert_eq!(pct, ["6870%", "99999%", "6.6M%"], "a 64-core node and a 1024-node job fit");
         assert_eq!(fmt("B", 3.0 * 1024.0 * 1024.0), "3.0M");
-        assert_eq!(fmt("B/s", 512.0), "512");
+        assert_eq!((fmt("B/s", 512.0), fmt("B/s", 0.0)), ("512B/s".into(), "0".into()));
         assert_eq!(fmt("B/s", 20_480.0), "20K/s");
         assert_eq!(fmt("1", 1500.0), "1.5k");
         assert_eq!(fmt("ms", 7.0), "7 ms");
