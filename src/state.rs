@@ -390,11 +390,13 @@ struct Walk<'a, 'v> {
     v: &'v View,
     out: Vec<Row<'a>>,
     limit: usize,
+    /// Inside the subtree of a filter match: shown in full, with its folds.
+    free: bool,
 }
 
 /// Builds the first `limit` rows of the view.
 pub fn rows<'a>(st: &'a State, v: &View, limit: usize) -> Vec<Row<'a>> {
-    let mut w = Walk { st, v, out: Vec::new(), limit };
+    let mut w = Walk { st, v, out: Vec::new(), limit, free: false };
     let mut top = Vec::new();
     for (i, n) in (0..).zip(&st.nodes) {
         match n.cgs.get(&n.root) {
@@ -413,9 +415,11 @@ pub fn rows<'a>(st: &'a State, v: &View, limit: usize) -> Vec<Row<'a>> {
 
 impl<'a> Walk<'a, '_> {
     /// Sorts one sibling set, folds a step's surplus nodes into one range row, and emits each
-    /// row with its open subtree. Returns whether anything survived the filter.
+    /// row with its open subtree. Returns whether anything survived the filter: a match keeps
+    /// its ancestors (opened) and its whole subtree (as folded).
     fn siblings(&mut self, mut sibs: Vec<Row<'a>>, depth: u16, parent: Option<Key>) -> bool {
-        let (room, filter) = (self.limit.saturating_sub(self.out.len()), !self.v.filter.is_empty());
+        let room = self.limit.saturating_sub(self.out.len());
+        let filter = !self.v.filter.is_empty() && !self.free;
         let step = matches!(parent, Some(Key::Step(_)));
         if sibs.len() > room && room > 0 && !filter && !step {
             sibs.select_nth_unstable_by(room - 1, |a, b| self.cmp(a, b));
@@ -437,17 +441,38 @@ impl<'a> Walk<'a, '_> {
             }
             let kids =
                 if let Key::Folded(_) = r.key { std::mem::take(&mut rest) } else { self.kids(&r) };
-            let open = filter || self.v.is_open(r.key);
+            let hit = !filter || self.hit(&r);
+            let open = (filter && !hit) || self.v.is_open(r.key);
             (r.depth, r.last, r.open) = (depth, i + 1 == n, (!kids.is_empty()).then_some(open));
-            let (mark, key, hit) = (self.out.len(), r.key, r.name.contains(&*self.v.filter));
+            let (mark, key) = (self.out.len(), r.key);
             self.out.push(r);
-            if hit | (open && !kids.is_empty() && self.siblings(kids, depth + 1, Some(key))) {
+            let free = self.free;
+            self.free |= hit;
+            let deep = open && !kids.is_empty() && self.siblings(kids, depth + 1, Some(key));
+            self.free = free;
+            if hit || deep {
                 any = true;
             } else {
                 self.out.truncate(mark);
             }
         }
         any
+    }
+
+    /// Filter match: an ASCII case-insensitive substring of the name, a process's comm or a
+    /// cgroup's path; a leading `/` is ignored, so a path matches as typed.
+    fn hit(&self, r: &Row) -> bool {
+        let q = self.v.filter.trim_start_matches('/').as_bytes();
+        let has = |h: &str| {
+            q.is_empty() || h.as_bytes().windows(q.len()).any(|w| w.eq_ignore_ascii_case(q))
+        };
+        let n = self.st.nodes.get(r.node as usize);
+        has(&r.name)
+            || match r.key {
+                Key::Cg(_, id) => n.and_then(|n| n.cgs.get(&id)).is_some_and(|c| has(&c.path)),
+                Key::Proc(_, p) => n.and_then(|n| n.procs.get(&p)).is_some_and(|p| has(&p.comm)),
+                _ => false,
+            }
     }
 
     /// Sibling order: the sort column with NA last in both directions, ties and NAME in
@@ -861,7 +886,14 @@ mod tests {
         v.toggled.clear();
         (v.desc, v.filter) = (false, "task_".into());
         let names: Vec<_> = rows(&st, &v, usize::MAX).iter().map(|r| r.name.to_string()).collect();
-        assert_eq!(names[..6], ["job 42", "step_0", "n10", "task_10", "task_0", "task_9"]);
+        assert_eq!(names[..6], ["job 42", "step_0", "n10", "task_10", "task_0", "kworker"]);
+        v.filter = "TASK_0".into();
+        let hit = dump(&rows(&st, &v, usize::MAX));
+        assert!(hit.contains("task_0 120\n          kworker 20\n          ./a.out"), "{hit}");
+        v.filter = "/user/".into();
+        assert!(dump(&rows(&st, &v, usize::MAX)).contains("task_0 120"));
+        v.filter = "nomatch".into();
+        assert!(rows(&st, &v, usize::MAX).is_empty());
     }
 
     #[test]

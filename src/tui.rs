@@ -739,8 +739,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let (at, rows) = follow(&app.st, &app.view, app.sel, limit);
     app.cursor = at.unwrap_or(app.cursor).min(rows.len().saturating_sub(1));
     app.sel = rows.get(app.cursor).map(|r| r.key);
-    app.scroll = app.scroll.min(app.cursor).max((app.cursor + 1).saturating_sub(height));
+    let (top, last) = ((app.cursor + 1).saturating_sub(height), rows.len().saturating_sub(height));
+    app.scroll = app.scroll.min(app.cursor).max(top).min(last);
     table(f, app, t, &rows[app.scroll.min(rows.len())..rows.len().min(app.scroll + height)], body);
+    if rows.is_empty() && !app.view.filter.is_empty() && body.height > 1 {
+        let at = Rect { y: body.y + 1, height: 1, ..body };
+        f.render_widget(Paragraph::new(" no match (Esc clears the filter)").style(t.dim), at);
+    }
     let fresh = app.log.front().filter(|_| now_ms().saturating_sub(app.logged) < 10_000);
     let keys = if app.replay.is_some() { REPLAY } else { HINTS };
     let text = match (app.overlay, &*app.view.filter, fresh) {
@@ -1052,6 +1057,11 @@ mod tests {
         frame(&mut app, 100, 8);
         assert!(n > 4);
         assert_eq!((app.cursor, app.sel), last);
+        (app.sel, app.cursor, app.scroll) = (None, 99, 99);
+        frame(&mut app, 100, 8);
+        assert_eq!((app.cursor, app.scroll), (n - 1, n - 3), "the last page stays full");
+        app.view.filter = "nothing like it".into();
+        assert!(text(&frame(&mut app, 100, 8)).contains("no match (Esc clears the filter)"));
     }
 
     /// Per theme: the styles of the header, the table head, the cursor row, a process name and
@@ -1290,6 +1300,9 @@ mod tests {
         assert_eq!((app.overlay, app.view.filter.as_str()), (3, "ssh"));
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!((app.overlay, app.view.filter.as_str()), (0, "ssh"));
+        app.on_key(key('/'));
+        assert_eq!((app.overlay, app.view.filter.as_str()), (3, "ssh"), "/ edits the filter");
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         for _ in 0..4 {
             app.on_key(key('s'));
         }
