@@ -20,7 +20,7 @@ use ratatui::crossterm::event::{KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout as Split, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row as TRow, Table};
+use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row as TRow, Table, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::agent::{OFF_WALK_MS, now_ms};
@@ -52,10 +52,30 @@ const COLS: [(&str, &str, u16); NCOL] = [
 ];
 /// Sort columns cycled by `s`: NAME, the value columns, then NODE (not in local mode).
 const SORTS: [&str; NCOL + 2] = ["NAME", "CPU%", "MEM", "IO-R/s", "IO-W/s", "PIDS", "NODE"];
-/// Key hints for the footer and the help pane.
-const HINTS: &str = "↑↓ move ←→ fold ␣ mark p what +/- rate v layout s sort / filter r record t theme ? help q quit";
-/// Replay key hints.
-const REPLAY: &str = "␣ play , . tick < > 60s g G start/end";
+/// Footer key hints, help and quit first: an 80-column terminal cuts the end.
+const HINTS: &str = "? help q quit ↑↓ move ←→ fold ␣ mark p level +/- rate v layout s sort / filter r record t theme";
+/// Replay footer key hints.
+const REPLAY: &str = "? help q quit ␣ play , . tick < > 60s g G start/end v layout / filter";
+// budget: data
+/// Help pane keys and legend, live; each line fits the 62 columns of the pane at 80x24.
+const HELP: [&str; 9] = [
+    "↑↓ j k  PgUp PgDn  g G  move         Enter  detail",
+    "← → h l  fold (← on a leaf: parent)  ␣  mark    a  clear",
+    "p  level: p procs, c cgroups, o off  0  reset the rules",
+    "+ -  halve / double the interval",
+    "v  layout: step, node, flat          s S  sort, reverse",
+    "/  filter by name or path (Enter keeps, Esc clears)",
+    "r  record to DIR/<host>.arrows       t  theme    q  quit",
+    "INT W: interval and level of the row (p, c or o)",
+    "PIDS ~N: summed threads (no pids controller)    -: no value",
+];
+/// Help pane keys in replay.
+const HELP_REPLAY: [&str; 3] = [
+    "␣  play/pause    , .  one tick    < >  60 s    g G  start/end",
+    "↑↓ j k PgUp PgDn  move    ← →  fold    Enter  detail",
+    "/  filter    v  layout    s S  sort    t  theme    q  quit",
+];
+// budget: end
 /// Set by Ctrl-C in the input thread, by `q`, SIGTERM and SIGHUP: quits even while a draw
 /// blocks (D38).
 static QUIT: LazyLock<Arc<AtomicBool>> = LazyLock::new(Arc::default);
@@ -103,6 +123,8 @@ pub struct App {
     /// 0: table only, 1: detail popup, 2: help and log, 3: editing the filter.
     overlay: u8,
     pub log: VecDeque<String>,
+    /// When the newest log line came: the footer shows it first for 10 s.
+    logged: u64,
     /// Nodes the job has (from `start`) and whether srun ended (job over, every agent gone).
     expect: u32,
     ended: bool,
@@ -146,6 +168,7 @@ impl App {
             marks,
             overlay,
             log,
+            logged: 0,
             expect: 1,
             ended: false,
             budget: None,
@@ -183,7 +206,7 @@ impl App {
 
     /// Keeps the last 200 log lines (stderr, warnings, junk) for the help pane and footer.
     fn log(&mut self, s: String) {
-        self.log.push_front(s);
+        (self.logged, ()) = (now_ms(), self.log.push_front(s));
         self.log.truncate(200);
     }
 
@@ -368,18 +391,19 @@ impl App {
         }
     }
 
-    /// Commands: quit, overlays, rules (`p`, `+`, `-`, `0`), layout, sort, filter, theme.
+    /// Commands: quit, overlays, rules (`p`, `+`, `-`, `0`; live only), layout, sort, filter
+    /// (`/` edits the current text), theme.
     fn act(&mut self, code: KeyCode, row: Option<Target>) {
         let (sort, local) = (self.view.sort, self.opts.local);
         match code {
             KeyCode::Char('q') => QUIT.store(true, Relaxed),
             KeyCode::Enter => self.overlay = 1,
             KeyCode::Char('?') => self.overlay = 2,
-            KeyCode::Char('/') => (self.overlay, self.view.filter) = (3, String::new()),
+            KeyCode::Char('/') => self.overlay = 3,
             KeyCode::Esc => self.view.filter.clear(),
             KeyCode::Char('a') => self.marks.clear(),
-            KeyCode::Char(c @ ('p' | '+' | '-')) => self.retarget(row, c),
-            KeyCode::Char('0') => {
+            KeyCode::Char(c @ ('p' | '+' | '-')) if self.replay.is_none() => self.retarget(row, c),
+            KeyCode::Char('0') if self.replay.is_none() => {
                 self.send(&Control::Clear(TaskSet::All));
                 (self.opts.rules, self.marks) = (vec![], vec![]);
                 self.start(self.expect);
@@ -536,6 +560,11 @@ fn input(keys: &Sender<Msg>, wake: &SyncSender<Msg>) {
         let msg = match ev {
             Term::Key(k) if k == KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL) => break,
             Term::Key(k) if k.code == KeyCode::Char('q') && !EDIT.load(Relaxed) => break,
+            // A pasted "/query" arrives in one burst: its `q` must not quit before the main
+            // loop has seen the `/`.
+            Term::Key(k) if k.code == KeyCode::Char('/') => {
+                (EDIT.store(true, Relaxed), Msg::Key(k)).1
+            }
             Term::Key(k) => Msg::Key(k),
             Term::Resize(..) => Msg::Resize,
             _ => continue,
@@ -636,15 +665,15 @@ fn title(app: &App) -> [String; 2] {
     let l0 = format!(" {src}{mode}  {procs} procs  {iv}  {layout}  sort {sort} {arrow}  {clock}");
     let (cpu, rss) = (fmt("%", m.tui[0]), fmt("B", m.tui[1]));
     let [inb, msg, out] = [("B/s", 0), ("1", 1), ("B/s", 2)].map(|(u, i)| fmt(u, m.rate[i]));
-    let mut l1 = format!(" tui {cpu} {rss} · in {inb} {msg} msg/s · out {out}");
+    let (drop, err) =
+        nodes.iter().fold((0, 0), |(d, e), n| (d + u64::from(n.dropped), e + n.errors));
+    let mut l1 =
+        format!(" tui {cpu} {rss} · in {inb} {msg} msg/s · out {out} · drop {drop} err {err}");
     let top = nodes.iter().max_by(|a, b| a.agent[0].total_cmp(&b.agent[0])).filter(|_| !local);
     if let Some(n) = top {
         let (c, r) = (fmt("%", n.agent[0]), fmt("B", n.agent[1]));
         let _ = write!(l1, " · agents max {c} {r} ({})", n.host);
     }
-    let (drop, err) =
-        nodes.iter().fold((0, 0), |(d, e), n| (d + u64::from(n.dropped), e + n.errors));
-    let _ = write!(l1, " · drop {drop} err {err}");
     [l0, l1]
 }
 
@@ -712,22 +741,27 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     app.sel = rows.get(app.cursor).map(|r| r.key);
     app.scroll = app.scroll.min(app.cursor).max((app.cursor + 1).saturating_sub(height));
     table(f, app, t, &rows[app.scroll.min(rows.len())..rows.len().min(app.scroll + height)], body);
-    let hint = app.log.front().map_or(String::new(), |l| format!(" │ {l}"));
-    let filter = app.overlay == 3 || !app.view.filter.is_empty();
+    let fresh = app.log.front().filter(|_| now_ms().saturating_sub(app.logged) < 10_000);
     let keys = if app.replay.is_some() { REPLAY } else { HINTS };
-    let text = if filter { format!(" /{}▏", app.view.filter) } else { format!(" {keys}{hint}") };
+    let text = match (app.overlay, &*app.view.filter, fresh) {
+        (3, f, _) => format!(" /{f}▏"),
+        (_, "", Some(l)) => format!(" {l} │ {keys}"),
+        (_, "", None) => format!(" {keys}"),
+        (_, f, _) => format!(" filter {f} (/ edits, Esc clears) │ {keys}"),
+    };
     f.render_widget(Paragraph::new(text).style(t.dim.bg(t.header.bg.unwrap_or_default())), foot);
     let (w, h) = (area.width, area.height);
     let pop = Rect { x: w / 10, y: h / 10, width: w * 4 / 5, height: h * 4 / 5 };
     let lines = match app.overlay {
-        1 => rows.get(app.cursor).map(|r| detail(app, r)),
-        2 => Some(help(app)),
+        1 => rows.get(app.cursor).map(|r| (detail(app, r), " detail · any key closes ".into())),
+        2 => Some((help(app), format!(" help · theme {} · any key closes ", t.name))),
         _ => None,
     };
-    if let Some(lines) = lines {
+    if let Some((lines, title)) = lines {
         f.render_widget(Clear, pop);
-        let block = Block::bordered().style(t.base).border_style(t.tree);
-        f.render_widget(Paragraph::new(lines.join("\n")).block(block), pop);
+        let block = Block::bordered().title(title).style(t.base).border_style(t.tree);
+        let text = Paragraph::new(lines.join("\n")).wrap(Wrap { trim: false });
+        f.render_widget(text.block(block), pop);
     }
 }
 
@@ -824,22 +858,28 @@ fn detail(app: &App, r: &Row) -> Vec<String> {
     out
 }
 
-/// Help pane: bindings, the per-node self-monitoring table and the log tail.
+/// Help pane: the keys of the mode and a legend, the per-node self-monitoring table (62
+/// columns, the pane's width at 80x24) and the log tail.
 fn help(app: &App) -> Vec<String> {
-    let keys = " Enter detail  a clear marks  0 reset rules  S reverse sort  Esc close";
-    let mut out = vec![format!(" {HINTS}"), keys.into(), String::new()];
-    out.push(format!(" {:<16}     CPU     RSS     OUT/s   MSG/s  DROP   ERR SKEW ms", "NODE"));
+    let keys = if app.replay.is_some() { &HELP_REPLAY[..] } else { &HELP[..] };
+    let mut out: Vec<String> = keys.iter().map(|l| format!(" {l}")).collect();
+    let row = |v: [&str; 8]| {
+        format!(
+            " {:<12} {:>6} {:>6} {:>8} {:>6} {:>4} {:>4} {:>6}",
+            v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]
+        )
+    };
+    out.extend([
+        String::new(),
+        row(["NODE", "CPU", "RSS", "OUT/s", "MSG/s", "DROP", "ERR", "SKEWms"]),
+    ]);
     for (i, n) in (0..).zip(&app.st.nodes) {
-        let [c, r, o, m] =
+        let [cpu, rss, out_s, msg] =
             [("%", 0), ("B", 1), ("B/s", 2), ("1", 3)].map(|(u, i)| fmt(u, n.agent[i]));
-        let skew = i128::from(n.prev[0]) - i128::from(n.seen);
-        out.push(format!(
-            " {:<16} {c:>7} {r:>7} {o:>9} {m:>7} {:>5} {:>5} {skew:>7}{}",
-            n.host,
-            n.dropped,
-            n.errors,
-            if app.stale(i) { " stale" } else { "" }
-        ));
+        let (drop, err) = (n.dropped.to_string(), n.errors.to_string());
+        let skew = (i128::from(n.prev[0]) - i128::from(n.seen)).to_string();
+        let stale = if app.stale(i) { " stale" } else { "" };
+        out.push(row([&n.host, &cpu, &rss, &out_s, &msg, &drop, &err, &skew]) + stale);
     }
     out.push(String::new());
     out.extend(app.log.iter().take(20).map(|l| format!(" {l}")));

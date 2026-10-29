@@ -1,5 +1,5 @@
  unjam 42  3/3 nodes (0 stale)  6 procs  1s  step  sort CPU% ▼  12:00:00Z
- tui - - · in 0 0 msg/s · out 0 · agents max 0.0% - (n3) · drop 0 err 0
+ tui - - · in 0 0 msg/s · out 0 · drop 0 err 0 · agents max 0.0% - (n3)
  NODES ███
 NAME                               PID     CPU      CPU%   MEM    PIDS     INT W
 ▾ job 42                                   ▅▅▅▆▆▇▇█ 408.0%   9.0G    ~12    1s p
@@ -13,4 +13,4 @@ NAME                               PID     CPU      CPU%   MEM    PIDS     INT W
     ▾ n3                                   ▃▃▃▃▃▄▄▄  51.0%   1.0G     12    1s p
       ▾ sshd.service                       ▃▃▃▃▃▄▄▄  51.0%    32M      2    1s p
         └ sshd: /usr/sbin/sshd -D       10 ▂▂▃▃▃▃▃▃  42.5%   8.0M      3
- ↑↓ move ←→ fold ␣ mark p what +/- rate v layout s sort / filter r record t them
+ ? help q quit ↑↓ move ←→ fold ␣ mark p level +/- rate v layout s sort / filter

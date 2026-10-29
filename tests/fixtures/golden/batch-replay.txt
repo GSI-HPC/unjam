@@ -1,5 +1,5 @@
  unjam --replay  2/2 nodes (0 stale)  4 procs  1s  node  sort CPU% ▼  00:16:46Z
- tui - - · in 0 0 msg/s · out 0 · agents max - - (n2) · drop 0 err 0
+ tui - - · in 0 0 msg/s · out 0 · drop 0 err 0 · agents max - - (n2)
 NAME                                            NODE     PID   CPU%    MEM   INT W
 ▾ n1                                              n1           0.1%   4.0K
   ▾ c                                             n1           0.4%    16K
@@ -16,7 +16,7 @@ NAME                                            NODE     PID   CPU%    MEM   INT
 nodes=2 stale=0 errors=0 dropped=0 missing=0
 
  unjam --replay  2/2 nodes (0 stale)  4 procs  1s  node  sort CPU% ▼  00:16:47Z
- tui - - · in 0 0 msg/s · out 0 · agents max - - (n2) · drop 0 err 0
+ tui - - · in 0 0 msg/s · out 0 · drop 0 err 0 · agents max - - (n2)
 NAME                                            NODE     PID   CPU%    MEM   INT W
 ▾ n1                                              n1           0.1%   4.0K
   ▾ c                                             n1           0.4%    16K
@@ -33,7 +33,7 @@ NAME                                            NODE     PID   CPU%    MEM   INT
 nodes=2 stale=0 errors=0 dropped=0 missing=0
 
  unjam --replay  2/2 nodes (0 stale)  4 procs  1s  node  sort CPU% ▼  00:16:48Z
- tui - - · in 0 0 msg/s · out 0 · agents max - - (n2) · drop 0 err 0
+ tui - - · in 0 0 msg/s · out 0 · drop 0 err 0 · agents max - - (n2)
 NAME                                            NODE     PID   CPU%    MEM   INT W
 ▾ n1                                              n1           0.1%   4.0K
   ▾ c                                             n1           0.4%    16K
