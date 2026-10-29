@@ -427,7 +427,10 @@ impl App {
                 (self.view.sort, self.view.desc) = (s, s != 0 && s <= NCOL);
             }
             KeyCode::Char('S') => self.view.desc = !self.view.desc,
-            KeyCode::Char('t') => self.opts.theme = (self.opts.theme + 1) % THEMES.len(),
+            // NO_COLOR strips every colour: only mono, the forced theme, stays readable.
+            KeyCode::Char('t') if std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty()) => {
+                self.opts.theme = (self.opts.theme + 1) % THEMES.len();
+            }
             KeyCode::Char('r') if self.replay.is_none() => self.record(),
             _ => {}
         }
@@ -725,12 +728,14 @@ fn band(pm: f64) -> usize {
     [50.0, 500.0, 900.0].iter().filter(|&&b| pm >= b).count()
 }
 
-/// A history bar: one glyph per sample, height relative to the row's peak (at least one core).
-fn bar(t: &Theme, hist: &[u16]) -> Vec<Span<'static>> {
+/// A history bar: one glyph per sample, height relative to the row's peak (at least one core),
+/// colour banded against `top` per mille (one core locally, the busiest node's load in a job).
+fn bar(t: &Theme, hist: &[u16], top: f64) -> Vec<Span<'static>> {
     let scale = u32::from(hist.iter().copied().max().unwrap_or(0).max(1000));
     let span = |h: u16| {
         let lvl = if h == 0 { 0 } else { 1 + (u32::from(h) * 7 / scale).min(7) as usize };
-        let style = if h == 0 { t.dim } else { Style::new().fg(t.heat[band(f64::from(h))]) };
+        let heat = Style::new().fg(t.heat[band(f64::from(h) * 1000.0 / top)]);
+        let style = if h == 0 { t.dim } else { heat };
         Span::styled(t.glyphs.bars[lvl], style)
     };
     hist.iter().map(|&h| span(h)).collect()
@@ -797,14 +802,18 @@ fn strip_line(app: &App, t: &Theme, width: u16) -> Vec<Span<'static>> {
     let glyph = |i: usize, style: Style| Span::styled(t.glyphs.bars[i], style);
     let heat = |pm: f64| Style::new().fg(t.heat[band(pm)]);
     if !app.opts.local {
-        let per = nodes.len().div_ceil(usize::from(width.saturating_sub(7)).max(1)).max(1);
+        let per = nodes.len().div_ceil(usize::from(width.saturating_sub(25)).max(1)).max(1);
         let live = (0..).zip(nodes).map(|(i, n)| n.root_vals().filter(|_| !app.stale(i)));
         let live: Vec<_> = live.map(|v| v.and_then(|v| v.get(0, Kind::Counter))).collect();
         let max = |c: &[Option<f64>]| c.iter().flatten().copied().max_by(f64::total_cmp);
         let top = max(&live).map_or(1e6, |us| us.max(1e6)) / 1e3;
-        let cells =
-            live.chunks(per).map(|c| max(c).map_or(glyph(0, t.dim), |us| glyph(8, heat(us / top))));
-        return [Span::styled(" NODES ", t.dim)].into_iter().chain(cells).collect();
+        let cell = |us: f64| glyph(2 + 2 * band(us / top), heat(us / top));
+        let cells = live.chunks(per).map(|c| max(c).map_or(glyph(0, t.dim), cell));
+        let key = Span::styled(
+            format!("  {per} node{} per cell", ["", "s"][usize::from(per > 1)]),
+            t.dim,
+        );
+        return [Span::styled(" NODES ", t.dim)].into_iter().chain(cells).chain([key]).collect();
     }
     let v = nodes.first().and_then(state::Node::root_vals);
     let cpu = v.and_then(|v| v.get(0, Kind::Counter)).map_or(f64::NAN, |us| us / 1e4 / ncpu);
@@ -812,7 +821,7 @@ fn strip_line(app: &App, t: &Theme, width: u16) -> Vec<Span<'static>> {
     let used = v.and_then(|v| v.get(1, Kind::Gauge)).unwrap_or(used);
     let full = if total > 0.0 { (used / total * 16.0).clamp(0.0, 16.0) as usize } else { 0 };
     let mut spans = vec![Span::styled(" CPU ", t.dim)];
-    spans.extend(bar(t, &hist));
+    spans.extend(bar(t, &hist, 1000.0));
     let gauge = |i: usize, style, n| Span::styled(t.glyphs.bars[i].repeat(n), style);
     let mem = [gauge(8, heat(0.0), full), gauge(0, t.dim, 16 - full)];
     let cpu = format!(" {} of {ncpu} CPUs  ", fmt("%", cpu));
@@ -839,6 +848,12 @@ fn table(f: &mut Frame, app: &App, t: &Theme, vis: &[Row], area: Rect) {
     let fixed: u16 = head.iter().map(|h| h.1 + 1).sum();
     let name = (area.width + 1).saturating_sub(fixed).min(72);
     let widths = head.iter().map(|h| Constraint::Length(if h.1 == 0 { name } else { h.1 }));
+    // Bars band against one core locally; in a job against the busiest node (per mille), and
+    // sums over nodes against all nodes at that load.
+    let busiest = app.st.nodes.iter().filter_map(|n| n.root_vals()?.get(0, Kind::Counter));
+    let top = if app.opts.local { 1000.0 } else { busiest.fold(1e6, f64::max) / 1e3 };
+    #[allow(clippy::cast_precision_loss, reason = "a node count")]
+    let nodes = app.st.nodes.len().max(1) as f64;
     let rows = vis.iter().zip(&mut tx).enumerate().map(|(i, (r, tx))| {
         let room = usize::from(name).saturating_sub(tx[0].chars().count());
         if tx[1].chars().count() > room {
@@ -856,7 +871,8 @@ fn table(f: &mut Frame, app: &App, t: &Theme, vis: &[Row], area: Rect) {
         let at = app.scroll + i == app.cursor;
         let pid = Cell::from(Line::from(take(3)).right_aligned());
         cells.push(if at { pid } else { pid.style(t.dim) });
-        cells.push(Cell::from(Line::from(bar(t, &r.hist[HIST - usize::from(hw)..]))));
+        let top = if matches!(r.key, Key::Cg(..) | Key::Proc(..)) { top } else { top * nodes };
+        cells.push(Cell::from(Line::from(bar(t, &r.hist[HIST - usize::from(hw)..], top))));
         cells.extend(cols.iter().map(|&c| Cell::from(Line::from(take(5 + c)).right_aligned())));
         cells.extend(int.then(|| Cell::from(take(4))));
         let stale = matches!(r.key, Key::Cg(..) | Key::Proc(..)) && app.stale(r.node);
@@ -1396,10 +1412,11 @@ mod tests {
         app.st.nodes.push(state::Node::default());
         let t = &THEMES[app.opts.theme];
         let strip = |w| strip_line(&app, t, w).iter().map(|s| s.content.to_string()).collect();
-        let wide: String = strip(20);
-        assert_eq!(wide, " NODES ██████·");
-        let narrow: String = strip(10);
-        assert_eq!(narrow, " NODES ██·", "cells of three nodes; the last holds the silent one");
+        let wide: String = strip(40);
+        assert_eq!(wide, " NODES ▆▆▆▆▆▆·  1 node per cell", "height shows the band, too");
+        let narrow: String = strip(28);
+        let why = "cells of three nodes; the last holds the silent one";
+        assert_eq!(narrow, " NODES ▆▆·  3 nodes per cell", "{why}");
     }
 
     #[test]
@@ -1408,8 +1425,10 @@ mod tests {
         host(&mut app, 0, "small", 2);
         host(&mut app, 1, "big", 50);
         let t = &THEMES[app.opts.theme];
-        let fg: Vec<_> = strip_line(&app, t, 20)[1..].iter().map(|s| s.style.fg).collect();
+        let fg: Vec<_> = strip_line(&app, t, 40)[1..3].iter().map(|s| s.style.fg).collect();
         assert_eq!(fg, [Some(t.heat[0]), Some(t.heat[3])], "1.4 of 34 cores is idle beside 34");
+        let fg = |top| bar(t, &[8000], top)[0].style.fg;
+        assert_eq!([fg(1000.0), fg(64_000.0)], [Some(t.heat[3]), Some(t.heat[1])], "8 cores");
     }
 
     #[test]

@@ -113,12 +113,12 @@ pub const THEMES: &[Theme] = &[
         [0x859900, 0xB58900, 0xCB4B16, 0xDC322F],
         UNI,
     ),
-    // Amber phosphor: one hue, ASCII bars like a 1980s terminal.
+    // Amber phosphor: one hue, an ASCII ramp like a 1980s terminal.
     palette(
         "amber",
         [0x140C00, 0x2A1C00, 0x3A2700, 0xFFB000, 0x8A5F00, 0xFFC233, 0xFFE08A],
         [0x8A5F00, 0xC48800, 0xFFB000, 0xFFE08A],
-        Glyphs { bars: [".", "#", "#", "#", "#", "#", "#", "#", "#"], ..UNI },
+        Glyphs { bars: [".", "_", "-", "=", "+", "*", "#", "%", "@"], ..UNI },
     ),
     Theme {
         name: "mono",

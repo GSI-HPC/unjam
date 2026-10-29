@@ -1,6 +1,6 @@
  unjam 42  3/3 nodes (0 stale)  6 procs  1s  step  sort CPU% ▼  12:00:00Z
  tui - - · in 0 0 msg/s · out 0 · drop 0 err 0 · agents max 0.0% - (n3)
- NODES ███
+ NODES █▆▄  1 node per cell
 NAME                                       PID     CPU      CPU%   MEM    PIDS
 ▾ job 42                                           ▅▅▅▆▆▇▇█ 408.0%   9.0G    ~12
   ▾ system.slice                                   ▅▅▅▆▆▇▇█ 306.0%   3.0G     36
