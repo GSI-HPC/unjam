@@ -60,17 +60,18 @@ This is the living design of the repository. It started as the reviewed round-on
 | Replay | `unjam --replay FILE.arrows… [--batch N] [--at TIME]` | 1 | main, input |
 | (internal) | `unjam agent [--root PATH] [--keepalive 120] [--unlink-self]` (hidden) | | |
 
-- **CLI shape (D43).** One viewer command with a data-source flag; `record` and the hidden `agent` stay subcommands. `--slurm` and `--replay` form one mutually exclusive clap group. `--slurm` uses `num_args(0..=1)` with `require_equals(true)`: `--slurm=123` is valid, `--slurm 123` is an error. The Slurm-only flags (`--nodelist`, `--budget`, `--agent`, `--agent-keepalive`, `--srun-arg`, `--bcast`, `--record DIR`, `--print-srun`) use clap `requires = "slurm"`.
+- **CLI shape (D43).** One viewer command with a data-source flag; `record` and the hidden `agent` stay subcommands. `--slurm` and `--replay` form one mutually exclusive clap group. `--slurm` uses `num_args(0..=1)` with `require_equals(true)`: `--slurm=123` is valid, `--slurm 123` is an error, which clap reports as a subcommand conflict; `main` adds a hint that `--slurm` and `--bcast` take a value only with `=`, and the help text says so. The Slurm-only flags (`--nodelist`, `--budget`, `--agent`, `--agent-keepalive`, `--srun-arg`, `--bcast`, `--record DIR`, `--print-srun`) use clap `requires = "slurm"` and have their own help heading, "Slurm attach (with --slurm)".
+- **Terminal check.** Without `--batch` (or `--print-srun`), a stdout that is not a terminal (`ssh node unjam` without `-t`, cron, `> file`) fails at once with "stdout is not a terminal; use --batch N (or ssh -t)", before srun starts.
 - **Job resolution** when `--slurm` has no value: 1. `$SLURM_JOB_ID`; 2. the only running job from `squeue --me`; 3. otherwise print the running jobs and exit 2. A future job picker replaces step 3 without a CLI change.
 - **Input thread (D38).** In every viewer mode a dedicated thread blocks in `crossterm::event::read()` and queues `Msg::Key` and `Msg::Resize` on an unbounded key queue, then wakes the main thread through the channel it blocks on (§7.3). `q` (outside filter editing) and Ctrl-C set the quit flag in the input thread itself.
-- `--rule` takes the text of a control-protocol `R` line (§6.2) **without** the leading `R\t`, for example `--rule $'*\t.\t1000\tp'`. It replaces the default rules. It is the hook the integration tests use.
+- `--rule` takes the fields of a control-protocol `R` line (§6.2) split by spaces or tabs, for example `--rule '* . 2s c'` or `--rule $'*\t.\t1000\tp'`; the interval takes the units of `--interval` (digits alone are ms). It replaces the default rules. It is the hook the integration tests use.
 - `--agent-keepalive SECS` (hidden, for tests) is forwarded to every agent as `--keepalive SECS`. The `srun_args` golden tests cover it.
 - `--batch N` prints N text snapshots (`top -b`) using `state::rows` and exits. It replaces capture-and-assert scripts in the sind tests. Its footer reports `nodes=… stale=… errors=… dropped=… missing=…` (missing: expected nodes that never reported). The first snapshot waits until every node has sent a rate, at most 3 s plus two intervals. Names from agents and journals reach the terminal unfiltered here, so every control character (ESC, DEL, C1) except the line breaks is printed as `?`.
 - There is no async runtime: std threads plus `std::sync::mpsc` only (ADR D3).
 
 ### 3.2 Attach: launch sequence and exact srun line
 
-1. Resolve the job (§3.1). Then `squeue --noheader --jobs=<J> --format="%A %D %T %U %j"` gives the numeric job id (array tasks resolve to the real id), the node count N, the state and the owner's uid of every matching row. An array job id (the id `sbatch` prints) lists every task plus the pending rest, which keeps the array id and sorts first (squeue sorts states as strings). unjam therefore takes the `RUNNING` row whose id is `<J>`, else the only `RUNNING` row; several `RUNNING` rows are listed like the jobs of §3.1 and unjam exits 2. With no `RUNNING` row, unjam exits 1 with the first row's state.
+1. Resolve the job (§3.1). Then `squeue --noheader --jobs=<J> --format="%A %D %T %U %j"` gives the numeric job id (array tasks resolve to the real id), the node count N, the state and the owner's uid of every matching row. An array job id (the id `sbatch` prints) lists every task plus the pending rest, which keeps the array id and sorts first (squeue sorts states as strings). unjam therefore takes the `RUNNING` row whose id is `<J>`, else the only `RUNNING` row; several `RUNNING` rows are listed like the jobs of §3.1 and unjam exits 2. With no `RUNNING` row, unjam exits 1 with the first row's state; an id squeue does not know gives "job N not found (finished, or not visible to you)", and a missing `squeue` "squeue not found in PATH". The job name (`%j`) follows the id in the header.
 2. With `--nodelist LIST`, N becomes the line count of `scontrol show hostnames LIST`.
 3. The TUI spawns srun with `Command::process_group(0)`, so terminal SIGINT and SIGTSTP never reach it. stdin, stdout and stderr are piped. The child environment is cleared of every `SLURM_*` and `SRUN_*` variable except `SLURM_CONF`, so input variables inherited from an enclosing `salloc` cannot add options we did not pass. This uses `Command::env_remove` on the child only, because `std::env::remove_var` is `unsafe` in edition 2024.
 
@@ -482,7 +483,7 @@ Verified in Slurm 25.11 source:
 - **Input thread.** Blocks in `crossterm::event::read()`, queues `Msg::Key` and `Msg::Resize` on the key queue and wakes the main thread. A draw that blocks on a slow terminal (ssh) does not delay key reading, and `q` or Ctrl-C set a quit flag at once.
 - **stdout reader thread.** `read()` into a 64 KiB buffer, split at the last `\n`, keep the remainder, and send whole-line chunks as `Msg::Lines`. A remainder that fills the whole buffer is dropped; the rest of that overlong line then arrives as one junk line. Unit tests drive the reader with short reads of varying size, and the 1,000-agent mux test feeds its interleaved stdout through it. It counts bytes for the header's `in` rate. The bounded channel makes srun's pipe fill up, which pushes back to the agents, whose writer threads absorb it (§7.5).
 - **Main thread.** Handles keys first. Then, for each line: `wire::split_node` gives the node (and counts the line), `wire::parse(line, &mut vals)` gives an `Event`, and `State::apply` stores it. Decode work per batch is capped at 10 ms, after which pending keys are handled again, so key latency stays under about 50 ms even during an 8 MB attach burst. `Msg::Tick` (1 Hz) drives the self-monitoring sample and staleness.
-- **stderr reader thread.** Sends `Msg::Stderr`. The last line goes to the footer, and the last 200 lines are kept in a ring for the log pane.
+- **stderr reader thread.** Sends `Msg::Stderr`. A new line shows in the footer for 10 s, and the last 200 lines are kept in a ring for the log pane.
 
 ### 7.4 Error handling
 
@@ -570,6 +571,8 @@ srun's I/O thread throughput and CPU at 1k tasks are **UNVERIFIED**. They will b
 - **Step.** Forward moves to the next tick and loads the next batch when needed. Back is `seek(t − interval)`.
 - **Several files** share one cursor over sampling rounds, and each file shows its latest tick ≤ t. Agents stamp a round a few ms after its due time, differently on each node, so ticks closer than half the shortest tick gap in any file form one round, and the cursor stands at the round's latest tick: one step advances every node by one tick. Rates use tick t and the tick before it, across batch boundaries. Applying a snapshot tick is `State::apply` per row; `Track::gone` then removes what the tick did not list.
 - **Malformed files.** A row whose parent path resolves to the cgroup itself or to one below it (possible only in a crafted or corrupted file) is ignored by `State`, which also moves a re-parented cgroup out of its old parent's kids, so the layouts always walk a tree. Replay inputs must still be trusted: arrow-ipc 60 preallocates an LZ4 buffer at the 8-byte uncompressed length the file states (`decompress_lz4`, `Vec::with_capacity`) before any check, so a crafted length aborts replay with an allocation failure, past the panic hook. A pre-scan of every buffer prefix would cost more lines than it is worth; the fix belongs upstream (a capped preallocation), followed by a dependency bump.
+- **`--at TIME`:** `start`, `end`, `+DUR`, `-DUR` or `HH:MM[:SS][Z]` UTC on the recording's first day; the next day if that is before the start and inside the recording, else the start. Hours ≥ 24 and minutes or seconds ≥ 60 are refused.
+- **Warnings** at open: a truncated file, a host that repeats, and a file of another job or step than the first. A file that is not an Arrow stream fails with "not an unjam recording (…)".
 - **Memory.** Only the current decoded batch per file is held: typically about 250 KB per node and at most about 3 MB (the row cap), so about 250 MB at 1k nodes in the typical case (K8).
 
 ### 8.5 Recording in the TUI (D41)
@@ -577,6 +580,8 @@ srun's I/O thread throughput and CPU at 1k tasks are **UNVERIFIED**. They will b
 - `r` starts or stops recording in a live viewer; `--slurm --record DIR` starts it at launch. Without `--record`, `r` records into `unjam-rec-<secs>` in the current directory.
 - The TUI feeds the events it receives into `record::Writer`, one `.arrows` file per node (`DIR/<host>.arrows`, `/` in the host name replaced by `_`, created new with mode 0600; a missing `DIR` is created with mode 0700, since the files hold other users' command lines when root records). The schema metadata carries `unjam.source=tui`, so a reader can tell such a file from a `record` journal. Batching, keyframes and crash safety are those of §8.3; replay reads both.
 - A node's tick is written when its next tick starts, at that node's first structure or `T` line after it: an agent sends a tick's structure before its `T`, so writing at `T` would mix in the next tick's structure (entities that just exited would lose their last sample).
+- A node silent for three intervals before the recording starts is not recorded, so a dead node's old tick does not open the recording.
+- The header shows `rec failed` when every journal failed to open (for example, `DIR` already holds `<host>.arrows`). After the viewer exits, the recording's log lines go to stderr, and a failed recording makes the exit code 1.
 - Every viewer exit closes the journals with their last batch and end-of-stream marker: `q`, SIGTERM and SIGHUP (also with `--batch`), and errors such as a failed `--batch` write (`EPIPE` under `| head`) or a lost terminal.
 - Values arrive at the rule intervals that are active, so a TUI recording is as sparse or dense as the view was. About 50 LOC.
 
@@ -592,10 +597,12 @@ srun's I/O thread throughput and CPU at 1k tasks are **UNVERIFIED**. They will b
 
 ### 9.1 Layout (80×24 minimum, grows with the terminal)
 
+Below 80 columns or 8 rows the frame shows only "unjam needs at least 80x8 (now W×H)".
+
 ```
- unjam --slurm=4821937 · 1024 nodes (2 stale) · 98,304 procs · 2s · step · sort CPU% ▼ · 12:00:01Z
- tui 1.2% 38M · in 410 KB/s 3.1k msg/s · out 12 B/s · agents max 0.3% 12M (n0417) · drop 0 err 0
- NODES ███▓▓▒▒░░·····▓▓▒▒░░░░········▓▓▒░░░░░░·····   cell = 16 nodes, colour = CPU band, · = off
+ unjam 4821937 train-llm · 1024 nodes (2 stale) · 98,304 procs · 2s · step · sort CPU% ▼ · 12:00:01Z
+ tui 1.2% 38M · in 410K/s 3.1k msg/s · out 12B/s · drop 0 err 0 · agents max 0.3% 12M (n0417)
+ NODES ███▆▆▄▄▂▂·····▆▆▄▄▂▂▂▂········▆▆▄▂▂▂▂▂▂·····  16 nodes per cell
  NAME                              CPU history        CPU%    MEM  IO-R/s IO-W/s  PIDS  INT  W
  ▼ job 4821937                     ▆▆▆▆▅▆▆▆▆▆▆▆▆▆▆▆  62.4%   9.8T   38G/s   3.1G  98304   2s  c
    ▼ step_0                        ▆▆▆▆▅▆▆▆▆▆▆▆▆▆▆▆  62.4%   9.8T   38G/s   3.1G  98304   2s  c
@@ -605,18 +612,21 @@ srun's I/O thread throughput and CPU at 1k tasks are **UNVERIFIED**. They will b
      ▶ n0417                       ▂▂▂▁▁▁▁▁▁▁▁▁▁▁▁▁  12.3%   8.9G    2M/s     0     96   2s  p
      ▶ n0418 … n1024 (606 folded)  ▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆▆  61.0%   5.9T   23G/s   1.8G  58000   4s  c
  ────────────────────────────────────────────────────────────────────────────────────────────
- ↑↓ move ←→ fold ␣ mark p what +/- rate v layout s sort / filter r record t theme ? help q quit │ srun: …
+ ? help q quit ↑↓ move ←→ fold ␣ mark p level +/- rate v layout s sort / filter r record t theme
 ```
 
-- **Header, line 1:** the source (`unjam`, `--slurm=J` or `--replay`), node count with stale nodes, process count, interval, layout, sort column and clock. Replay shows the cursor time and `[▶]` or `[⏸]`.
-- **Header, line 2: self-monitoring (D40, always shown, local mode too).**
+- **Footer.** `? help q quit` come first, so an 80-column terminal cuts the end of the keys, not them. A new log line (srun's stderr, recording) shows in front of the keys for 10 s. An applied filter shows as "filter X (/ edits, Esc clears)", and editing it as `/X▏`.
+- **Header, line 1:** the source (`unjam`, the job id and name, or `--replay`), node count with stale nodes, process count, interval, layout, sort column and clock. Replay shows the cursor time, the recorded interval (`unjam.interval_ms`) and `[▶]`, `[⏸]` or `[end]`. A live view shows `● rec` while recording (`rec failed` when no journal could be opened) and `[paused]` after `z`.
+- **Header, line 2: self-monitoring (D40, live modes, local mode too).** In replay there are no agents to monitor, and line 2 shows the position instead: `tick 6/14  00:16:41Z … 00:16:54Z`.
   - `tui`: CPU and RSS of the whole TUI process. The main thread `pread`s a cached `/proc/self/stat` (utime, stime, rss) once per second; CPU% is over wall time and covers all TUI threads.
-  - `in` (bytes and lines per second into the TUI) and `out` (control bytes to the agents): `App::ingest` counts bytes and lines, `App::send` counts control bytes. Plain u64 counters, rate over the last second.
-  - `agents max`: the highest agent CPU (rate of `T.self_cpu_us`) and RSS (`T.self_rss_bytes`), with that node's name. In local mode the sampler is a TUI thread and counts under `tui`.
+  - `in` (bytes and lines per second into the TUI) and `out` (control bytes to the agents): `App::ingest` counts bytes and lines, `App::send` counts control bytes. Plain u64 counters, rate over one interval and at least 1 s, as agents send in bursts once per interval.
   - `drop` and `err`: summed dropped ticks and decode errors.
+  - `agents max`: the highest agent CPU (rate of `T.self_cpu_us`) and RSS (`T.self_rss_bytes`), with that node's name. In local mode the sampler is a TUI thread and counts under `tui`.
   - About 30 LOC. The help pane adds a per-node table: CPU, RSS, out B/s, msg/s, drops, errors and clock skew.
-- **Node heat strip (D41, Slurm mode).** One cell per ⌈N / width⌉ nodes. A cell's colour is the `theme.heat` band of the highest CPU% among its nodes, relative to the busiest node of the job (at least one core, as the wire carries no core count), so imbalance shows on many-core nodes; a cell whose nodes are all `Off` is dotted. About 40 LOC.
-- **CPU history bar (D41).** Every row draws its last 16 CPU samples from `hist` (§4.5) as a bar sparkline in `theme.heat` colours. About 35 LOC.
+- **Node heat strip (D41, Slurm mode).** One cell per ⌈N / width⌉ nodes. A cell's colour is the `theme.heat` band of the highest CPU% among its nodes, relative to the busiest node of the job (at least one core, as the wire carries no core count), so imbalance shows on many-core nodes; the band also sets the cell's height (`▂▄▆█`), so mono and `NO_COLOR` show it too. A cell whose nodes are all `Off` is dotted. A dim "N nodes per cell" follows the cells. About 40 LOC.
+- **CPU history bar (D41).** Every row draws its last 16 CPU samples from `hist` (§4.5) as a bar sparkline in `theme.heat` colours. The colour bands against one core in local mode; in a job against the busiest node, and for rows summed over nodes (job, step, folded range) against all nodes at that load, so a 64-core node is not always saturated. About 35 LOC.
+- **Local mode, line 3:** the host CPU as a share of all CPUs ("17.0% of 4 CPUs", where a row's CPU% is per core) and the memory gauge.
+- **NAME** takes the width that is left, at most 72 cells, so values stay near their names on wide terminals; a cut name ends in `…`. Below 100 columns INT W is hidden when every row shows the same interval and level.
 
 The mock assumes `EnableExtraControllers=io,pids`. Without it, IO-R/s and IO-W/s are hidden and PIDS shows `~`-marked summed threads where processes are sampled (§4.3, §9.2).
 
@@ -625,36 +635,41 @@ The mock assumes `EnableExtraControllers=io,pids`. Without it, IO-R/s and IO-W/s
 - **Three layouts (D39)** are level orders in `View`, walked by the one `state::rows`. `v` cycles step → node → flat. Fold state is keyed by `(level, key)`.
   - **step** (the Slurm default): job → step → node → task → process. A node row under a step is that node's `step_N` cgroup, measured by the kernel. Only the job and step rows are computed across nodes: Counter rates and Gauges are summed, and `p_state`/`char` columns show `*` when the nodes differ. Phase alignment means the sums compare samples from the same instant.
   - **node**: node → cgroup tree → processes.
-  - **flat**: one row per process, or per task cgroup where processes are `Off`, with a NODE column and one global sort. In local mode this is the classic `top`.
+  - **flat**: one row per process, or per task cgroup where processes are `Off`, with a NODE column and one global sort. With no rules (replay), the leaf cgroups listed are those that hold no process. In local mode this is the classic `top`.
+  - A journal of `unjam record` is rooted at a step's `user` cgroup, so its root's kids are tasks; the step layout names their step from the journal (`4242.1`), not `task_0`.
   - Local mode has no node level: `v` toggles between the cgroup tree and flat.
 - **Sort.** The sort column orders siblings only; a row never leaves its parent. Tree layouts sort every sibling set at every level by the row's own value; flat has one sibling set, so its sort is global. Counter → rate, Gauge → value, NA always last in both directions, NAME and NODE in natural order (NODE sorts by host, then NAME), ties in natural order. The cursor follows its entity across redraws, and a key acts on that entity even when data re-sorted the rows since the last frame.
 - **Folded node ranges (D41, step layout).** Under a step, the top nodes by the sort column fill the window, and the remaining nodes collapse into one aggregate row such as `n0418 … n1024 (606 folded)`. Unfolding it lists them. About 25 LOC.
 - **Not in round one:** a "by command" layout and a RANK column. Rank labels ("rank 0-95") need `SLURM_PROCID` from `/proc/<pid>/environ` once per new task, which is not designed yet.
-- **Detail** (`Enter`): every column the node announced, including future-source metrics, shown raw and as a rate, plus the full path or cmdline. Where a value is NA because a controller is absent, it says so.
+- **Detail** (`Enter`): the full path, or the pid, comm and the full command line on its own line, then every column the node announced, including future-source metrics, shown raw and as the table shows it (CPU counters as %, `char` values as the letter). An NA value says "not announced or absent". Long lines wrap. Job, step and folded rows list their summed values.
+- **Filter** (`/`): ASCII case-insensitive substring of the name, a process's comm or a cgroup's path (a leading `/` is ignored). A match keeps its ancestors, opened, and its whole subtree with its folds. With no match the table says "no match (Esc clears the filter)".
 - **Columns.** The table shows a fixed default list of metric names. Unknown metrics appear only in Detail. There is no column chooser in v1 (ADR D22).
   - A default column that is NA on every row in the visible window is hidden for that frame. This check runs only over the visible slice.
   - PIDS uses `cg_pids_current` and falls back to `~` plus the summed `p_threads` from `State::derive`.
-- **Help/log** (`?`): key bindings, the last 200 stderr lines, and the per-node table of §9.1.
+  - A row whose effective level is off, and every row of a stale node, shows no values and no history (neither is sampled now), and the stale node's row reads `n0417 (stale)`; the help pane's node table marks it too.
+  - CPU% keeps every digit up to 99999% (a 1024-core job row), then switches to `6.6M%`.
+- **Help/log** (`?`): the keys of the mode (live or replay) with a legend of INT W and PIDS `~`, the per-node table of §9.1 in 62 columns, and the newest 20 of the last 200 log lines. The pane has a title with the theme name and "any key closes".
 
 ### 9.3 Key bindings
 
 | Key | Action |
 |---|---|
 | `↑/↓ k/j`, `PgUp/PgDn`, `Home/End g/G` | Move |
-| `←/→ h/l` | Fold / unfold (also a folded node range) |
+| `←/→ h/l` | Fold / unfold (also a folded node range); `←` on a leaf or folded row moves to its parent |
 | `Enter` | Detail popup |
-| `space` | Mark or unmark the row (node or cgroup); `a` clears marks |
-| `p` | Cycle the level of the marked rows (or the cursor row): `p` → `c` → `o` → `p`. Sends `R` |
+| `space` | Mark or unmark the row (node or cgroup; a process row marks its cgroup); `a` clears marks |
+| `p` | Cycle the level of the marked rows (or the cursor row; a process row targets its cgroup): `p` → `c` → `o` → `p`. Sends `R` |
 | `+` / `-` | Halve / double the interval of the marked or cursor rows. Sends `R` |
 | `0` | Reset rules to the defaults (`C *` plus the defaults) |
+| `z` | Pause: hold the agent output (the clock stops, so no node turns stale); `z` again applies it. A pause resumes by itself after 4096 held batches |
 | `v` | Next layout: step → node → flat (local: tree ↔ flat) |
 | `s` / `S` | Next sort column (NAME, the value columns, then NODE when attached) / reverse |
-| `/` | Substring filter on name, comm or path; `Esc` clears |
+| `/` | Edit the filter (§9.2); `Enter` keeps it, `Esc` clears it |
 | `r` | Start or stop recording what the TUI receives (§8.5) |
-| `t` | Next theme |
+| `t` | Next theme (none while `NO_COLOR` forces mono) |
 | `?` | Help and log |
 | `q` | Quit (teardown in §3.3) |
-| Replay: `space`, `,` / `.`, `<` / `>`, `g` / `G` | Play/pause, ±1 tick, ±60 s, start/end |
+| Replay: `space`, `,` / `.`, `<` / `>`, `g` / `G` | Play/pause, ±1 tick, ±60 s, start/end. `p`, `+`, `-`, `0`, `r` and `z` do nothing |
 
 ### 9.4 Rendering cost
 
