@@ -496,16 +496,24 @@ pub fn view(
         signal_hook::flag::register(sig, Arc::clone(&QUIT))?;
     }
     let res = if let Some(mut left) = batch {
+        // The first snapshot waits for every node's first rate, at most 3 s plus two intervals.
         let (mut seen, mut res) = (0, Ok(()));
+        let mut wait = 3 + 2 * app.opts.interval_ms.div_ceil(1000);
+        let rated = |n: &state::Node| n.root_vals().and_then(|v| v.get(0, Kind::Counter));
         while let Some(m) = (left > 0 && !QUIT.load(Relaxed)).then(|| rx.recv().ok()).flatten() {
             let tick = matches!(m, Msg::Tick);
             app.handle(m);
-            if tick && app.ticks > seen {
-                (seen, left, res) = (app.ticks, left - 1, snapshot(app, out));
+            wait = wait.saturating_sub(u32::from(tick));
+            let nodes = &app.st.nodes;
+            let ready =
+                nodes.len() >= app.expect as usize && nodes.iter().all(|n| rated(n).is_some());
+            if tick && app.ticks > seen && (ready || wait == 0) {
+                (seen, left, res, wait) = (app.ticks, left - 1, snapshot(app, out), 0);
             }
             left *= u32::from(!app.ended && res.is_ok());
         }
-        res
+        // `unjam --batch N | head` closes the pipe early: a normal end, as for `top -b`.
+        res.or_else(|e| if e.kind() == io::ErrorKind::BrokenPipe { Ok(()) } else { Err(e) })
     } else {
         let (ktx, krx) = mpsc::channel();
         thread::spawn(move || input(&ktx, &keys));
@@ -838,8 +846,9 @@ fn help(app: &App) -> Vec<String> {
     out
 }
 
-/// One `--batch` snapshot (`top -b`): header, every row of the current layout as text, and a
-/// footer with node, stale, error and drop counts. Names come from agents and journals and go
+/// One `--batch` snapshot (`top -b`): header, every row of the current layout as text (names in
+/// full, as scripts match on them), and a footer with the node count, the nodes that never
+/// reported, and the stale, error and drop counts. Names come from agents and journals and go
 /// straight to a terminal, so every control char (ESC, DEL, C1) but `\n` becomes `?`.
 pub fn snapshot(app: &App, w: &mut dyn Write) -> io::Result<()> {
     let rows = state::rows(&app.st, &app.view, usize::MAX);
@@ -859,11 +868,13 @@ pub fn snapshot(app: &App, w: &mut dyn Write) -> io::Result<()> {
         line(&mut out, &(tx[0].clone() + &tx[1]), [&tx[2], &tx[3], &tx[4]], &|c| tx[5 + c].clone());
     }
     let (nodes, n) = (&app.st.nodes, app.st.nodes.len());
+    let missing = (app.expect as usize).saturating_sub(n);
     let stale = (0..).zip(nodes).filter(|&(i, _)| app.stale(i)).count();
     let errors: u64 = nodes.iter().map(|x| x.errors).sum();
     let dropped: u64 = nodes.iter().map(|x| u64::from(x.dropped)).sum();
     let out = out.replace(|c: char| c.is_control() && c != '\n', "?");
-    writeln!(w, "{out}nodes={n} stale={stale} errors={errors} dropped={dropped}\n")
+    let counts = format!("nodes={n} stale={stale} errors={errors} dropped={dropped}");
+    writeln!(w, "{out}{counts} missing={missing}\n")
 }
 
 #[cfg(test)]
@@ -1029,6 +1040,12 @@ mod tests {
         let mut out = Vec::new();
         snapshot(&app, &mut out).unwrap();
         golden("batch-local.txt", &String::from_utf8(out).unwrap());
+        let cmd = "/usr/bin/coreutils --coreutils-prog-shebang=sleep /usr/bin/sleep 600";
+        feed(&mut app, 0, &[format!("P 30 1 4 1 sleep {}", cmd.replace(' ', "~"))]);
+        let mut out = Vec::new();
+        snapshot(&app, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains(&format!("{cmd} {:>7}", 30)), "scripts match full names:\n{text}");
     }
 
     #[test]
