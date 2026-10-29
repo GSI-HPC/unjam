@@ -16,7 +16,7 @@ This is the living design of the repository. It started as the reviewed round-on
 3. Agents send self-describing tab-separated text lines. Every line is at most 1000 bytes and starts with the agent's node index. A `D` line announces each metric's name, unit and kind. Control lines go to every agent on srun's stdin. The sampler never blocks on stdout: a writer thread, a bounded queue, a per-agent byte budget, staggered emission and wall-clock phase-aligned ticks handle that.
 4. Recording writes a crash-safe Arrow IPC stream with LZ4 compression. Each batch is a self-contained keyframe covering 10 s or 8,192 rows, so on-node memory stays at about 2 MB and at most about 10 s is lost on a crash. The schema is generated from the metric descriptors. There is no Parquet writer in the binary: a documented pyarrow one-liner converts a journal to Parquet, and IT 6 tests it (Q1 decides whether `unjam convert` comes back).
 5. The TUI offers three layouts (step, node, flat), a self-monitoring header, a node heat strip, a CPU history bar per row and live recording of what it receives (D39 to D41).
-6. Budget: about 3,400 LOC in 12 flat modules (hard cap 3,460, re-baselined from the planned 2,900 when record and replay measured about 580 lines against 330; see §10.2), 7 direct dependencies, no `unsafe` in production code (one ledgered use in a test-only allocator), and MSRV 1.88. Rust tests, scripts, mise tasks, CI gates and four Claude Code skills enforce these limits.
+6. Budget: about 3,400 LOC in 12 flat modules (hard cap 3,705, re-baselined from the planned 2,900 when record and replay measured about 580 lines against 330, and from 3,460 by the 41 fixes of the UX review; see §10.2), 7 direct dependencies, no `unsafe` in production code (one ledgered use in a test-only allocator), and MSRV 1.88. Rust tests, scripts, mise tasks, CI gates and four Claude Code skills enforce these limits.
 
 ---
 
@@ -725,7 +725,7 @@ Counted as code lines, excluding blanks, comments and `#[cfg(test)]` modules. Re
 | agent.rs | 275 | theme.rs | 60 (+ theme data) |
 | | | **Total** | **≈ 2,700** (hard total cap 2,900) |
 
-The table is the plan. As built, the hard total cap is **3,460** (owner decision): record and replay measured about 580 lines against the planned 330, and the sampler (agent.rs) about 490 against 275, so `docs/budget.txt` holds the measured module budgets with a one-line reason each and is the authoritative gate. Modules that do not exist yet are skipped by the gate, and every file in `src/` needs a line. Theme data sits between `// budget: data` and `// budget: end` and is not counted. A budget may be re-baselined with a one-line reason in `docs/budget.txt`.
+The table is the plan. As built, the hard total cap is **3,705**: record and replay measured about 580 lines against the planned 330, and the sampler (agent.rs) about 490 against 275, which set the owner's cap of 3,460; the 41 fixes of the UX review then measured 245 lines more. So `docs/budget.txt` holds the measured module budgets with a one-line reason each and is the authoritative gate. Modules that do not exist yet are skipped by the gate, and every file in `src/` needs a line. Theme data sits between `// budget: data` and `// budget: end` and is not counted. A budget may be re-baselined with a one-line reason in `docs/budget.txt`.
 
 Changes from the owner review: the three layouts (+50 in state.rs), self-monitoring (+30), the heat strip, CPU history, TUI recording and folded node ranges (+150, D41), `--bcast` with `--unlink-self` (+30) and the input thread (+10).
 
