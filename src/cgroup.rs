@@ -7,7 +7,7 @@
 use std::os::unix::fs::{DirEntryExt, MetadataExt};
 use std::{fs, path::Path, path::PathBuf};
 
-use crate::model::{Ent, Kind, Metric, NA};
+use crate::model::{Ent, Kind, Metric, NA, metric as m};
 use crate::source::{Env, Files, Sampled, Slot, Source, Target, kv, kv_eq, num};
 
 /// Files read per cgroup at level `c`, in slot order; the first two are hot (§5.2, §5.3).
@@ -26,11 +26,6 @@ const FILES: [&str; 10] = [
 
 /// The `cpu.stat` keys behind the first four metrics.
 const CPU_KEYS: [&str; 4] = ["usage_usec", "user_usec", "system_usec", "throttled_usec"];
-
-/// Shorthand for the descriptor table below.
-const fn m(name: &'static str, unit: &'static str, kind: Kind) -> Metric {
-    Metric { name, unit, kind }
-}
 
 /// Round-one cgroup metrics (§4.3). Names are append-only: they are wire and column identity.
 pub const METRICS: &[Metric] = &[
@@ -51,13 +46,24 @@ pub const METRICS: &[Metric] = &[
     m("cg_psi_io_some_usec", "us", Kind::Counter),
 ];
 
-/// The cgroup v2 source; stateless, all state is in the entity's slots.
-pub struct Cgroup;
+/// The cgroup v2 source. It holds the stacked devices `io_sum` skips; the rest is in the slots.
+pub struct Cgroup(Vec<String>);
 
-/// The source registry entry; cgroupfs needs no probing beyond the startup check.
+/// The source registry entry: reads the stacked block devices once from the sysfs next to
+/// `proc_root` (`/sys` in production, absent in fixture trees).
 #[allow(clippy::unnecessary_wraps, reason = "the Probe signature; other sources can fail")]
-pub fn probe(_: &Env) -> Result<Box<dyn Source>, String> {
-    Ok(Box::new(Cgroup))
+pub fn probe(env: &Env) -> Result<Box<dyn Source>, String> {
+    Ok(Box::new(Cgroup(stacked(&env.proc_root.with_file_name("sys/class/block")))))
+}
+
+/// `MAJ:MIN ` of each disk that is, or has a partition that is, held by a dm or md device:
+/// `io.stat` charges a stacked bio again on the disk below, so only the top device is summed.
+fn stacked(class_block: &Path) -> Vec<String> {
+    let devs = fs::read_dir(class_block).into_iter().flatten().flatten().map(|e| e.path());
+    let held = |d: &PathBuf| fs::read_dir(d.join("holders")).is_ok_and(|mut h| h.next().is_some());
+    let disk = |d: PathBuf| d.join(if d.join("partition").exists() { "../dev" } else { "dev" });
+    let dev = |d| fs::read_to_string(disk(d)).ok().map(|t| format!("{} ", t.trim()));
+    devs.filter(held).filter_map(dev).collect()
 }
 
 impl Source for Cgroup {
@@ -88,7 +94,7 @@ impl Source for Cgroup {
                 1 | 2 => out[i + 3] = num(b).unwrap_or(NA),
                 3 => out[6] = kv(b, "oom_kill").unwrap_or(NA),
                 4 => (out[7], out[8]) = (kv(b, "anon").unwrap_or(NA), kv(b, "file").unwrap_or(NA)),
-                5 => (out[9], out[10]) = io_sum(b),
+                5 => (out[9], out[10]) = io_sum(b, &self.0),
                 6 => out[11] = num(b).unwrap_or(NA),
                 _ => out[i + 5] = psi(b),
             }
@@ -102,9 +108,11 @@ fn psi(b: &[u8]) -> u64 {
     b.split(|&c| c == b'\n').next().and_then(|l| kv_eq(l, "total")).unwrap_or(NA)
 }
 
-/// Sums `rbytes` and `wbytes` over the devices of `io.stat` (no devices gives 0, 0).
-pub fn io_sum(text: &[u8]) -> (u64, u64) {
-    text.split(|&b| b == b'\n').fold((0, 0), |(r, w), line| {
+/// Sums `rbytes` and `wbytes` over the devices of `io.stat` except the `skip` prefixes (no
+/// devices gives 0, 0).
+pub fn io_sum(text: &[u8], skip: &[String]) -> (u64, u64) {
+    let top = |l: &&[u8]| !skip.iter().any(|d| l.starts_with(d.as_bytes()));
+    text.split(|&b| b == b'\n').filter(top).fold((0, 0), |(r, w), line| {
         let get = |k| kv_eq(line, k).unwrap_or(0);
         (r.saturating_add(get("rbytes")), w.saturating_add(get("wbytes")))
     })
@@ -132,9 +140,9 @@ pub fn walk(root: &Path, exclude: Option<&Path>) -> Vec<(PathBuf, u64, u64)> {
 /// The recursive part of `walk`; a directory that vanished meanwhile is skipped.
 fn descend(dir: &Path, ino: u64, exclude: Option<&Path>, found: &mut Vec<(PathBuf, u64, u64)>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
-    for e in entries.flatten() {
+    for e in entries.flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())) {
         let path = e.path();
-        if e.file_type().is_ok_and(|t| t.is_dir()) && exclude != Some(path.as_path()) {
+        if exclude != Some(path.as_path()) {
             found.push((path.clone(), e.ino(), ino));
             descend(&path, e.ino(), exclude, found);
         }
@@ -144,15 +152,11 @@ fn descend(dir: &Path, ino: u64, exclude: Option<&Path>, found: &mut Vec<(PathBu
 /// The path of the unified (`0::`) line of `/proc/self/cgroup`. Hybrid hosts list v1 lines
 /// too; whether `/sys/fs/cgroup` really is cgroup2 is checked by `v2_check`.
 fn v2_path(self_cgroup: &str) -> Result<&str, String> {
-    self_cgroup.lines().find_map(|l| l.strip_prefix("0::")).ok_or_else(v1)
+    self_cgroup.lines().find_map(|l| l.strip_prefix("0::")).ok_or_else(|| V1.into())
 }
 
 /// The refusal text for v1 and hybrid hierarchies.
-fn v1() -> String {
-    "cgroup v2 only: no cgroup2 hierarchy at /sys/fs/cgroup (use --root to point at a cgroup2 \
-     mount)"
-        .to_owned()
-}
+const V1: &str = "cgroup v2 only: no cgroup2 hierarchy at /sys/fs/cgroup (use --root to point at a cgroup2 mount)";
 
 /// Startup check (§5.1): `root` must be a cgroup2 directory and, unless it was given explicitly,
 /// this process must live in a pure v2 hierarchy. Returns the own cgroup directory (below
@@ -170,7 +174,7 @@ pub fn v2_check(
     };
     if !root.join("cgroup.controllers").is_file() {
         let e = format!("{}: not a cgroup v2 directory (no cgroup.controllers)", root.display());
-        return Err(if explicit { e } else { v1() });
+        return Err(if explicit { e } else { V1.into() });
     }
     Ok(if own.join("cpu.stat").is_file() { own } else { root.to_path_buf() })
 }
@@ -193,10 +197,21 @@ fn step_paths(self_cgroup: &str) -> Result<(&str, &str), String> {
     }
 }
 
-/// Attach mode: the job root and the agent's own step, which the walk excludes (§5.5).
+/// The cgroup2 mount and the own `/proc/self/cgroup`, the input of every root lookup: one
+/// read for the agent and the recorder, with one error text.
+pub fn self_cgroup() -> Result<(&'static Path, String), String> {
+    let me = fs::read_to_string("/proc/self/cgroup").map_err(|e| format!("/proc/self/cgroup: {e}"));
+    Ok((Path::new("/sys/fs/cgroup"), me?))
+}
+
+/// Attach mode: the job root and the agent's own step, which the walk excludes (§5.5). The step
+/// must exist below `mount`: a path from a cgroup namespace joined onto a host-view mount would
+/// otherwise make the whole mount the job.
 pub fn job_root(mount: &Path, self_cgroup: &str) -> Result<(PathBuf, PathBuf), String> {
     let (job, step) = step_paths(self_cgroup)?;
-    Ok((mount.join(job), mount.join(step)))
+    let own = mount.join(step);
+    let err = format!("{}: own step not found (cgroup namespace)", own.display());
+    own.is_dir().then(|| (mount.join(job), own)).ok_or(err)
 }
 
 /// Record mode: `…/step_<S>/user`, every task of the own step on this node (§3.5).
@@ -215,7 +230,8 @@ mod tests {
     fn sample(dir: &Path) -> Vec<u64> {
         let mut slots: Vec<Slot> = (0..METRICS.len()).map(|_| Slot::Empty).collect();
         let mut out = vec![0; METRICS.len()];
-        Cgroup.sample(Target::Cgroup { dir }, &mut slots, &mut Files::new(64), &mut out).unwrap();
+        let mut src = Cgroup(Vec::new());
+        src.sample(Target::Cgroup { dir }, &mut slots, &mut Files::new(64), &mut out).unwrap();
         out
     }
 
@@ -250,11 +266,43 @@ mod tests {
 
     #[test]
     fn io_and_procs_parsers() {
-        assert_eq!(io_sum(b"8:0 rbytes=1 wbytes=2 rios=3\n259:0 rbytes=10 wbytes=20\n"), (11, 22));
-        assert_eq!(io_sum(b""), (0, 0));
+        let two = b"8:0 rbytes=1 wbytes=2 rios=3\n259:0 rbytes=10 wbytes=20\n";
+        assert_eq!(io_sum(two, &[]), (11, 22));
+        assert_eq!(io_sum(two, &["8:0 ".into()]), (10, 20), "8:0 is stacked");
+        assert_eq!(io_sum(b"", &[]), (0, 0));
         let mut out = vec![9];
         procs(b"30\n4\n100\n", &mut out);
         assert_eq!(out, [4, 30, 100]);
+    }
+
+    #[test]
+    fn stacked_devices_are_the_held_disks() {
+        let tmp = std::env::temp_dir().join(format!("unjam-stacked-{}", std::process::id()));
+        let devices = tmp.join("devices");
+        for (dir, dev, holder) in [
+            ("sda", "8:0", None),
+            ("sda/sda2", "8:2", Some("dm-0")),
+            ("dm-0", "253:0", None),
+            ("nvme0n1", "259:0", Some("md0")),
+            ("nvme1n1", "259:1", None),
+        ] {
+            fs::create_dir_all(devices.join(dir).join("holders")).unwrap();
+            fs::write(devices.join(dir).join("dev"), format!("{dev}\n")).unwrap();
+            if let Some(h) = holder {
+                fs::write(devices.join(dir).join("holders").join(h), "").unwrap();
+            }
+        }
+        fs::write(devices.join("sda/sda2/partition"), "2\n").unwrap();
+        fs::create_dir_all(tmp.join("class")).unwrap();
+        for dir in ["sda", "sda/sda2", "dm-0", "nvme0n1", "nvme1n1"] {
+            let name = dir.rsplit('/').next().unwrap();
+            std::os::unix::fs::symlink(devices.join(dir), tmp.join("class").join(name)).unwrap();
+        }
+        let mut got = stacked(&tmp.join("class"));
+        got.sort();
+        assert_eq!(got, ["259:0 ", "8:0 "], "a held partition marks its disk");
+        assert!(stacked(&tmp.join("nope")).is_empty());
+        fs::remove_dir_all(&tmp).unwrap();
     }
 
     #[test]
@@ -276,7 +324,8 @@ mod tests {
 
     #[test]
     fn slurm_layout() {
-        let mount = Path::new("/sys/fs/cgroup");
+        let tmp = std::env::temp_dir().join(format!("unjam-layout-{}", std::process::id()));
+        let mount = tmp.as_path();
         for (cg, job) in [
             (
                 "0::/system.slice/slurmstepd.scope/job_42/step_3/user/task_0\n",
@@ -296,6 +345,7 @@ mod tests {
                 "system.slice/slurmstepd.scope/job_7",
             ),
         ] {
+            fs::create_dir_all(mount.join(job).join("step_3")).unwrap();
             let (root, own) = job_root(mount, cg).unwrap();
             assert_eq!(root, mount.join(job), "{cg}");
             assert_eq!(own, mount.join(job).join("step_3"));
@@ -311,6 +361,10 @@ mod tests {
         ] {
             assert!(job_root(mount, bad).is_err(), "{bad:?}");
         }
+        let host_view = fixture("25.11");
+        let err = job_root(&host_view, "0::/step_3/user/task_0\n").unwrap_err();
+        assert!(err.contains("cgroup namespace"), "{err}");
+        fs::remove_dir_all(&tmp).unwrap();
     }
 
     #[test]

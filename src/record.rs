@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -23,9 +24,10 @@ use arrow_ipc::writer::{IpcWriteOptions, StreamWriter};
 use arrow_ipc::{CompressionType, reader::StreamReader};
 use arrow_schema::DataType::{self, Timestamp, UInt8, UInt32, UInt64, Utf8};
 use arrow_schema::{Field, Schema, SchemaRef, TimeUnit};
+use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 
-use crate::agent::{Opts, Sampler, now_ms};
-use crate::model::{Control, Ent, Event, Kind, NA, Rule, TaskSet, What};
+use crate::agent::{Opts, Sampler, now_ms, step_id};
+use crate::model::{self, Control, Ent, Event, Kind, NA, Rule, TaskSet, What};
 use crate::state::{Columns, Layout, Node, Proc, State, Vals};
 use crate::tui::{self, App};
 use crate::{RecordArgs, cgroup, procfs, wire};
@@ -36,6 +38,9 @@ pub const MAX_ROWS: usize = 8192;
 const MAX_MS: u64 = 10_000;
 /// Fixed columns before the metric columns: ts, kind, cg, pid, start, ppid, path, comm, cmdline.
 const FIXED: usize = 9;
+/// History a backward seek replays: twice the longest rule interval (60 s), so the sample
+/// before the cursor's of every entity, and with it its rates, is applied (§8.4).
+const BACK_MS: u64 = 120_000;
 /// Milliseconds per day, for `--at HH:MM`.
 const DAY: u64 = 86_400_000;
 /// Recording after a signal at most: Slurm may signal only the task leader, so the app may never
@@ -91,14 +96,17 @@ pub struct Writer {
     strs: [StringBuilder; 3],
     /// Number of cgroup metric columns.
     width: usize,
-    /// Entities that have their keyframe row in the open batch, and the batch's first tick.
+    /// Entities that have their keyframe row in the open batch, the batch's first tick and the
+    /// last tick written.
     keyed: HashSet<(u64, u64)>,
     since: u64,
+    last: u64,
 }
 
 impl Writer {
-    /// Creates `path` (never overwriting) and writes the schema message at once. Node `i`'s
-    /// identity and the `meta` pairs become `unjam.*` schema metadata.
+    /// Creates `path` (never overwriting; owner-only, as it holds command lines) and writes the
+    /// schema message at once. Node `i`'s identity and the `meta` pairs become `unjam.*` schema
+    /// metadata.
     pub fn create(path: &Path, st: &State, i: usize, meta: &[(&str, String)]) -> io::Result<Self> {
         let n = &st.nodes[i];
         let btime = if n.btime == NA { "na".into() } else { n.btime.to_string() };
@@ -107,7 +115,8 @@ impl Writer {
         let all = meta.iter().cloned().chain(fixed).chain(node);
         let schema = schema(&st.cols, all.map(|(k, v)| (format!("unjam.{k}"), v)).collect());
         let lz4 = IpcWriteOptions::default().try_with_compression(Some(CompressionType::LZ4_FRAME));
-        let file = BufWriter::new(File::create_new(path)?);
+        let file =
+            BufWriter::new(File::options().write(true).create_new(true).mode(0o600).open(path)?);
         let mut w =
             StreamWriter::try_new_with_options(file, &schema, lz4.map_err(io::Error::other)?)
                 .map_err(io::Error::other)?;
@@ -116,14 +125,18 @@ impl Writer {
         let (ts, schema) = (TsBuilder::new().with_timezone("UTC"), Arc::new(schema));
         let (ids, strs, kind) = (Default::default(), Default::default(), UInt8Builder::new());
         let (width, keyed) = (st.cols.0[0].len(), HashSet::new());
-        Ok(Self { w, schema, ts, kind, u64s, ids, strs, width, keyed, since: 0 })
+        Ok(Self { w, schema, ts, kind, u64s, ids, strs, width, keyed, since: 0, last: 0 })
     }
 
     /// Appends node `i`'s tick at its last `T` time as a complete snapshot: every cgroup in
     /// path order (parents first), then every process. Values only where they were taken at
-    /// that tick, so a TUI recording keeps the rule intervals it saw (§8.2, §8.5).
+    /// that tick, so a TUI recording keeps the rule intervals it saw (§8.2, §8.5). A tick
+    /// already written is skipped.
     pub fn node(&mut self, st: &State, i: usize) -> io::Result<()> {
         let n = &st.nodes[i];
+        if std::mem::replace(&mut self.last, n.prev[0]) == n.prev[0] {
+            return Ok(());
+        }
         if !self.kind.is_empty() && n.prev[0].saturating_sub(self.since) >= MAX_MS {
             self.cut()?;
         }
@@ -197,9 +210,9 @@ impl Writer {
 
 /// A `Read` that counts the bytes it hands out. `StreamReader::try_new` does not buffer, so
 /// the count is the exact offset of the next message (§8.4).
-pub struct Counting<R>(R, u64);
+struct Counting(BufReader<File>, u64);
 
-impl<R: Read> Read for Counting<R> {
+impl Read for Counting {
     /// Reads and counts.
     fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
         let k = self.0.read(b)?;
@@ -311,11 +324,8 @@ impl Track {
         let get = |k: &str| m.get(&format!("unjam.{k}")).map_or("-", String::as_str);
         let (version, host, step) = (get("version"), get("host"), get("step"));
         let btime = get("btime").parse().unwrap_or(NA);
-        let _ = st.apply(
-            i,
-            &Event::Hello { proto: wire::PROTO, version, host, step, ntasks: 1, btime },
-            0,
-        );
+        let hello = Event::Hello { proto: wire::PROTO, version, host, step, ntasks: 1, btime };
+        let _ = st.apply(i, &hello, 0);
         let mut idx = [0u16; 2];
         for f in self.schema.fields().iter().skip(FIXED) {
             let ent = if f.name().starts_with("p_") { Ent::Proc } else { Ent::Cgroup };
@@ -361,12 +371,7 @@ impl Track {
         if ts != self.tick.0 {
             self.gone(st, i);
             self.tick = (ts, HashSet::new(), HashSet::new());
-            let (self_cpu_us, out_bytes, self_rss) = (NA, NA, NA);
-            let _ = st.apply(
-                i,
-                &Event::Tick { ts_ms: ts, self_cpu_us, out_bytes, dropped: 0, self_rss },
-                ts,
-            );
+            let _ = st.apply(i, &bare_tick(ts), ts);
         }
         let (proc, id) = (c.kind.value(r) == 2, cg.value(r));
         let mine = c.metrics.iter().filter(|m| m.0 == if proc { Ent::Proc } else { Ent::Cgroup });
@@ -406,8 +411,8 @@ impl Track {
     }
 }
 
-/// Multi-file replay: one track per node journal and one shared cursor over the union of
-/// their tick times (§8.4).
+/// Multi-file replay: one track per node journal and one shared cursor over their sampling
+/// rounds (§8.4).
 pub struct Reader {
     tracks: Vec<Track>,
     pub times: Vec<u64>,
@@ -415,17 +420,22 @@ pub struct Reader {
 }
 
 impl Reader {
-    /// Opens and indexes every journal; the warnings name truncated ones.
+    /// Opens and indexes every journal; the warnings name truncated ones. Nodes stamp a round
+    /// a few ms apart, so ticks closer than half the shortest tick gap of any journal form one
+    /// round, which the cursor visits at its latest tick.
     pub fn open(paths: &[PathBuf]) -> Result<(Self, Vec<String>), String> {
-        let (mut tracks, mut times, mut warns) = (vec![], vec![], vec![]);
+        let (mut tracks, mut times, mut warns, mut gap) = (vec![], vec![], vec![], u64::MAX);
         for p in paths {
             let (t, ts, cut) = Track::open(p)?;
             warns.extend(cut.map(|n| format!("{}: truncated at byte {n}", p.display())));
+            gap = ts.windows(2).map(|w| w[0].abs_diff(w[1])).fold(gap, u64::min);
             tracks.push(t);
             times.extend(ts);
         }
-        times.sort_unstable();
-        times.dedup();
+        // Newest first, so that each round keeps its latest tick.
+        times.sort_unstable_by(|a, b| b.cmp(a));
+        times.dedup_by(|t, round| *round - *t < gap.div_ceil(2));
+        times.reverse();
         let none = || "no complete batch in the recordings".to_owned();
         (!times.is_empty())
             .then_some((Self { tracks, times, at: usize::MAX }, warns))
@@ -443,21 +453,26 @@ impl Reader {
     }
 
     /// Moves the cursor to tick `k`. Forward applies the ticks in between; backward rebuilds
-    /// each node from two batches before the one holding the tick, so rates span the batch
-    /// boundary. Each node shows its last tick at or before the cursor.
+    /// each node from the batch holding `BACK_MS` before the tick, so rates span batch
+    /// boundaries. Each node shows its last tick at or before the cursor.
     pub fn goto(&mut self, st: &mut State, k: usize) -> Result<(), String> {
         let k = k.min(self.times.len() - 1);
         let (t, back) = (self.times[k], k < self.at || self.at == usize::MAX);
         for (i, tr) in (0..).zip(&mut self.tracks) {
             if back {
                 tr.reset(st, i);
-                tr.next = tr.index.partition_point(|e| e.1 <= t).saturating_sub(2);
+                tr.next = tr.index.partition_point(|e| e.1 + BACK_MS <= t).saturating_sub(1);
             }
             tr.advance(st, i, t)?;
         }
         self.at = k;
         Ok(())
     }
+}
+
+/// The `T` event of a recorded or replayed tick: there is no agent to monitor.
+fn bare_tick(ts_ms: u64) -> Event<'static> {
+    Event::Tick { ts_ms, self_cpu_us: NA, out_bytes: NA, dropped: 0, self_rss: NA }
 }
 
 /// `--at`: `start`, `end`, `+DUR` after the start, `-DUR` before the end, or `HH:MM[:SS]` UTC
@@ -497,7 +512,8 @@ pub fn replay(
     let Some(n) = n else {
         app.log.extend(warns);
         app.replay = Some(r);
-        return tui::view(&mut app, &tx, &rx, None).map_err(|e| format!("tui: {e}"));
+        let res = tui::view(&mut app, &tx, &rx, None, &mut io::sink());
+        return res.map_err(|e| format!("tui: {e}"));
     };
     let mut err = io::stderr().lock();
     for w in &warns {
@@ -529,31 +545,28 @@ pub struct Rec {
 }
 
 impl Rec {
-    /// A recording into `dir` (created if missing) of a viewer on `job`.
+    /// A recording into `dir` (created owner-only if missing) of a viewer on `job`.
     pub fn new(dir: PathBuf, job: &str, interval_ms: u32) -> Result<Self, String> {
-        fs::create_dir_all(&dir).map_err(|e| format!("record {}: {e}", dir.display()))?;
-        let meta = [
-            ("source", "tui".into()),
-            ("job", job.into()),
-            ("interval_ms", interval_ms.to_string()),
-        ];
+        let made = fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir);
+        made.map_err(|e| format!("record {}: {e}", dir.display()))?;
+        let iv = interval_ms.to_string();
+        let meta = [("source", "tui".into()), ("job", job.into()), ("interval_ms", iv)];
         Ok(Self { dir, meta, files: HashMap::new() })
     }
 
-    /// Writes node `i`'s last complete tick, creating `DIR/<host>.arrows` on first use; a
-    /// node whose file cannot be created is skipped from then on.
+    /// Writes node `i`'s last complete tick, creating `DIR/<host>.arrows` on first use (`/` in
+    /// the agent-reported host becomes `_`, so the file stays in `DIR`); a node whose file
+    /// cannot be created is skipped from then on.
     pub fn node(&mut self, st: &State, i: u32) -> Result<(), String> {
         let n = &st.nodes[i as usize];
-        let path = self.dir.join(format!("{}.arrows", n.host));
-        let e = |x: io::Error| format!("record {}: {x}", path.display());
         if n.prev[0] == 0 || n.host.is_empty() {
             return Ok(());
         }
+        let path = || self.dir.join(format!("{}.arrows", n.host.replace('/', "_")));
+        let e = |x: io::Error| format!("record {}: {x}", path().display());
         if !self.files.contains_key(&i) {
-            let (w, err) = match Writer::create(&path, st, i as usize, &self.meta) {
-                Ok(w) => (Some(w), Ok(())),
-                Err(x) => (None, Err(e(x))),
-            };
+            let w = Writer::create(&path(), st, i as usize, &self.meta);
+            let (w, err) = w.map_or_else(|x| (None, Err(e(x))), |w| (Some(w), Ok(())));
             self.files.insert(i, w);
             err?;
         }
@@ -583,9 +596,7 @@ struct Scope {
 /// The scope (§3.5): `--root`, else the own step's `user` directory (every task of the step
 /// on this node), else the own cgroup. Also the sampling environment.
 fn scope(root: Option<PathBuf>) -> Result<(Scope, crate::source::Env), String> {
-    let mount = Path::new("/sys/fs/cgroup");
-    let me =
-        fs::read_to_string("/proc/self/cgroup").map_err(|e| format!("/proc/self/cgroup: {e}"))?;
+    let (mount, me) = cgroup::self_cgroup()?;
     let explicit = root.is_some();
     let own = if explicit { None } else { Some(cgroup::v2_check(mount, mount, &me, false)?) };
     let step = own.as_ref().and_then(|_| cgroup::record_root(mount, &me).ok());
@@ -617,24 +628,23 @@ fn quiet(sc: &Scope, before: &[u32]) -> bool {
 
 /// `unjam record`: tasks with `SLURM_LOCALID` ≠ 0 become the app (`exec`). Otherwise the app
 /// runs as a child while the scope is sampled into the journal until the lifetime rule holds;
-/// if recording cannot start, the app runs unrecorded. Signals set a flag that cuts the open
-/// batch and are not forwarded (D19); recording then ends at the lifetime rule or after
-/// `GRACE_MS`, whichever comes first. Returns the app's exit code, or 128 + signal (§3.5).
+/// if recording cannot start, the app runs unrecorded after a warning on stderr. Signals set a
+/// flag that cuts the open batch and are not forwarded (D19); recording then ends at the
+/// lifetime rule or after `GRACE_MS`, whichever comes first. Returns the app's exit code, or
+/// 128 + signal (§3.5).
 pub fn run_record(a: &RecordArgs) -> Result<ExitCode, String> {
     let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
     let mut app = Command::new(&a.cmd[0]);
     app.args(&a.cmd[1..]);
-    let started =
-        if var("SLURM_LOCALID").is_some_and(|l| l != "0") { None } else { Some(start(a, &var)) };
-    let (sc, mut st, mut s, mut w) = match started {
-        Some(Ok(x)) => x,
-        Some(Err(e)) => return Err(format!("{e}; {}: {}", a.cmd[0], app.exec())),
-        None => return Err(format!("{}: {}", a.cmd[0], app.exec())),
+    let started = var("SLURM_LOCALID").is_none_or(|l| l == "0").then(|| start(a, &var));
+    if let Some(Err(e)) = &started {
+        let _ = writeln!(io::stderr(), "unjam: record: {e}; running unrecorded");
+    }
+    let Some(Ok((sc, mut st, mut s, mut w))) = started else {
+        return Err(format!("{}: {}", a.cmd[0], app.exec()));
     };
     let sig = Arc::new(AtomicUsize::new(0));
-    for n in
-        [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT, signal_hook::consts::SIGHUP]
-    {
+    for n in [SIGTERM, SIGINT, SIGHUP] {
         let reg = signal_hook::flag::register_usize(n, Arc::clone(&sig), n.unsigned_abs() as usize);
         reg.map_err(|e| format!("signals: {e}"))?;
     }
@@ -643,13 +653,8 @@ pub fn run_record(a: &RecordArgs) -> Result<ExitCode, String> {
     let (mut status, mut grace, werr) = (None, u64::MAX, |e: io::Error| format!("record: {e}"));
     while (status.is_none() || !quiet(&sc, &before)) && now_ms() < grace {
         let now = now_ms();
-        if now >= s.next_due() {
-            let (self_cpu_us, self_rss) = (NA, NA);
-            let _ = st.apply(
-                0,
-                &Event::Tick { ts_ms: now, self_cpu_us, out_bytes: 0, dropped: 0, self_rss },
-                now,
-            );
+        if now >= s.next_due(now) {
+            let _ = st.apply(0, &bare_tick(now), now);
             s.tick(now, &mut |e| st.apply(0, e, now).unwrap_or_default());
             w.node(&st, 0).map_err(werr)?;
         }
@@ -657,7 +662,8 @@ pub fn run_record(a: &RecordArgs) -> Result<ExitCode, String> {
             (grace, ()) = (now + GRACE_MS, w.cut().map_err(werr)?);
         }
         status = status.or(child.try_wait().map_err(|e| e.to_string())?);
-        std::thread::sleep(Duration::from_millis(s.next_due().saturating_sub(now_ms()).min(200)));
+        let wait = s.next_due(now).saturating_sub(now_ms()).min(200);
+        std::thread::sleep(Duration::from_millis(wait));
     }
     w.finish().map_err(werr)?;
     let code = status.map_or_else(
@@ -674,27 +680,19 @@ fn start(
 ) -> Result<(Scope, State, Sampler, Writer), String> {
     let (sc, env) = scope(a.root.clone())?;
     let (job, step) = (var("SLURM_JOB_ID"), var("SLURM_STEP_ID"));
-    let id = job.as_ref().zip(step.as_ref()).map_or("-".into(), |(j, s)| format!("{j}.{s}"));
+    let id = step_id(var);
     let opts =
         Opts { node: 0, ntasks: 1, step: id, root: sc.root.clone(), exclude: None, cap: 1024 };
     let (mut s, mut st, now) = (Sampler::new(env, opts), State::new(), now_ms());
-    let ms =
-        u32::try_from(a.interval.as_millis()).unwrap_or(u32::MAX).clamp(100, 60_000) / 100 * 100;
+    let ms = model::interval_ms(a.interval.as_millis());
     let what = if a.no_procs { What::Cg } else { What::Procs };
-    s.control(
-        Control::Rule(Rule { tasks: TaskSet::All, pattern: ".".into(), interval_ms: ms, what }),
-        now,
-        &mut |_| {},
-    );
+    let rule = Rule { tasks: TaskSet::All, pattern: ".".into(), interval_ms: ms, what };
+    s.control(Control::Rule(rule), now, &mut |_| {});
     s.snapshot(now, &mut |e| st.apply(0, e, now).unwrap_or_default());
     let path = expand(&a.output, job.as_deref(), step.as_deref(), &st.nodes[0].host);
+    let job = job.unwrap_or_else(|| "na".into());
     let (root, ms) = (sc.root.display().to_string(), ms.to_string());
-    let meta = [
-        ("source", "record".into()),
-        ("job", job.unwrap_or_else(|| "na".into())),
-        ("root", root),
-        ("interval_ms", ms),
-    ];
+    let meta = [("source", "record".into()), ("job", job), ("root", root), ("interval_ms", ms)];
     let w = Writer::create(&path, &st, 0, &meta).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok((sc, st, s, w))
 }
@@ -749,10 +747,11 @@ mod tests {
         feed(st, node, &head.map(str::to_owned));
     }
 
-    /// Tick `t` (seconds) of node `node`: a cgroup and a `dd` that live for ticks 5 to 11, and
-    /// pid 11 reused by `dd2` from tick 15. The future-source column is NA from tick 20.
-    fn tick(st: &mut State, node: u32, t: u64) {
-        let ms = 1_000_000 + t * 1000;
+    /// Tick `t` (seconds, stamped `skew` ms late) of node `node`: a cgroup and a `dd` that live
+    /// for ticks 5 to 11, and pid 11 reused by `dd2` from tick 15. The future-source column is
+    /// NA from tick 20.
+    fn tick(st: &mut State, node: u32, t: u64, skew: u64) {
+        let ms = 1_000_000 + t * 1000 + skew;
         let mut l = vec![format!("T {ms} 0 0 0 -")];
         match t {
             5 => l.extend(["G 4 1 c".into(), "P 11 200 4 10 dd dd~if=/dev/zero".into()]),
@@ -772,14 +771,18 @@ mod tests {
         feed(st, node, &l);
     }
 
-    /// Records `n` ticks of node `node` (host `host`) to `dir/<host>.arrows`; returns the
-    /// source store.
+    /// Records `n` ticks of host `host` to `dir/<host>.arrows`; returns the source store.
     fn journal(dir: &Path, host: &str, n: u64) -> (PathBuf, State) {
+        skewed(dir, host, n, 0)
+    }
+
+    /// `journal` with every tick stamped `skew` ms late, as a node's agent wakes up late.
+    fn skewed(dir: &Path, host: &str, n: u64, skew: u64) -> (PathBuf, State) {
         let (mut st, path) = (State::new(), dir.join(format!("{host}.arrows")));
         hello(&mut st, 0, host);
         let mut w = None;
         for t in 1..=n {
-            tick(&mut st, 0, t);
+            tick(&mut st, 0, t, skew);
             let meta = [("source", "test".into())];
             let w = w.get_or_insert_with(|| Writer::create(&path, &st, 0, &meta).unwrap());
             w.node(&st, 0).unwrap();
@@ -825,6 +828,35 @@ mod tests {
             .unwrap()
             .map(Result::unwrap)
             .collect()
+    }
+
+    #[test]
+    fn journals_and_recording_dirs_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp("mode");
+        let rec = Rec::new(dir.0.join("a/b"), "42", 1000).unwrap();
+        let (path, _) = journal(&rec.dir, "n1", 1);
+        for p in [&dir.0.join("a"), &rec.dir, &path] {
+            let mode = fs::metadata(p).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "{}: {mode:o}", p.display());
+        }
+    }
+
+    #[test]
+    fn a_host_name_cannot_leave_the_recording_dir() {
+        let dir = tmp("host");
+        let mut st = State::new();
+        for (i, host) in (0..).zip(["../../x", "/abs"]) {
+            hello(&mut st, i, host);
+            tick(&mut st, i, 1, 0);
+        }
+        let rec = Rec::new(dir.0.join("rec"), "42", 1000).unwrap();
+        assert!(rec.finish(&st).is_empty());
+        let mut names: Vec<_> = fs::read_dir(dir.0.join("rec")).unwrap().flatten().collect();
+        names.sort_by_key(fs::DirEntry::file_name);
+        let names: Vec<_> = names.iter().map(|e| e.file_name().into_string().unwrap()).collect();
+        assert_eq!(names, [".._.._x.arrows", "_abs.arrows"]);
+        assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 1, "nothing outside rec/");
     }
 
     #[test]
@@ -946,6 +978,49 @@ mod tests {
     }
 
     #[test]
+    fn nodes_stamped_ms_apart_share_one_cursor_step() {
+        let dir = tmp("rounds");
+        let skews = [("n1", 0), ("n2", 3), ("n3", 7)].into_iter();
+        let (paths, _): (Vec<_>, Vec<_>) = skews.map(|(h, s)| skewed(&dir.0, h, 10, s)).unzip();
+        let (mut r, _) = Reader::open(&paths).unwrap();
+        assert_eq!(r.times, (1..=10).map(|t| 1_000_007 + t * 1000).collect::<Vec<_>>());
+        let mut st = State::new();
+        for k in 0..10 {
+            r.goto(&mut st, k).unwrap();
+            let shown: Vec<u64> = st.nodes.iter().map(|n| n.prev[0]).collect();
+            let want = [0, 3, 7].map(|s| 1_001_000 + k as u64 * 1000 + s);
+            assert_eq!(shown, want, "every node advances one tick per step");
+        }
+    }
+
+    #[test]
+    fn backward_seek_keeps_the_rates_of_slow_entities() {
+        let dir = tmp("slow");
+        let (mut st, path) = (State::new(), dir.0.join("slow.arrows"));
+        hello(&mut st, 0, "slow");
+        let mut w = None;
+        for t in 1..=100 {
+            let mut l = vec![format!("T {} 0 0 0 -", 1_000_000 + t * 1000)];
+            let cgs = [1, 2].into_iter().chain((t % 30 == 0).then_some(3));
+            l.extend(cgs.map(|c| format!("g {c} 0 {} 4096 1", c * t * 1000)));
+            feed(&mut st, 0, &l);
+            let w = w.get_or_insert_with(|| Writer::create(&path, &st, 0, &[]).unwrap());
+            w.node(&st, 0).unwrap();
+        }
+        w.unwrap().finish().unwrap();
+        let paths = [path];
+        let ((mut lin, _), (mut seek, _)) =
+            (Reader::open(&paths).unwrap(), Reader::open(&paths).unwrap());
+        let (mut a, mut b) = (State::new(), State::new());
+        for k in 0..=94 {
+            lin.goto(&mut a, k).unwrap();
+        }
+        seek.goto(&mut b, 99).unwrap();
+        seek.goto(&mut b, 94).unwrap();
+        assert_eq!(dump(&b.nodes[0]), dump(&a.nodes[0]), "cgroup 3 is sampled every 30 s");
+    }
+
+    #[test]
     fn truncation_yields_the_valid_prefix() {
         let dir = tmp("trunc");
         let (path, _) = journal(&dir.0, "n1", 35);
@@ -968,12 +1043,8 @@ mod tests {
                     assert_eq!(r.tracks[0].index.len(), complete, "cut at {at}");
                     assert_eq!(warns.is_empty(), at == full.len(), "cut at {at}: {warns:?}");
                     if at < full.len() {
-                        let n = r.tracks[0].index.get(complete).map_or(ends[complete - 1], |e| e.0);
-                        assert!(
-                            warns[0].ends_with(&format!("truncated at byte {}", n.min(at as u64)))
-                                || at as u64 >= ends[complete - 1],
-                            "{warns:?}"
-                        );
+                        let want = format!("truncated at byte {}", ends[complete - 1]);
+                        assert!(warns[0].ends_with(&want), "cut at {at}: {warns:?}");
                     }
                     r.goto(&mut State::new(), usize::MAX).unwrap();
                 }

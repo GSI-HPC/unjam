@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use std::{fs, thread};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{fs, mem, thread};
 
 use crate::model::{Control, Ent, Event, NA, Rule, TaskSet, What, effective, next_due, upsert};
 use crate::source::{self, Env, Files, Slot, Source, Target};
@@ -19,7 +19,7 @@ use crate::{cgroup, procfs, wire};
 /// Discovery walk period while anything is sampled: at most 1 Hz (§5.3).
 const WALK_MS: u64 = 1000;
 /// Structure rescan period while every subtree is `Off`.
-const OFF_WALK_MS: u64 = 10_000;
+pub const OFF_WALK_MS: u64 = 10_000;
 /// Buffered structure beyond this applies the fork-storm self-rule (§7.5).
 const PENDING_CAP: usize = 1 << 20;
 /// Writer queue depth in buffers (§7.5).
@@ -121,33 +121,36 @@ impl Core {
         cg.pids.extend_from_slice(&self.pids);
     }
 
-    /// Samples one process. A vanished process gives `x`; a reused pid gives `x` then `P`.
+    /// Samples one process. A vanished process gives `x`; a reused pid gives `x` then `P`; an
+    /// exec (new `comm`) gives `P` again with the new names.
     fn sample_proc(&mut self, pid: u32, cg: u64, emit: Emit) {
         let Some(p) = self.procs.get_mut(&pid).filter(|p| p.cg == cg) else { return };
-        let (start, mut slots) = (p.start, std::mem::take(&mut p.slots));
-        let ok = self.run(Ent::Proc, Target::Proc { pid, start }, &mut slots);
+        let (start, mut slots, comm) = (p.start, mem::take(&mut p.slots), mem::take(&mut p.comm));
+        let ok = self.run(Ent::Proc, Target::Proc { pid, start, comm: &comm }, &mut slots);
         if let Some(p) = self.procs.get_mut(&pid) {
-            p.slots = slots;
+            (p.slots, p.comm) = (slots, comm);
         }
         if ok {
             emit(&Event::ProcVals { pid, first: 0, v: &self.vals });
         } else {
-            self.drop_proc(pid, emit);
             self.new_proc(pid, cg, emit);
         }
     }
 
-    /// Announces a process new to cgroup `cg` (`x` first if it moved from another cgroup).
+    /// Announces a process new to cgroup `cg`, or again after an exec. `x` comes first when the
+    /// pid was known with another start (reuse) or cgroup (move), or has vanished.
     fn new_proc(&mut self, pid: u32, cg: u64, emit: Emit) {
-        self.drop_proc(pid, emit);
+        let old = self.procs.get(&pid).map(|p| (p.start, p.cg));
+        self.drop_proc(pid, &mut |_| ()); // forgotten silently: whether `x` is due is known below
+        let (root, files) = (&self.env.proc_root, &mut self.files);
         let mut slots: Box<[Slot]> = (0..self.width[1]).map(|_| Slot::Empty).collect();
-        let Some(id) = slots
-            .first_mut()
-            .and_then(|s| procfs::ident(&self.env.proc_root, &mut self.files, s, pid))
-        else {
+        let id = slots.first_mut().and_then(|s| procfs::ident(root, files, s, pid));
+        if old.is_some() && old != id.as_ref().map(|i| (i.start, cg)) {
+            emit(&Event::ProcGone(pid));
+        }
+        let Some(procfs::Ident { start, ppid: up, comm, cmd }) = id else {
             return self.files.release(&mut slots);
         };
-        let procfs::Ident { start, ppid: up, comm, cmd } = id;
         emit(&Event::Proc { pid, start, cg, ppid: up, comm: &comm, cmd: &cmd });
         self.procs.insert(pid, ProcEnt { start, cg, ppid: up, comm, cmd, slots });
     }
@@ -226,8 +229,7 @@ impl Sampler {
         if self.walked.is_none() {
             return self.walk(now, emit);
         }
-        let mut cgs: Vec<(&str, u64, u64)> =
-            self.cgs.iter().map(|(&id, c)| (&*c.rel, id, c.parent)).collect();
+        let mut cgs: Vec<_> = self.cgs.iter().map(|(&id, c)| (&*c.rel, id, c.parent)).collect();
         cgs.sort_unstable();
         for (path, id, parent) in cgs {
             emit(&Event::Cg { id, parent, path });
@@ -239,14 +241,16 @@ impl Sampler {
     }
 
     /// Discovery: `X` for vanished cgroups first, then `G` for new ones, parents first (§4.2).
+    /// Absent files are retried on the first walk of each `OFF_WALK_MS` period, not every walk.
     fn walk(&mut self, now: u64, emit: Emit) {
+        let retry = self.walked.is_none_or(|w| w / OFF_WALK_MS != now / OFF_WALK_MS);
         self.walked = Some(now);
         self.seen = self.seen.wrapping_add(1);
         let found = cgroup::walk(&self.opts.root, self.opts.exclude.as_deref());
         for (_, ino, _) in &found {
             let Some(c) = self.cgs.get_mut(ino) else { continue };
             c.seen = self.seen;
-            for s in c.slots.iter_mut().filter(|s| matches!(s, Slot::Missing)) {
+            for s in c.slots.iter_mut().filter(|s| retry && matches!(s, Slot::Missing)) {
                 *s = Slot::Empty;
             }
         }
@@ -332,12 +336,12 @@ impl Sampler {
             self.walk(now, emit);
         }
         self.sample(emit);
+        if let Some(w) = self.core.files.denied.as_mut().filter(|w| !w.is_empty()) {
+            emit(&Event::Warn(w));
+            w.clear();
+        }
         let Core { files, env, .. } = &mut self.core;
-        let s =
-            files.read(&mut self.me, true, &env.proc_root, "self/stat").ok().and_then(procfs::stat);
-        let us =
-            |s: &procfs::Stat| (s.utime + s.stime).saturating_mul(1_000_000) / env.clk_tck.max(1);
-        s.map_or((NA, NA), |s| (us(&s), s.rss.saturating_mul(env.page_size)))
+        procfs::usage(files, &mut self.me, env).unwrap_or((NA, NA))
     }
 
     /// Samples the due cgroups and their processes: the allocation-free steady state.
@@ -349,8 +353,13 @@ impl Sampler {
         }
     }
 
-    /// The earliest deadline: a timer, or the structure rescan.
-    pub fn next_due(&self) -> u64 {
+    /// The earliest deadline: a timer, or the structure rescan. A deadline more than one period
+    /// ahead of `now` means the wall clock stepped back; it is re-phased to `now`.
+    pub fn next_due(&mut self, now: u64) -> u64 {
+        for t in self.timers.iter_mut().filter(|t| t.1 > now + u64::from(t.0)) {
+            t.1 = next_due(now, t.0);
+        }
+        self.walked = self.walked.map(|w| w.min(now));
         let walk = self.walked.map_or(0, |t| t + OFF_WALK_MS);
         self.timers.iter().map(|t| t.1).fold(walk, u64::min)
     }
@@ -382,7 +391,8 @@ pub struct Out {
     tokens: u64,
     refilled: u64,
     dropped: u32,
-    bytes: u64,
+    /// Bytes handed to the writer so far, reported in `T`.
+    sent: u64,
 }
 
 impl Out {
@@ -401,21 +411,8 @@ impl Out {
             }
         });
         let (spare, pending, vals) = ((0..=QUEUE).map(|_| Vec::new()).collect(), vec![], vec![]);
-        let (rate, tokens, refilled, dropped, bytes) = (DEFAULT_RATE, 2 * DEFAULT_RATE, 0, 0, 0);
-        Self {
-            node,
-            ntasks,
-            tx,
-            back,
-            spare,
-            pending,
-            vals,
-            rate,
-            tokens,
-            refilled,
-            dropped,
-            bytes,
-        }
+        let (rate, tokens, refilled, dropped, sent) = (DEFAULT_RATE, 2 * DEFAULT_RATE, 0, 0, 0);
+        Self { node, ntasks, tx, back, spare, pending, vals, rate, tokens, refilled, dropped, sent }
     }
 
     /// Encodes an event into the tick's values or into the never-dropped structure.
@@ -427,7 +424,7 @@ impl Out {
     /// plus the values if the budget allows, without blocking. `Err` once the writer is gone.
     pub fn send(&mut self, now: u64, interval: u32, me: Option<(u64, u64)>) -> io::Result<()> {
         if let Some((self_cpu_us, self_rss)) = me {
-            let (out_bytes, dropped) = (self.bytes, self.dropped);
+            let (out_bytes, dropped) = (self.sent, self.dropped);
             let t = Event::Tick { ts_ms: now, self_cpu_us, out_bytes, dropped, self_rss };
             wire::write(&mut self.pending, self.node, &t);
         }
@@ -452,7 +449,7 @@ impl Out {
         match self.tx.try_send((buf, delay)) {
             Ok(()) => {
                 self.pending.clear();
-                self.bytes += len;
+                self.sent += len;
                 self.tokens = self.tokens.saturating_sub(len);
             }
             Err(TrySendError::Full((b, _))) => {
@@ -475,31 +472,33 @@ pub fn now_ms() -> u64 {
 
 /// The loop every sampler runs, remote (stdin/stdout) or local (channels): control lines first,
 /// then due ticks. Returns on control EOF, when the writer is gone (`EPIPE`) and after
-/// `keep` milliseconds without input.
+/// `keep` milliseconds without input, timed on the monotonic clock so wall-clock steps do not.
 pub fn run(ctl: &Receiver<String>, out: &mut Out, s: &mut Sampler, keep: u64) -> io::Result<()> {
-    let mut heard = now_ms();
-    s.snapshot(heard, &mut |e| out.push(e));
-    out.send(heard, s.interval(), None)?;
+    let (mut heard, keep, now) = (Instant::now(), Duration::from_millis(keep), now_ms());
+    s.snapshot(now, &mut |e| out.push(e));
+    out.send(now, s.interval(), None)?;
     loop {
-        let wake = s.next_due().min(heard.saturating_add(keep));
-        match ctl.recv_timeout(Duration::from_millis(wake.saturating_sub(now_ms()))) {
+        let now = now_ms();
+        let wait = Duration::from_millis(s.next_due(now).saturating_sub(now));
+        match ctl.recv_timeout(wait.min(keep.saturating_sub(heard.elapsed()))) {
             Ok(line) => {
-                heard = now_ms();
+                let now = now_ms();
+                heard = Instant::now();
                 match wire::parse_control(&line) {
                     Ok(Control::Budget(t, b)) if t.contains(s.opts.node) => out.rate = b,
-                    Ok(c) => s.control(c, heard, &mut |e| out.push(e)),
+                    Ok(c) => s.control(c, now, &mut |e| out.push(e)),
                     Err(e) => out.push(&Event::Warn(&e)),
                 }
-                out.send(heard, s.interval(), None)?;
+                out.send(now, s.interval(), None)?;
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return Ok(()),
         }
-        let now = now_ms();
-        if now >= heard.saturating_add(keep) {
+        if heard.elapsed() >= keep {
             return Ok(());
         }
-        if now >= s.next_due() {
+        let now = now_ms();
+        if now >= s.next_due(now) {
             let me = s.tick(now, &mut |e| out.push(e));
             if out.pending.len() > PENDING_CAP {
                 s.storm(now, &mut |e| out.push(e));
@@ -513,9 +512,7 @@ pub fn run(ctl: &Receiver<String>, out: &mut Out, s: &mut Sampler, keep: u64) ->
 /// and the own step is excluded (§3.3, §5.5); otherwise it is `--root` or the whole cgroup2
 /// mount, sampled as node 0 of 1.
 pub fn setup(root: Option<PathBuf>, job: bool, cap: usize) -> Result<(Env, Opts), String> {
-    let mount = Path::new("/sys/fs/cgroup");
-    let me =
-        fs::read_to_string("/proc/self/cgroup").map_err(|e| format!("/proc/self/cgroup: {e}"))?;
+    let (mount, me) = cgroup::self_cgroup()?;
     let var = |k: &str| std::env::var(k).ok().filter(|_| job);
     let explicit = root.is_some();
     let (root, exclude) = match (root, var("SLURM_STEP_ID")) {
@@ -525,20 +522,31 @@ pub fn setup(root: Option<PathBuf>, job: bool, cap: usize) -> Result<(Env, Opts)
     };
     let env = procfs::env("/proc".into(), cgroup::v2_check(mount, &root, &me, explicit)?);
     let num = |k, default| var(k).and_then(|v| v.parse().ok()).unwrap_or(default);
-    let step = var("SLURM_JOB_ID").zip(var("SLURM_STEP_ID")).map(|(j, s)| format!("{j}.{s}"));
-    let step = step.unwrap_or_else(|| "-".into());
+    let step = step_id(&var);
     let (node, ntasks) = (num("SLURM_PROCID", 0), num("SLURM_NTASKS", 1));
     Ok((env, Opts { node, ntasks, step, root, exclude, cap }))
 }
 
+/// Removes `exe` if it is an `srun --bcast` copy (`unjam.…`, D36). A split from `main` for its
+/// test: a copy already gone, for example unlinked by another agent in a shared DIR, counts as
+/// removed instead of stopping the agent.
+fn unlink_copy(exe: &Path) -> Result<(), String> {
+    let copy = exe.file_name().is_some_and(|n| n.as_encoded_bytes().starts_with(b"unjam."));
+    let gone = |e: io::Error| (e.kind() == io::ErrorKind::NotFound).then_some(()).ok_or(e);
+    let res = if copy { fs::remove_file(exe).or_else(gone) } else { Ok(()) };
+    res.map_err(|e| format!("--unlink-self {}: {e}", exe.display()))
+}
+
+/// `JOB.STEP` from the Slurm variables `var` yields, or `-`: the `H` line's step field, which
+/// the recorder writes too.
+pub fn step_id(var: &dyn Fn(&str) -> Option<String>) -> String {
+    var("SLURM_JOB_ID").zip(var("SLURM_STEP_ID")).map_or("-".into(), |(j, s)| format!("{j}.{s}"))
+}
+
 /// `unjam agent`: one sampler on this node, stdin as control, stdout as output. `unlink`
-/// removes an `srun --bcast` copy (`unjam.<job>.<uid>`) of the own binary at start (D36).
+/// removes an `srun --bcast` copy of the own binary at start.
 pub fn main(root: Option<PathBuf>, keepalive: u64, unlink: bool) -> Result<(), String> {
-    let copy =
-        |e: &PathBuf| e.file_name().is_some_and(|n| n.as_encoded_bytes().starts_with(b"unjam."));
-    if let Some(exe) = std::env::current_exe().ok().filter(|e| unlink && copy(e)) {
-        fs::remove_file(&exe).map_err(|e| format!("--unlink-self {}: {e}", exe.display()))?;
-    }
+    std::env::current_exe().ok().filter(|_| unlink).map_or(Ok(()), |e| unlink_copy(&e))?;
     let (env, opts) = setup(root, true, 1024)?;
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || io::stdin().lines().map_while(Result::ok).try_for_each(|l| tx.send(l)));
@@ -580,7 +588,7 @@ pub fn local(opts: tui::Opts, root: Option<PathBuf>, batch: Option<u32>) -> Resu
     });
     let mut app = App::new(opts, ctl);
     app.start(1);
-    tui::view(&mut app, &tx, &rx, batch).map_err(|e| format!("tui: {e}"))
+    tui::view(&mut app, &tx, &rx, batch, &mut io::stdout()).map_err(|e| format!("tui: {e}"))
 }
 
 #[cfg(test)]
@@ -700,7 +708,7 @@ mod tests {
         rule(&mut s, "*\t.\t1000\tc", 0);
         rule(&mut s, "*\tstep_0/user\t500\tp", 0);
         assert_eq!(s.timers.len(), 2);
-        assert_eq!(s.next_due(), 500);
+        assert_eq!(s.next_due(0), 500);
         let half = lines(|e| {
             s.tick(500, e);
         });
@@ -713,7 +721,10 @@ mod tests {
             s.tick(1000, e);
         });
         assert_eq!(count(&full, "g"), 8);
-        assert_eq!(s.next_due(), 1500);
+        assert_eq!(s.next_due(1000), 1500);
+        assert_eq!(s.next_due(400), 500, "a backward clock step re-phases the timers");
+        assert_eq!(s.walked, Some(400), "and the walk time, so the walk is not held off");
+        assert_eq!(count(&lines(|e| _ = s.tick(500, e)), "g"), 3);
         rule(&mut s, "1\t.\t200\tp", 1000);
         assert_eq!(s.timers.len(), 2, "rules for other agents change nothing");
     }
@@ -753,6 +764,40 @@ mod tests {
     }
 
     #[test]
+    fn exec_reannounces_names() {
+        let (mut s, t) = sampler("25.11", "exec");
+        lines(|e| s.snapshot(0, e));
+        rule(&mut s, "*\t.\t1000\tp", 0);
+        lines(|e| _ = s.tick(1000, e));
+        let stat = t.0.join("proc/101/stat");
+        fs::write(&stat, fs::read_to_string(&stat).unwrap().replace("(x) (y)", "(app)")).unwrap();
+        fs::write(t.0.join("proc/101/cmdline"), "./app\0-n\0").unwrap();
+        let exec = lines(|e| _ = s.tick(2000, e));
+        let p: Vec<_> = exec.iter().filter(|l| l.starts_with("P\t101\t5001\t")).collect();
+        assert!(p.len() == 1 && p[0].ends_with("\tapp\t./app -n"), "{exec:?}");
+        assert!(!exec.contains(&"x\t101".to_owned()), "same process: values are kept");
+        let after = lines(|e| _ = s.tick(3000, e));
+        assert_eq!((count(&after, "P"), count(&after, "p")), (0, 3));
+    }
+
+    #[test]
+    fn unreadable_proc_io_warns_once() {
+        let (mut s, t) = sampler("25.11", "denied");
+        lines(|e| s.snapshot(0, e));
+        let io = t.0.join("proc/101/io");
+        fs::remove_file(&io).unwrap();
+        // A write-only sysctl: reading it is denied even to root, like another user's io.
+        std::os::unix::fs::symlink("/proc/sys/vm/drop_caches", &io).unwrap();
+        rule(&mut s, "*\t.\t1000\tp", 0);
+        let first = lines(|e| _ = s.tick(1000, e));
+        let w: Vec<_> = first.iter().filter(|l| l.starts_with("W\t")).collect();
+        assert!(w.len() == 1 && w[0].contains("101/io: permission denied"), "{first:?}");
+        let p101 = first.iter().find(|l| l.starts_with("p\t101\t")).unwrap();
+        assert!(p101.ends_with("\t-\t-"), "{p101}");
+        assert_eq!(count(&lines(|e| _ = s.tick(2000, e)), "W"), 0, "one W per agent");
+    }
+
+    #[test]
     fn missing_controllers_are_na() {
         let (mut s, _t) = sampler("no-controllers", "nocontrollers");
         lines(|e| s.snapshot(0, e));
@@ -765,9 +810,26 @@ mod tests {
         let na: Vec<usize> =
             g[3..].iter().enumerate().filter(|v| *v.1 == "-").map(|v| v.0).collect();
         assert_eq!(na, [5, 9, 10, 11, 12, 13, 14]);
-        let missing =
-            s.cgs.values().flat_map(|c| c.slots.iter()).filter(|s| matches!(s, Slot::Missing));
-        assert_eq!(missing.count(), 6, "absent files are not retried every tick");
+        let missing = |s: &Sampler| {
+            s.cgs
+                .values()
+                .flat_map(|c| c.slots.iter())
+                .filter(|s| matches!(s, Slot::Missing))
+                .count()
+        };
+        assert_eq!(missing(&s), 6);
+        let task = s.opts.root.join("step_0/user/task_1");
+        fs::write(task.join("pids.current"), "7\n").unwrap();
+        let pids = |tick: &[String]| tick[0].split('\t').nth(3 + 11).map(str::to_owned);
+        let again = lines(|e| {
+            s.tick(2000, e);
+        });
+        assert_eq!(pids(&again).as_deref(), Some("-"), "not retried by the next walk");
+        assert_eq!(missing(&s), 6);
+        let later = lines(|e| {
+            s.tick(10_000, e);
+        });
+        assert_eq!(pids(&later).as_deref(), Some("7"), "retried once per OFF_WALK_MS");
     }
 
     #[test]
@@ -810,6 +872,67 @@ mod tests {
         }
         assert_eq!(crate::alloc_count::allocs() - before, 0);
         assert_eq!(s.core.files.open, 8 * 11 + 3 * 2 + 1, "the warm path reads cached fds only");
+        // The discovery walk, which runs on nearly every due tick, is the allocating part.
+        let entries: u64 =
+            s.cgs.values().map(|c| fs::read_dir(&c.dir).unwrap().count() as u64).sum();
+        let before = crate::alloc_count::allocs();
+        s.tick(2000, &mut emit);
+        let walk = crate::alloc_count::allocs() - before;
+        assert!(walk <= 2 * entries, "{walk} allocations for {entries} directory entries");
+    }
+
+    /// A warm sampler over the 25.11 fixture with every cgroup at `level`, ready for `sample`.
+    fn warm(level: &str) -> (Sampler, Tree) {
+        let (mut s, t) = sampler("25.11", &format!("bench-{level}"));
+        lines(|e| s.snapshot(0, e));
+        rule(&mut s, &format!("*\t.\t1000\t{level}"), 0);
+        lines(|e| {
+            s.tick(1000, e);
+        });
+        s.due.clear();
+        s.due.push(1000);
+        (s, t)
+    }
+
+    /// The best mean ns per call of `f` over 40 blocks of 1000 calls.
+    fn best_ns(mut f: impl FnMut()) -> u128 {
+        let mut best = u128::MAX;
+        for _ in 0..40 {
+            let start = std::time::Instant::now();
+            for _ in 0..1000 {
+                f();
+            }
+            best = best.min(start.elapsed().as_nanos() / 1000);
+        }
+        best
+    }
+
+    #[test]
+    #[ignore = "benchmark: mise run bench"]
+    #[allow(clippy::print_stdout, reason = "the numbers are the report docs/perf.md quotes")]
+    fn bench_sample_and_encode() {
+        // Fixture files are plain files, so no rstat flush: this is the agent's own cost.
+        let ((mut c, _tc), (mut p, _tp)) = (warm("c"), warm("p"));
+        let tick = lines(|e| p.sample(e));
+        let (cgs, procs) = (count(&tick, "g"), count(&tick, "p"));
+        let bytes: usize = tick.iter().map(|l| l.len() + 3).sum(); // "0\t" prefix and "\n"
+        let pids: Vec<(u32, u64)> = p.core.procs.iter().map(|(&pid, e)| (pid, e.cg)).collect();
+        assert_eq!(pids.len(), procs, "every process is sampled");
+        let mut buf = Vec::with_capacity(1 << 17);
+        let tick_c = best_ns(|| {
+            buf.clear();
+            c.sample(&mut |e| wire::write(&mut buf, 0, e));
+        });
+        let all_procs = best_ns(|| {
+            buf.clear();
+            for &(pid, cg) in &pids {
+                p.core.sample_proc(pid, cg, &mut |e| wire::write(&mut buf, 0, e));
+            }
+        });
+        println!("bench_sample_and_encode: {cgs} cgroups, {procs} processes (best of 40 x 1000)");
+        println!("  ns/cgroup {} (level c, sample + encode)", tick_c / cgs as u128);
+        println!("  ns/process {} (sample + encode)", all_procs / procs as u128);
+        println!("  bytes/tick {bytes} (level p)");
     }
 
     /// Blocks every write until the test drops the sender, then records what was written.
@@ -869,8 +992,8 @@ mod tests {
             out.send(t * 100, 100, None).unwrap();
             thread::sleep(Duration::from_millis(1));
         }
-        assert!(out.bytes <= 2000 * 10 + 1000, "{} bytes in 10 s at 2000 B/s", out.bytes);
-        assert!(out.bytes >= 2000 * 4, "{} bytes", out.bytes);
+        assert!(out.sent <= 2000 * 10 + 1000, "{} bytes in 10 s at 2000 B/s", out.sent);
+        assert!(out.sent >= 2000 * 4, "{} bytes", out.sent);
         assert!(out.dropped > 50);
         assert_eq!(stagger(3, 4, 1000), 3 * 250 / 4);
         assert_eq!(stagger(999, 1000, 200), 999 * 100 / 1000);
@@ -944,21 +1067,43 @@ mod tests {
         stdout
     }
 
-    /// The TUI side: 64 KiB reads, split at the last newline, `split_node`, `parse`, apply.
+    /// The TUI side: srun stdout through the real reader in short reads, `split_node`, `parse`,
+    /// apply.
     fn demux(stdout: &[u8]) -> State {
-        let mut got = State::new();
-        let (mut rem, mut vals) = (Vec::new(), Vec::new());
-        for piece in stdout.chunks(65_536) {
-            rem.extend_from_slice(piece);
-            let cut = rem.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
-            for line in rem[..cut].split_inclusive(|&b| b == b'\n') {
-                let (node, rest) = wire::split_node(line).unwrap();
-                got.apply(node, &wire::parse(rest, &mut vals).unwrap(), 0).unwrap();
+        let (tx, rx) = mpsc::sync_channel(4);
+        let (mut got, mut vals, mut seen) = (State::new(), Vec::new(), 0);
+        thread::scope(|sc| {
+            sc.spawn(move || crate::slurm::lines(crate::slurm::tests::Trickle(stdout, 3), &tx));
+            for msg in rx {
+                let Msg::Lines(b) = msg else { continue };
+                seen += b.len();
+                for line in b.split_inclusive(|&b| b == b'\n') {
+                    let (node, rest) = wire::split_node(line).unwrap();
+                    got.apply(node, &wire::parse(rest, &mut vals).unwrap(), 0).unwrap();
+                }
             }
-            rem.drain(..cut);
-        }
-        assert!(rem.is_empty());
+        });
+        assert_eq!(seen, stdout.len());
         got
+    }
+
+    #[test]
+    fn unlink_self_removes_only_a_copy_and_tolerates_it_gone() {
+        let dir = std::env::temp_dir().join(format!("unjam-unlink-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let (copy, other) = (dir.join("unjam.42.1000.00000000000000bc"), dir.join("unjam"));
+        for f in [&copy, &other] {
+            fs::write(f, "").unwrap();
+        }
+        unlink_copy(&copy).unwrap();
+        assert!(!copy.exists());
+        // A second agent exec'd the same copy: it is gone, and the agent keeps running.
+        unlink_copy(&copy).unwrap();
+        let deleted = dir.join("unjam.42.1000.00000000000000bc (deleted)");
+        unlink_copy(&deleted).unwrap();
+        unlink_copy(&other).unwrap();
+        assert!(other.exists(), "not a --bcast copy");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -164,6 +164,9 @@ pub struct Node {
     pub lines: u64,
     pub asked: u64,
     dirty: bool,
+    /// Cgroups and processes held at the last `H` and not re-announced since: a resync sends
+    /// only what the agent has, so the next `T` removes these (a lost `X`/`x`, §7.4).
+    stale: (HashSet<u64>, HashSet<u32>),
 }
 
 /// The TUI data store filled by every feed.
@@ -196,6 +199,7 @@ impl State {
             Event::Hello { proto, host, step, btime, .. } => {
                 (n.proto, n.host, n.step, n.btime, n.cmap) =
                     (proto, host.into(), step.into(), btime, Default::default());
+                n.stale = (n.cgs.keys().copied().collect(), n.procs.keys().copied().collect());
             }
             _ if n.proto != crate::wire::PROTO => {}
             Event::Desc { ent, idx, name, unit, kind } => {
@@ -206,16 +210,16 @@ impl State {
             Event::Tick { ts_ms, self_cpu_us, out_bytes, dropped, self_rss } => {
                 n.tick([ts_ms, self_cpu_us, out_bytes], self_rss, now);
                 n.dropped = dropped;
+                let stale = std::mem::take(&mut n.stale);
+                stale.0.into_iter().for_each(|id| n.cg_gone(id));
+                stale.1.into_iter().for_each(|pid| n.unlink(pid));
             }
             Event::Cg { id, parent, path } => n.cg(id, parent, path),
             Event::CgVals { id, first, v } => {
                 let c = n.cgs.get_mut(&id).ok_or(())?;
                 c.vals.line(&n.cmap[0], n.prev[0], first, v, |x| x.get(0, Kind::Counter))?;
             }
-            Event::CgGone(id) => {
-                let parent = n.cgs.remove(&id).map_or(0, |c| c.parent);
-                n.cgs.entry(parent).and_modify(|p| p.kids.retain(|&k| k != id));
-            }
+            Event::CgGone(id) => n.cg_gone(id),
             Event::Proc { .. } => n.proc(ev),
             Event::ProcVals { pid, first, v } => {
                 n.procs.get_mut(&pid).ok_or(())?.vals.line(&n.cmap[1], n.prev[0], first, v, cpu)?;
@@ -275,8 +279,16 @@ impl Node {
         (self.prev, self.seen) = (t, now);
     }
 
-    /// Adds or re-announces a cgroup (resyncs repeat `G` lines; values are kept).
+    /// Adds or re-announces a cgroup (resyncs repeat `G` lines; values are kept). A new parent
+    /// takes it from the old one's kids, and a parent at or below the cgroup itself (only a
+    /// crafted journal) is ignored, so `rows` always walks a tree.
     fn cg(&mut self, id: u64, parent: u64, path: &str) {
+        let mut up = std::iter::successors(Some(parent), |p| Some(self.cgs.get(p)?.parent));
+        if up.any(|p| p == id) {
+            return;
+        }
+        let old = self.cgs.get(&id).map_or(parent, |c| c.parent);
+        self.cgs.entry(old).and_modify(|p| p.kids.retain(|&k| k != id || old == parent));
         if parent == 0 {
             self.root = id;
         } else if let Some(p) = self.cgs.get_mut(&parent).filter(|p| !p.kids.contains(&id)) {
@@ -284,6 +296,13 @@ impl Node {
         }
         let c = self.cgs.entry(id).or_default();
         (c.parent, c.path) = (parent, path.into());
+        self.stale.0.remove(&id);
+    }
+
+    /// Removes a cgroup and its link from its parent (`X`, or not re-announced by a resync).
+    fn cg_gone(&mut self, id: u64) {
+        let parent = self.cgs.remove(&id).map_or(0, |c| c.parent);
+        self.cgs.entry(parent).and_modify(|p| p.kids.retain(|&k| k != id));
     }
 
     /// Adds a process or moves it to its new cgroup; a re-announced process keeps its values.
@@ -293,6 +312,7 @@ impl Node {
         let same = self.procs.get(&pid).filter(|p| p.start == start && p.cg == cg);
         let vals = same.map(|p| p.vals.clone()).unwrap_or_default();
         self.unlink(pid);
+        self.stale.1.remove(&pid);
         self.procs.insert(pid, Proc { start, cg, ppid, comm: comm.into(), cmd: cmd.into(), vals });
         if let Some(c) = self.cgs.get_mut(&cg) {
             c.procs.insert(c.procs.binary_search(&pid).unwrap_or_else(|e| e), pid);
@@ -645,6 +665,34 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore = "benchmark: mise run bench"]
+    #[allow(clippy::print_stdout, reason = "the number is the report docs/perf.md quotes")]
+    fn bench_apply_values() {
+        let mut st = State::new();
+        node(&mut st, 0, "n1", 1);
+        let lines: [&[u8]; 7] = [
+            b"g\t1\t0\t1800000\t4096\n",
+            b"g\t2\t0\t1600000\t2048\n",
+            b"g\t4\t0\t1200000\t1024\n",
+            b"g\t5\t0\t400000\t512\n",
+            b"g\t7\t0\t2000\t8\n",
+            b"p\t100\t0\t1000000\t1000\n",
+            b"p\t101\t0\t200000\t-\n",
+        ];
+        let (mut vals, mut values) = (Vec::new(), 0u128);
+        let start = std::time::Instant::now();
+        for _ in 0..200_000 {
+            for line in lines {
+                let ev = wire::parse(line, &mut vals).unwrap();
+                st.apply(0, &ev, 0).unwrap();
+                values += vals.len() as u128;
+            }
+        }
+        let ps = start.elapsed().as_nanos() * 1000 / values;
+        println!("bench_apply_values: decode + apply {}.{:03} ns/value", ps / 1000, ps % 1000);
+    }
+
     fn view(layout: Layout) -> View {
         let (toggled, filter) = (HashSet::new(), String::new());
         View {
@@ -684,6 +732,25 @@ mod tests {
     fn layouts_of_an_empty_store() {
         for layout in [Layout::Step, Layout::Node, Layout::Flat] {
             assert!(rows(&State::new(), &view(layout), 100).len() <= 1, "{layout:?}");
+        }
+    }
+
+    #[test]
+    fn parent_cycles_are_refused() {
+        for (g, kids) in [
+            (&["G 1 0 ", "G 1 1 a"][..], [(1, vec![])]),
+            (&["G 1 0 ", "G 2 1 a", "G 3 2 a/b", "G 1 3 a/b/c"], [(1, vec![2])]),
+            (&["G 1 0 ", "G 2 1 a", "G 2 0 ", "G 1 2 a"], [(1, vec![])]),
+        ] {
+            let mut st = State::new();
+            feed(&mut st, 0, &DESC[..1]);
+            feed(&mut st, 0, g);
+            for (id, want) in kids {
+                assert_eq!(st.nodes[0].cgs[&id].kids, want, "{g:?}");
+            }
+            for layout in [Layout::Step, Layout::Node, Layout::Flat] {
+                assert!(rows(&st, &view(layout), usize::MAX).len() <= 4, "{g:?}");
+            }
         }
     }
 
@@ -801,6 +868,28 @@ mod tests {
         assert_eq!(rate(Kind::Counter, 1000, NA, 2000), None);
         assert_eq!(rate(Kind::Gauge, 7, NA, 0), Some(7.0));
         assert_eq!(rate(Kind::Gauge, NA, 1, 1), None);
+    }
+
+    #[test]
+    fn resync_drops_what_the_agent_no_longer_announces() {
+        // A lost `X 6` and `x 101`: the resync's H, D, G and P lines no longer list them.
+        let mut st = State::new();
+        node(&mut st, 0, "n1", 1);
+        let live = ["G 1 0 ", "G 2 1 step_0", "G 3 2 step_0/user", "G 4 3 step_0/user/task_0"];
+        feed(&mut st, 0, &[&["H 1 0.1 n1 42.0 1 0"], &DESC[1..], &live[..]].concat());
+        feed(&mut st, 0, &["G 5 3 step_0/user/task_10", "G 7 1 step_batch"]);
+        feed(&mut st, 0, &["P 100 1 4 1 a.out ./a.out~-n~4"]);
+        assert_eq!((st.nodes[0].cgs.len(), st.nodes[0].procs.len()), (7, 2), "kept until T");
+        feed(&mut st, 0, &["T 3000 0 0 0 -"]);
+        let n = &st.nodes[0];
+        assert!(!n.cgs.contains_key(&6) && n.cgs[&3].kids == [4, 5], "{:?}", n.cgs[&3].kids);
+        assert_eq!(
+            (n.procs.keys().collect::<Vec<_>>(), &n.cgs[&4].procs),
+            (vec![&100], &vec![100])
+        );
+        assert_eq!(n.procs[&100].vals.v[0], 500_000, "re-announced: values kept");
+        feed(&mut st, 0, &["T 4000 0 0 0 -"]);
+        assert_eq!(st.nodes[0].cgs.len(), 6, "only the T after H sweeps");
     }
 
     #[test]

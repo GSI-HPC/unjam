@@ -32,18 +32,18 @@ pub struct Theme {
 pub struct Glyphs {
     pub open: &'static str,
     pub closed: &'static str,
-    /// Process tree guides: middle child, last child, continuation.
-    pub guide: [&'static str; 3],
+    /// Process tree guides: middle child, last child.
+    pub guide: [&'static str; 2],
     /// Bar levels from empty (no or zero samples) to full, for history bars and the heat strip.
-    pub bars: [char; 9],
+    pub bars: [&'static str; 9],
 }
 
 /// Unicode tree and bar glyphs shared by most themes.
 const UNI: Glyphs = Glyphs {
     open: "▾ ",
     closed: "▸ ",
-    guide: ["├ ", "└ ", "│ "],
-    bars: ['·', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'],
+    guide: ["├ ", "└ "],
+    bars: ["·", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"],
 };
 
 /// Shorthand for a 24-bit colour, keeps the table readable.
@@ -118,7 +118,7 @@ pub const THEMES: &[Theme] = &[
         "amber",
         [0x140C00, 0x2A1C00, 0x3A2700, 0xFFB000, 0x8A5F00, 0xFFC233, 0xFFE08A],
         [0x8A5F00, 0xC48800, 0xFFB000, 0xFFE08A],
-        Glyphs { bars: ['.', '#', '#', '#', '#', '#', '#', '#', '#'], ..UNI },
+        Glyphs { bars: [".", "#", "#", "#", "#", "#", "#", "#", "#"], ..UNI },
     ),
     Theme {
         name: "mono",

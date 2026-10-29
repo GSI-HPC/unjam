@@ -37,10 +37,11 @@ Keys: `↑↓` move, `←→` fold, `v` layout (step, node, flat), `s` sort, `/`
   and takes none away. Sites whose `job_submit` or `cli_filter` plugins, SPANK plugins or
   `MaxStepCount` restrict steps must allow one extra overlap step per viewer; `--srun-arg`
   passes further srun options.
-- **No shared filesystem.** `--bcast` copies the binary to `/tmp/unjam.<J>.<uid>` on each node,
-  and the agent removes the copy when it starts. Where `/tmp` is mounted `noexec`, name another
-  directory: `--bcast=/var/tmp`. Static binaries for x86_64 and aarch64 are
-  attached to each [GitHub release](https://github.com/GSI-HPC/unjam/releases).
+- **No shared filesystem.** `--bcast` copies the binary to `/tmp/unjam.<J>.<uid>.<random>` on
+  each node, and the agent removes the copy when it starts. Where `/tmp` is mounted `noexec`,
+  name another directory: `--bcast=/var/tmp`. `--bcast` refuses another user's job, whose
+  owner may control the directory; use `--agent` there. Static binaries for x86_64 and aarch64
+  are attached to each [GitHub release](https://github.com/GSI-HPC/unjam/releases).
 
 ## Recording
 
@@ -58,6 +59,7 @@ In the TUI, `r` (or `--record DIR` with `--slurm`) records what the viewer recei
 `unjam --replay FILE...` shows recordings on one shared timeline. Keys: `space` play/pause,
 `,` `.` one tick, `<` `>` 60 s, `g` `G` start/end. `--at TIME` starts at `start`, `end`,
 `+DUR`, `-DUR` or `HH:MM[:SS]` (UTC); with `--batch N` it prints N snapshots from there.
+Replay only files you trust: a crafted journal can make the Arrow decoder abort unjam.
 
 Columns: `ts`, `kind` (1 = cgroup, 2 = process), `cg`, `pid`, `start`, `ppid`, `path`, `comm`,
 `cmdline`, and one `UInt64` column per metric (such as `cg_cpu_usage_usec` or `p_rss_bytes`)

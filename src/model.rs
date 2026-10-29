@@ -31,6 +31,11 @@ pub struct Metric {
     pub kind: Kind,
 }
 
+/// Builds a `Metric` in a `const` table; one helper for every source's descriptor table.
+pub const fn metric(name: &'static str, unit: &'static str, kind: Kind) -> Metric {
+    Metric { name, unit, kind }
+}
+
 /// The single interchange type between sampler, wire, record, replay and state. It borrows its
 /// data, so producing and consuming one allocates nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,8 +145,7 @@ impl Rule {
             ("-", _) => return Err("interval - needs level o".to_owned()),
             (_, What::Off) => return Err("level o takes interval -".to_owned()),
             (n, _) => {
-                let n: u32 = n.parse().map_err(|_| format!("bad interval: {n:?}"))?;
-                (n.saturating_add(50) / 100 * 100).clamp(100, 60_000)
+                interval_ms(n.parse::<u32>().map_err(|_| format!("bad interval: {n:?}"))?.into())
             }
         };
         if pattern.is_empty() || pattern.split('/').any(str::is_empty) {
@@ -213,6 +217,12 @@ pub fn upsert(rules: &mut Vec<Rule>, r: Rule) {
     }
 }
 
+/// Rounds a requested interval to the nearest 100 ms within 100 ms..=60 s (§6.1), the one rule
+/// for `--interval`, `--rule`, `record --interval` and the `+`/`-` keys.
+pub fn interval_ms(ms: u128) -> u32 {
+    u32::try_from(ms.saturating_add(50) / 100 * 100).unwrap_or(u32::MAX).clamp(100, 60_000)
+}
+
 /// Wall-clock phase alignment: the next multiple of `interval_ms` strictly after `now_ms`, so a
 /// tick on an exact multiple schedules the following one (§6.1).
 pub fn next_due(now_ms: u64, interval_ms: u32) -> u64 {
@@ -257,6 +267,15 @@ mod tests {
         assert_eq!(rule("*\t.\t1050\tc").interval_ms, 1100);
         assert_eq!(rule("*\t.\t1\tc").interval_ms, 100);
         assert_eq!(rule("*\t.\t999999\tc").interval_ms, 60_000);
+    }
+
+    #[test]
+    fn interval_rounds_to_nearest_like_a_rule() {
+        // `--interval 150ms` and `--interval 1999ms` used to round down, unlike the same rule.
+        for (ms, want) in [(0, 100), (149, 100), (150, 200), (1999, 2000), (u128::MAX, 60_000)] {
+            assert_eq!(interval_ms(ms), want, "{ms}");
+        }
+        assert_eq!(rule("*\t.\t150\tc").interval_ms, interval_ms(150));
         for bad in [
             "*\t.\t-\tp",
             "*\t.\t500\to",

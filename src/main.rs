@@ -152,12 +152,8 @@ fn parse_dur(s: &str) -> Result<Duration, String> {
 
 /// `4M`, `512K`, `1G` or plain bytes, for `--budget`.
 fn parse_size(s: &str) -> Result<u64, String> {
-    let (num, shift) = match s.as_bytes().last() {
-        Some(b'K') => (&s[..s.len() - 1], 10),
-        Some(b'M') => (&s[..s.len() - 1], 20),
-        Some(b'G') => (&s[..s.len() - 1], 30),
-        _ => (s, 0),
-    };
+    let num = s.strip_suffix(['K', 'M', 'G']).unwrap_or(s);
+    let shift = 10 * ["", "K", "M", "G"].iter().position(|&u| u == &s[num.len()..]).unwrap_or(0);
     num.parse::<u64>().map(|n| n << shift).map_err(|_| format!("bad size: {s:?}"))
 }
 
@@ -167,8 +163,7 @@ fn viewer(cli: Cli) -> Result<(), String> {
     let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
     let theme = theme::pick(cli.theme.as_deref(), env("UNJAM_THEME").as_deref(), no_color)?;
     let default = Duration::from_secs(if cli.slurm.is_some() { 2 } else { 1 });
-    let iv = cli.interval.unwrap_or(default).as_millis();
-    let interval_ms = u32::try_from(iv).unwrap_or(u32::MAX).clamp(100, 60_000) / 100 * 100;
+    let interval_ms = model::interval_ms(cli.interval.unwrap_or(default).as_millis());
     let (source, local) = ("unjam".into(), cli.slurm.is_none() && cli.replay.is_empty());
     let opts = tui::Opts { source, interval_ms, rules: cli.rules, theme, local };
     match &cli.slurm {
@@ -311,5 +306,7 @@ mod tests {
         assert!(parse("agent --batch 1").is_err());
         assert_eq!(parse_size("4M"), Ok(4 << 20));
         assert!(parse_size("4X").is_err());
+        assert_eq!((parse_size("2G"), parse_size("512")), (Ok(2 << 30), Ok(512)));
+        assert!(parse_size("4KK").is_err() && parse_size("K").is_err());
     }
 }

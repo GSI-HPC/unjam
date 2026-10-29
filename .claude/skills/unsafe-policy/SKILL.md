@@ -24,7 +24,7 @@ description: Use whenever code would need `unsafe`, an FFI binding, raw syscalls
 - Never call `unsafe fn` escape hatches in deps (e.g. arrow-ipc `with_skip_validation`).
 
 ## Check
-    cargo test --locked --test budget      # allow(unsafe_code) count == "Our code" entries in docs/unsafe.md
+    cargo test --locked --test budget      # allow/expect(unsafe_code) sites == "Our code" entries in docs/unsafe.md
     mise run unsafe-deps                   # every in-tree crate with unsafe has a dependency row, no stale rows
     grep -rn "unsafe" src/                 # every hit is under a ledgered allow
 For dependency bumps: refresh the crate's row in docs/unsafe.md (see lean-deps step 6).

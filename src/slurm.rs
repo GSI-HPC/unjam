@@ -5,6 +5,7 @@
 //! with its reader and control threads, and the staged teardown (§3.2, §3.3, D43).
 
 use std::ffi::OsString;
+use std::hash::{BuildHasher, RandomState};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
@@ -20,11 +21,13 @@ use crate::tui::{self, App, Msg, Opts};
 /// Idle time after which the control thread sends `K`, well inside the agents' keepalive.
 const KEEPALIVE: Duration = Duration::from_secs(30);
 
-/// The squeue/scontrol result the srun line needs: the numeric job id and the agent count.
+/// The squeue/scontrol result the srun line needs: the numeric job id, the agent count and the
+/// owner's uid.
 #[derive(Debug)]
 pub struct Job {
     pub id: String,
     pub nodes: u32,
+    pub owner: u32,
 }
 
 /// Runs a Slurm command and returns its stdout; its stderr goes to ours.
@@ -37,63 +40,76 @@ fn run(cmd: &str, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// `squeue` rows as (job id, node count, state, name); array tasks resolve to the real id.
-fn squeue(args: &[&str]) -> Result<Vec<(String, u32, String, String)>, String> {
-    let text = run("squeue", &[&["--noheader", "--format=%A %D %T %j"], args].concat())?;
+/// A `squeue` row: job id, node count, state, owner uid and name.
+type Row = (String, u32, String, u32, String);
+
+/// `squeue` rows; array tasks resolve to the real id.
+fn squeue(args: &[&str]) -> Result<Vec<Row>, String> {
+    let text = run("squeue", &[&["--noheader", "--format=%A %D %T %U %j"], args].concat())?;
     let row = |l: &str| {
-        let mut f = l.splitn(4, ' ');
+        let mut f = l.splitn(5, ' ');
         let (id, n, state) = (f.next()?.into(), f.next()?.parse().ok()?, f.next()?.into());
-        Some((id, n, state, f.next().unwrap_or("").into()))
+        Some((id, n, state, f.next()?.parse().ok()?, f.next().unwrap_or("").into()))
     };
     Ok(text.lines().filter_map(row).collect())
 }
 
-/// D43 job resolution: the `--slurm` value, else `$SLURM_JOB_ID`, else the only running job
-/// of `squeue --me`; otherwise lists the running jobs and exits 2 (no terminal is set up yet).
-fn resolve(arg: &str) -> Result<String, String> {
-    if let Some(id) = Some(arg.to_owned()).filter(|a| !a.is_empty()) {
-        return Ok(id);
-    }
-    if let Some(id) = std::env::var("SLURM_JOB_ID").ok().filter(|j| !j.is_empty()) {
-        return Ok(id);
-    }
-    let mine = squeue(&["--me", "--states=RUNNING"])?;
-    if let [(id, ..)] = &mine[..] {
-        return Ok(id.clone());
-    }
+/// The running row with id `want`, else the only running row. `Err` holds the running rows
+/// when none or several fit: an array job id lists every task plus the pending rest.
+fn running(mut rows: Vec<Row>, want: &str) -> Result<Row, Vec<Row>> {
+    rows.retain(|r| r.2 == "RUNNING");
+    let i = rows.iter().position(|r| r.0 == want).or((rows.len() == 1).then_some(0));
+    i.map(|i| rows.swap_remove(i)).ok_or(rows)
+}
+
+/// Lists the running jobs `rows` and exits 2 (no terminal is set up yet): `what` names no
+/// single one (D43).
+fn pick(rows: &[Row], what: &str) -> ! {
     let mut e = io::stderr().lock();
-    let _ = writeln!(e, "unjam: {} running jobs of yours; pick one with --slurm=JOBID", mine.len());
-    for (id, n, _, name) in &mine {
+    let _ = writeln!(e, "unjam: {} running jobs {what}; pick one with --slurm=JOBID", rows.len());
+    for (id, n, .., name) in rows {
         let _ = writeln!(e, "  {id:>10}  {n:>5} nodes  {name}");
     }
     std::process::exit(2)
 }
 
-/// The job to attach to; it must be running. `--nodelist` sets the agent count (§3.2).
-pub fn job(arg: &str, nodelist: Option<&str>) -> Result<Job, String> {
-    let id = resolve(arg)?;
-    let found = squeue(&[&format!("--jobs={id}")])?.into_iter().next();
-    let (id, nodes, state, _) = found.ok_or_else(|| format!("job {id} not found"))?;
-    if state != "RUNNING" {
-        return Err(format!("job {id} is {state}, not RUNNING"));
+/// D43 job resolution: the `--slurm` value, else `$SLURM_JOB_ID`, else the only running job
+/// of `squeue --me`.
+fn resolve(arg: &str) -> Result<String, String> {
+    let env = || std::env::var("SLURM_JOB_ID").ok().filter(|j| !j.is_empty());
+    if let Some(id) = Some(arg.to_owned()).filter(|a| !a.is_empty()).or_else(env) {
+        return Ok(id);
     }
-    let Some(list) = nodelist else { return Ok(Job { id, nodes }) };
+    let mine = squeue(&["--me", "--states=RUNNING"])?;
+    Ok(running(mine, "").unwrap_or_else(|rows| pick(&rows, "of yours")).0)
+}
+
+/// The job to attach to; it must be running. An array job id with several running tasks lists
+/// them like [`resolve`]. `--nodelist` sets the agent count (§3.2).
+pub fn job(arg: &str, nodelist: Option<&str>) -> Result<Job, String> {
+    let want = resolve(arg)?;
+    let rows = squeue(&[&format!("--jobs={want}")])?;
+    let state = rows.first().map(|r| r.2.clone()).ok_or_else(|| format!("job {want} not found"))?;
+    let (id, nodes, _, owner, _) = running(rows, &want).or_else(|r| match r.len() {
+        0 => Err(format!("job {want} is {state}, not RUNNING")),
+        _ => pick(&r, &format!("in array {want}")),
+    })?;
+    let Some(list) = nodelist else { return Ok(Job { id, nodes, owner }) };
     let n = run("scontrol", &["show", "hostnames", list])?.lines().count();
-    Ok(Job { id, nodes: u32::try_from(n).unwrap_or(u32::MAX) })
+    Ok(Job { id, nodes: u32::try_from(n).unwrap_or(u32::MAX), owner })
 }
 
 /// The srun argv, `srun` first (§3.2). With `--bcast` srun copies the agent to
-/// `DIR/unjam.<job>.<uid>`, and the copy removes itself at start (D36).
-pub fn srun_args(job: &Job, a: &SlurmArgs, exe: PathBuf, uid: u32) -> Vec<OsString> {
+/// `DIR/unjam.<job>.<uid>.<nonce>`, and the copy removes itself at start (D36).
+pub fn srun_args(job: &Job, a: &SlurmArgs, exe: PathBuf, uid: u32, nonce: u64) -> Vec<OsString> {
     let (id, n) = (&job.id, job.nodes);
     let mut v: Vec<String> = vec!["srun".into(), format!("--jobid={id}"), "--overlap".into()];
     v.extend([format!("--nodes={n}"), format!("--ntasks={n}"), "--ntasks-per-node=1".into()]);
     v.extend(a.nodelist.as_ref().map(|l| format!("--nodelist={l}")));
     let fixed = ["--cpu-bind=none", "--mpi=none", "--input=all", "--quiet", "--kill-on-bad-exit=0"];
     v.extend(fixed.iter().chain(&["--wait=0", "--job-name=unjam", "--chdir=/"]).map(|&s| s.into()));
-    v.extend(
-        a.bcast.as_ref().map(|d| format!("--bcast={}/unjam.{id}.{uid}", d.trim_end_matches('/'))),
-    );
+    let dir = a.bcast.as_ref().map(|d| d.trim_end_matches('/'));
+    v.extend(dir.map(|d| format!("--bcast={d}/unjam.{id}.{uid}.{nonce:016x}")));
     v.extend(a.srun_arg.iter().cloned());
     let mut v: Vec<OsString> = v.into_iter().map(Into::into).collect();
     v.extend([a.agent.clone().unwrap_or(exe).into(), "agent".into()]);
@@ -137,21 +153,17 @@ pub fn spawn(argv: &[OsString], tx: &SyncSender<Msg>, ctl: Receiver<String>) -> 
 /// Forwards control lines to srun, which broadcasts them to every agent, and sends `K` when
 /// idle. Returns once the viewer drops its sender: closing stdin is teardown step 1.
 fn control(mut w: ChildStdin, ctl: &Receiver<String>) {
-    loop {
-        let line = match ctl.recv_timeout(KEEPALIVE) {
-            Ok(l) => l,
-            Err(RecvTimeoutError::Timeout) => "K\n".into(),
-            Err(RecvTimeoutError::Disconnected) => return,
-        };
-        if w.write_all(line.as_bytes()).is_err() {
-            return;
-        }
-    }
+    let next = || match ctl.recv_timeout(KEEPALIVE) {
+        Err(RecvTimeoutError::Timeout) => Some("K\n".into()),
+        r => r.ok(),
+    };
+    let _ = std::iter::from_fn(next).try_for_each(|l: String| w.write_all(l.as_bytes()));
 }
 
 /// The stdout reader (§7.3): whole lines in chunks of up to 64 KiB, `Msg::End` at EOF. A
-/// "line" that fills the whole buffer is junk and dropped.
-fn lines(mut r: impl Read, tx: &SyncSender<Msg>) {
+/// "line" that fills the whole buffer is junk: its first 64 KiB are dropped, and its tail
+/// arrives as a line of its own that fails to decode. Agents never write such lines.
+pub fn lines(mut r: impl Read, tx: &SyncSender<Msg>) {
     let (mut buf, mut keep) = (vec![0; 1 << 16], 0);
     while let Ok(n @ 1..) = r.read(&mut buf[keep..]) {
         let end = keep + n;
@@ -170,14 +182,11 @@ impl Remote {
     /// agents' step, wait 3 s more, then SIGKILL.
     pub fn stop(mut self, step: Option<&str>) {
         let mut gone = |ms: u64| {
-            let t = Instant::now();
-            while t.elapsed() < Duration::from_millis(ms) {
-                if !matches!(self.0.try_wait(), Ok(None)) {
-                    return true;
-                }
+            let end = Instant::now() + Duration::from_millis(ms);
+            while matches!(self.0.try_wait(), Ok(None)) && Instant::now() < end {
                 thread::sleep(Duration::from_millis(50));
             }
-            false
+            !matches!(self.0.try_wait(), Ok(None))
         };
         if gone(3000) {
             return;
@@ -197,7 +206,15 @@ impl Remote {
 pub fn view(arg: &str, a: &SlurmArgs, opts: Opts, batch: Option<u32>) -> Result<(), String> {
     let job = job(arg, a.nodelist.as_deref())?;
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
-    let argv = srun_args(&job, a, exe, fs::metadata("/proc/self").map_or(0, |m| m.uid()));
+    // srun opens the copy with O_TRUNC, not O_EXCL: a name other users cannot guess keeps them
+    // from planting the file. RandomState's keys come from the OS random source.
+    let nonce = RandomState::new().hash_one(job.id.as_str());
+    let uid = fs::metadata("/proc/self").map_or(0, |m| m.uid());
+    // A job-private /tmp (job_container/tmpfs) belongs to the job's owner, who could swap the copy.
+    if a.bcast.is_some() && job.owner != uid {
+        return Err(format!("--bcast: job owner {} could swap the copy; use --agent", job.owner));
+    }
+    let argv = srun_args(&job, a, exe, uid, nonce);
     if a.print_srun {
         let line: Vec<_> = argv.iter().map(|s| s.to_string_lossy()).collect();
         return writeln!(io::stdout(), "{}", line.join(" ")).map_err(|e| e.to_string());
@@ -212,22 +229,20 @@ pub fn view(arg: &str, a: &SlurmArgs, opts: Opts, batch: Option<u32>) -> Result<
         app.record();
     }
     drop(ctl);
-    let res = tui::view(&mut app, &tx, &rx, batch);
+    let res = tui::view(&mut app, &tx, &rx, batch, &mut io::stdout());
     let step = app.st.nodes.iter().find(|n| n.step.contains('.')).map(|n| n.step.clone());
-    let failed = app.st.nodes.is_empty().then(|| app.log.iter().rev().cloned().collect::<Vec<_>>());
+    let log = || app.log.iter().rev().cloned().collect::<Vec<_>>().join("\n");
+    let failed = app.st.nodes.is_empty().then(log);
     drop(app);
     // Keep the readers reading srun's pipes, so srun can forward stdin EOF and exit (§3.3).
     thread::spawn(move || rx.into_iter().for_each(drop));
     remote.stop(step.as_deref());
     res.map_err(|e| format!("tui: {e}"))?;
-    match failed {
-        Some(tail) => Err(format!("no agent reported; srun said:\n{}", tail.join("\n"))),
-        None => Ok(()),
-    }
+    failed.map_or(Ok(()), |tail| Err(format!("no agent reported; srun said:\n{tail}")))
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use clap::Parser;
 
     use super::*;
@@ -237,8 +252,8 @@ mod tests {
     fn argv(flags: &str, nodes: u32) -> String {
         let cli = Cli::try_parse_from(["unjam", "--slurm=42"].into_iter().chain(flags.split(' ')))
             .unwrap();
-        let job = Job { id: "42".into(), nodes };
-        let v = srun_args(&job, &cli.srun, "/opt/unjam".into(), 1000);
+        let job = Job { id: "42".into(), nodes, owner: 1000 };
+        let v = srun_args(&job, &cli.srun, "/opt/unjam".into(), 1000, 0xbc);
         v.iter().map(|s| s.to_string_lossy()).collect::<Vec<_>>().join(" ")
     }
 
@@ -261,10 +276,38 @@ mod tests {
             argv("--agent-keepalive 5", 3),
             format!("{} {fixed} /opt/unjam agent --keepalive 5", base(3))
         );
-        let bcast = "--bcast=/tmp/unjam.42.1000 /opt/unjam agent --unlink-self";
+        let bcast = "--bcast=/tmp/unjam.42.1000.00000000000000bc /opt/unjam agent --unlink-self";
         assert_eq!(argv("--bcast", 3), format!("{} {fixed} {bcast}", base(3)));
-        let bcast = "--bcast=/var/tmp/unjam.42.1000 /opt/unjam agent --unlink-self";
+        let bcast =
+            "--bcast=/var/tmp/unjam.42.1000.00000000000000bc /opt/unjam agent --unlink-self";
         assert_eq!(argv("--bcast=/var/tmp/", 3), format!("{} {fixed} {bcast}", base(3)));
+    }
+
+    /// A `squeue` row for the tests.
+    fn row(id: &str, state: &str) -> Row {
+        (id.into(), 2, state.into(), 1000, "job".into())
+    }
+
+    #[test]
+    fn array_job_id_resolves_to_its_running_task() {
+        // `squeue --jobs=1234` for `--array=1-4%2`: the pending rest keeps the array id and sorts
+        // first, the running tasks have their own ids.
+        let ids = |r: Result<Row, Vec<Row>>| r.map_err(|v| v.into_iter().map(|r| r.0).collect());
+        let pending = row("1234", "PENDING");
+        let two = vec![pending.clone(), row("1235", "RUNNING"), row("1236", "RUNNING")];
+        assert_eq!(
+            ids(running(two.clone(), "1234")),
+            Err::<Row, Vec<_>>(vec!["1235".into(), "1236".into()])
+        );
+        assert_eq!(ids(running(two[..2].to_vec(), "1234")), Ok(row("1235", "RUNNING")));
+        assert_eq!(ids(running(vec![pending], "1234")), Err(vec![]));
+        // Once every task runs, the last one started carries the array id.
+        let all = vec![row("1235", "RUNNING"), row("1234", "RUNNING"), row("1236", "RUNNING")];
+        assert_eq!(ids(running(all, "1234")), Ok(row("1234", "RUNNING")));
+        assert_eq!(
+            ids(running(vec![row("1240", "RUNNING")], "1234_6")),
+            Ok(row("1240", "RUNNING"))
+        );
     }
 
     #[test]
@@ -275,5 +318,52 @@ mod tests {
         lines(&data[..], &tx);
         let got: Vec<_> = rx.try_iter().collect();
         assert!(matches!(&got[..], [Msg::Lines(b), Msg::End] if b == b"0\tT 1\n1\tT 2\n"));
+    }
+
+    /// Serves a byte string in reads of 1 to 70,000 bytes, so lines straddle reads and the
+    /// reader's 64 KiB buffer, as on a busy srun pipe.
+    pub(crate) struct Trickle<'a>(pub &'a [u8], pub u64);
+
+    impl Read for Trickle<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.1 = self
+                .1
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let n = usize::try_from(self.1 >> 33).unwrap() % 70_000 + 1;
+            let (head, rest) = self.0.split_at(n.min(buf.len()).min(self.0.len()));
+            buf[..head.len()].copy_from_slice(head);
+            self.0 = rest;
+            Ok(head.len())
+        }
+    }
+
+    /// Runs the reader over `r` and returns the chunks it sent, checking that `Msg::End` comes last.
+    fn chunks(r: impl Read) -> Vec<Vec<u8>> {
+        let (tx, rx) = mpsc::sync_channel(1 << 12);
+        lines(r, &tx);
+        let mut got: Vec<_> = rx.try_iter().collect();
+        assert!(matches!(got.pop(), Some(Msg::End)));
+        got.into_iter()
+            .map(|m| if let Msg::Lines(b) = m { b } else { panic!("not Lines") })
+            .collect()
+    }
+
+    #[test]
+    fn reader_carries_partial_lines_across_short_reads() {
+        let line = |i: usize| format!("{}\tT {i}{}\n", i % 1000, "x".repeat(i % 997));
+        let data: Vec<u8> = (0..4000).flat_map(|i| line(i).into_bytes()).collect();
+        let got = chunks(Trickle(&data, 7));
+        assert!(got.len() > 30 && got.iter().all(|c| c.ends_with(b"\n")));
+        assert!(got.concat() == data, "every line arrives whole and in order");
+    }
+
+    #[test]
+    fn reader_drops_the_head_of_an_overlong_line() {
+        let mut data = b"a\n".to_vec();
+        data.extend(vec![b'x'; (1 << 16) + 10]);
+        data.extend(b"\nb\n");
+        let got = chunks(&data[..]);
+        assert_eq!(got, [b"a\n".to_vec(), b"xxxxxxxxxx\nb\n".to_vec()]);
     }
 }

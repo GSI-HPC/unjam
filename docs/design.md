@@ -65,12 +65,12 @@ This is the living design of the repository. It started as the reviewed round-on
 - **Input thread (D38).** In every viewer mode a dedicated thread blocks in `crossterm::event::read()` and queues `Msg::Key` and `Msg::Resize` on an unbounded key queue, then wakes the main thread through the channel it blocks on (§7.3). `q` (outside filter editing) and Ctrl-C set the quit flag in the input thread itself.
 - `--rule` takes the text of a control-protocol `R` line (§6.2) **without** the leading `R\t`, for example `--rule $'*\t.\t1000\tp'`. It replaces the default rules. It is the hook the integration tests use.
 - `--agent-keepalive SECS` (hidden, for tests) is forwarded to every agent as `--keepalive SECS`. The `srun_args` golden tests cover it.
-- `--batch N` prints N text snapshots (`top -b`) using `state::rows` and exits. It replaces capture-and-assert scripts in the sind tests. Its footer reports `nodes=… stale=… errors=… dropped=…`.
+- `--batch N` prints N text snapshots (`top -b`) using `state::rows` and exits. It replaces capture-and-assert scripts in the sind tests. Its footer reports `nodes=… stale=… errors=… dropped=…`. Names from agents and journals reach the terminal unfiltered here, so every control character (ESC, DEL, C1) except the line breaks is printed as `?`.
 - There is no async runtime: std threads plus `std::sync::mpsc` only (ADR D3).
 
 ### 3.2 Attach: launch sequence and exact srun line
 
-1. Resolve the job (§3.1). Then `squeue --noheader --jobs=<J> --format="%A %D %T"` gives the numeric job id (array tasks resolve to the real id), the node count N and the state. If the state is not `RUNNING`, unjam exits 1 with that message.
+1. Resolve the job (§3.1). Then `squeue --noheader --jobs=<J> --format="%A %D %T %U %j"` gives the numeric job id (array tasks resolve to the real id), the node count N, the state and the owner's uid of every matching row. An array job id (the id `sbatch` prints) lists every task plus the pending rest, which keeps the array id and sorts first (squeue sorts states as strings). unjam therefore takes the `RUNNING` row whose id is `<J>`, else the only `RUNNING` row; several `RUNNING` rows are listed like the jobs of §3.1 and unjam exits 2. With no `RUNNING` row, unjam exits 1 with the first row's state.
 2. With `--nodelist LIST`, N becomes the line count of `scontrol show hostnames LIST`.
 3. The TUI spawns srun with `Command::process_group(0)`, so terminal SIGINT and SIGTSTP never reach it. stdin, stdout and stderr are piped. The child environment is cleared of every `SLURM_*` and `SRUN_*` variable except `SLURM_CONF`, so input variables inherited from an enclosing `salloc` cannot add options we did not pass. This uses `Command::env_remove` on the child only, because `std::env::remove_var` is `unsafe` in edition 2024.
 
@@ -81,7 +81,7 @@ srun --jobid=<J> --overlap \
      --input=all --quiet \
      --kill-on-bad-exit=0 --wait=0 \
      --job-name=unjam --chdir=/ \
-     [--bcast=<DIR>/unjam.<J>.<uid>] \
+     [--bcast=<DIR>/unjam.<J>.<uid>.<nonce>] \
      [<--srun-arg values>…] \
      <AGENT> agent [--keepalive <SECS>] [--unlink-self]
 ```
@@ -101,12 +101,12 @@ srun --jobid=<J> --overlap \
 | `--job-name=unjam` | Makes the step identifiable in `squeue -s` and `sacct` |
 | `--chdir=/` | The TUI's working directory may not exist on compute nodes |
 | **not** `-u/--unbuffered`, `--pty` | Both run tasks under a pty, which turns off `LAUNCH_BUFFERED_IO`, the line buffering §7 relies on, and adds CRLF translation |
-| `--bcast=<DIR>/unjam.<J>.<uid>` | Only with `--bcast[=DIR]` (DIR defaults to `/tmp`): srun copies `<AGENT>` to every node. The path is explicit because srun(1) 25.11 says `--bcast` without a path defaults to the `--chdir` directory, which is `/` here; job id and uid keep concurrent viewers apart |
+| `--bcast=<DIR>/unjam.<J>.<uid>.<nonce>` | Only with `--bcast[=DIR]` (DIR defaults to `/tmp`): srun copies `<AGENT>` to every node. The path is explicit because srun(1) 25.11 says `--bcast` without a path defaults to the `--chdir` directory, which is `/` here. The nonce is 64 bits (16 hex digits) from std's `RandomState`, whose keys come from the OS random source; no file is read. It keeps concurrent viewers apart, even two of one user on one job, and keeps other users from guessing the name: srun always sets `BCAST_FLAG_FORCE`, so slurmd opens the destination with `O_CREAT|O_TRUNC`, not `O_EXCL`, and would write into, then exec, a file another user pre-created in a sticky `/tmp`. The nonce shows in srun's argv on the submit host only. `--bcast` into a job of another user (root or an operator attaching; `%U` of the squeue query in step 1 is the owner's uid) exits 1 and points to `--agent`: with `job_container/tmpfs` the job's `/tmp` belongs to its owner, who could replace the copy before srun execs it |
 | **not** `--label` | Lines carry their own node index (ADR D6) |
 
 - `<AGENT>` defaults to `std::env::current_exe()`, which assumes a shared filesystem. `--agent PATH` overrides it.
 - `--print-srun` prints the argv and exits. A golden unit test pins `slurm::srun_args`.
-- **Sites without a shared filesystem (D36 revised).** `--bcast[=DIR]` adds `--bcast=<DIR>/unjam.<J>.<uid>` (DIR defaults to `/tmp`) to the srun line and `--unlink-self` to the agent command. The agent removes its copy right after it starts (`std::fs::remove_file` on `current_exe()`; the running image stays mapped), so nothing is left on the nodes, even after a crash. About 30 LOC; IT 8 covers it. The static musl release binaries (§18) make the copy independent of the compute nodes' glibc. DIR must allow executables: sind (and sites that harden `/tmp`) mount `/tmp` `noexec`, where execve of the copy fails with "Permission denied" and the copy stays behind; IT 8 therefore uses `--bcast=/var/tmp`.
+- **Sites without a shared filesystem (D36 revised).** `--bcast[=DIR]` adds `--bcast=<DIR>/unjam.<J>.<uid>.<nonce>` (DIR defaults to `/tmp`) to the srun line and `--unlink-self` to the agent command. The agent removes its copy right after it starts (`std::fs::remove_file` on `current_exe()`; the running image stays mapped), so nothing is left on the nodes, even after a crash. A copy that is already gone (`NotFound`, for example when DIR is shared and another agent removed it first) counts as removed. About 30 LOC; IT 8 covers it. The static musl release binaries (§18) make the copy independent of the compute nodes' glibc. DIR must allow executables: sind (and sites that harden `/tmp`) mount `/tmp` `noexec`, where execve of the copy fails with "Permission denied" and the copy stays behind; IT 8 therefore uses `--bcast=/var/tmp`.
 
 ### 3.3 Attach: lifecycle and teardown
 
@@ -147,7 +147,8 @@ agent stderr ──> srun stderr ──> TUI stderr-reader thread ──> log ri
   4. **Lifetime.** Stop when all of these hold: (a) the child has exited; (b) every other child directory of `user/` reports `populated 0` in `cgroup.events`; (c) the own task cgroup's `cgroup.procs` holds only our own pid and the pids that were there before the app started. Rule (c) catches daemonized descendants left in our own task cgroup. Outside Slurm, only (a) and (c) apply.
   5. Write the final batch and the end-of-stream marker, then exit with the child's code, or 128+signal.
 - **Signals.** `signal_hook::flag::register` for SIGTERM, SIGINT and SIGHUP sets a flag. Signals are **not** forwarded: where Slurm signals every process in the step, forwarding would deliver signals such as USR1 twice. The recorder keeps sampling until the lifetime rule holds, so the app's shutdown phase is recorded too, but at most 5 s after the signal: `scancel --signal=TERM` reaches only the task leader (the recorder) on Slurm 26.05, so the app may never stop, and the journal must be finished before `KillWait` ends in SIGKILL. The recorder then exits with 128 + signal and Slurm reaps the rest of the step.
-- **Output pattern.** Tokens `%j` (`SLURM_JOB_ID`), `%s` (`SLURM_STEP_ID`), `%n` (hostname), `%%`. A missing value becomes `na`. The default is `unjam-%j.%s-%n.arrows`. Files are opened with `File::create_new` and are never overwritten.
+- **Output pattern.** Tokens `%j` (`SLURM_JOB_ID`), `%s` (`SLURM_STEP_ID`), `%n` (hostname), `%%`. A missing value becomes `na`. The default is `unjam-%j.%s-%n.arrows`. Files are created new with mode 0600 (they hold command lines) and are never overwritten.
+- **Fallback.** If recording cannot start (the output file exists, its directory is missing, no cgroup2 scope), the recorder prints `unjam: record: <reason>; running unrecorded` to stderr and `exec`s the app, so the job still runs.
 
 ### 3.6 Replay and offline conversion
 
@@ -202,7 +203,7 @@ pub const NA: u64 = u64::MAX;      // missing value; keeps values at 8 B, no Opt
 | `cg_mem_peak_bytes` | `memory.peak` (kernel ≥ 5.19, otherwise NA) | B / Gauge |
 | `cg_oom_kill` | `memory.events` oom_kill | 1 / Counter |
 | `cg_mem_anon_bytes`, `cg_mem_file_bytes` | `memory.stat` anon, file | B / Gauge |
-| `cg_io_read_bytes`, `cg_io_write_bytes` | `io.stat`, rbytes and wbytes summed over devices. In Slurm job cgroups only with `EnableExtraControllers=io` | B / Counter |
+| `cg_io_read_bytes`, `cg_io_write_bytes` | `io.stat`, rbytes and wbytes summed over devices, except disks below a dm or md device: blk-cgroup charges the cloned bio again on the lower disk, so LVM, dm-crypt and md would count twice. IO to a plain partition of such a disk is then not counted. In Slurm job cgroups only with `EnableExtraControllers=io` | B / Counter |
 | `cg_pids_current` | `pids.current`. In Slurm job cgroups only with `EnableExtraControllers=pids` | 1 / Gauge |
 | `cg_psi_cpu_some_usec`, `cg_psi_mem_some_usec`, `cg_psi_io_some_usec` | `{cpu,memory,io}.pressure` `some … total=` | us / Counter |
 
@@ -291,6 +292,7 @@ pub enum Event<'a> {
 | `/proc/sys/kernel/hostname` | Host name, sent in `H` |
 | `/proc/stat` `btime` | Lets `start` be turned into wall time (sent in `H`, stored in record metadata) |
 | `/proc/self/limits` `Max open files` (soft) | Sizes the fd cache without `getrlimit` |
+| `/sys/class/block/*/holders`, `dev` | Disks that are, or have a partition that is, held by a dm or md device; `io.stat` lines of these `MAJ:MIN` are left out of the IO sums. Read once by `cgroup::probe` |
 
 ### 5.2 Read primitive and the bounded fd cache
 
@@ -313,7 +315,7 @@ pub enum Event<'a> {
   - procfs: `pread` the cached `/proc/self/io` twice with a 4 KiB read of `/proc/self/stat` in between. `rchar` must increase.
   - kernfs: `pread` the own cgroup's `cpu.stat` twice around a busy loop of about 2 ms. `usage_usec` must increase.
   - If either check fails, `cap = 0` (always open, read, close) and one `W` line is sent. This is verified in sind (IT 1).
-- Parsing works on `&[u8]` with byte-level number parsers. The `stat` line is split at the **last** `)`, because `comm` may contain spaces or `)`. `comm` and `cmdline` are converted lossily to UTF-8 once, when the process is first seen.
+- Parsing works on `&[u8]` with byte-level number parsers. The `stat` line is split at the **last** `)`, because `comm` may contain spaces or `)`. `comm` and `cmdline` are converted lossily to UTF-8 when the process is first seen, and again when the `comm` in the `stat` read each tick no longer matches (an exec: wrapper scripts, container starters, the slurmstepd fork before the app). The process is then re-announced with the same pid, start and cgroup, so its values are kept. A `comm` that is not valid UTF-8 is not compared.
 
 ### 5.3 Files read, cadence and syscalls
 
@@ -325,11 +327,12 @@ Level semantics (§6): `o` reads nothing, `c` reads cgroup files, `p` adds proce
 | Cgroup, level ≥ `c` | `cpu.stat`, `memory.current`, `memory.peak`, `memory.events`, `memory.stat`, `io.stat`, `pids.current`, `cpu.pressure`, `memory.pressure`, `io.pressure` | 10 / 30 |
 | Cgroup, level `p` | `cgroup.procs`, sorted and merge-diffed against the previous list into P and x lines | 1 / 3 |
 | Process, level `p`, each tick | `/proc/<pid>/stat`, `/proc/<pid>/io` | 2 / 6 |
-| New process | `/proc/<pid>/cmdline` once (NUL becomes space, cut to fit the line) | 3 |
+| New process, or `comm` changed (exec) | `/proc/<pid>/cmdline` once (NUL becomes space, cut to fit the line) | 3 |
 | Agent self, each tick | `/proc/self/stat` (utime + stime for self-CPU reporting) | 1 |
+| TUI, each second | `/proc/self/stat` for the header (D40); in local mode also `/proc/meminfo` (`MemTotal`, `MemAvailable`) for the host memory bar. Both stay open in the TUI's own two-fd `Files`; `meminfo` is a cold-tier file, which a cap of 2 still caches | 1 each / 3 each |
 | Record mode, each tick | `cgroup.events` of each `user/*` sibling, own `task_*/cgroup.procs` | 1 each |
 
-A missing file (controller not enabled, old kernel) gives NA. The file is not retried until the next discovery walk.
+A missing file (controller not enabled, old kernel) gives NA. The file is retried by the first discovery walk of each 10 s period, not by every walk, so a node without the io and pids controllers does not pay a failed open per absent file per tick.
 
 ### 5.4 Cost per tick (estimates, **UNVERIFIED** until measured)
 
@@ -381,14 +384,14 @@ The io and pids controllers are present in this subtree only with `EnableExtraCo
 
 1. Read `/proc/self/cgroup`, which gives `0::<prefix>/<J>/step_<S>/user/task_<T>`.
 2. Check that the last three path segments match `step_*`, `user` and `task_*`. Otherwise exit with "not inside a Slurm step (or the step runs in a cgroup namespace rooted below the job)".
-3. The job root is `/sys/fs/cgroup` joined with `<prefix>/<J>`. The excluded subtree is `<J>/step_<S>`, the agent's own overlap step.
+3. The job root is `/sys/fs/cgroup` joined with `<prefix>/<J>`. The excluded subtree is `<J>/step_<S>`, the agent's own overlap step. That step directory must exist, otherwise exit with "own step not found (cgroup namespace)": in a cgroup namespace rooted at or above the job, with a host-view `/sys/fs/cgroup`, the path would be relative to the namespace, and the job root would silently become the whole mount.
 4. `record` uses the same parse but takes `…/step_<S>/user` as its root.
 
 Correction to the base design: if a site places steps in a cgroup namespace rooted at the task cgroup, `/proc/self/cgroup` reads `0::/` and step 2 fails, as it should. The base design's claim that the strip "still works" in that case was wrong. In sind, each node container has a **private cgroup namespace at the container root** (sind `architecture/overview.md`: `--cgroupns=private`). There, `/proc/self/cgroup` is relative to the container root and matches the container's `/sys/fs/cgroup`, so the strip works (expected; verified by IT 2 on all three matrix entries).
 
 **Local mode on a compute node:** `unjam --root /sys/fs/cgroup/system.slice/slurmstepd.scope/<jobdir>`. There is no `--job J` lookup. The docs show how to find `<jobdir>` with `scontrol listpids J` and `/proc/<pid>/cgroup` (ADR D4).
 
-**Permissions.** cgroupfs interface files are world-readable. `/proc/<pid>/io` needs ptrace-read access, which holds for the user's own processes. Otherwise the value is NA and the agent sends one `W` line.
+**Permissions.** cgroupfs interface files are world-readable. `/proc/<pid>/io` needs ptrace-read access, which holds for the user's own processes. Otherwise the value is NA, and the first denied open sends one `W` line per agent (`<path>: permission denied, NA`, from `Files::denied`); later denials stay quiet.
 
 ---
 
@@ -404,8 +407,8 @@ pub struct Rule { pub tasks: TaskSet, pub pattern: Box<str>, pub interval_ms: u3
 - **Pattern.** A list of `/`-separated segments relative to the agent root. Each segment is a literal or `*`. A pattern matches a cgroup when it matches the cgroup path's **first k segments**, so a pattern always covers a whole subtree. `.` matches everything.
 - **Resolution.** The **last** matching rule wins, like a firewall. With no match, a cgroup is `Off`. A process follows its cgroup's rule.
 - **`Off` does not depend on the interval.** An `o` rule carries interval `-`. The parser rejects `-` with any other level, and rejects a numeric interval with `o`. This resolves the base design's contradiction between "interval 0 = off" and the clamp. `Off` keeps structure (`G`/`X`, rescanned every 10 s) and sends no values.
-- **Interval.** Rounded to 100 ms and clamped to 100 ms…60 s.
-- **Phase alignment.** Deadlines are wall-clock multiples: `next = (now_ms / interval + 1) * interval`, using integer division (`model::next_due`, one unit-tested formula). The `+ 1` form makes sure that a tick which fires exactly on a multiple schedules the *next* multiple rather than itself, which a `ceil` form would not. All nodes therefore sample at the same instant, and sums across nodes compare like with like. This assumes NTP. The header shows the largest `T` skew across nodes.
+- **Interval.** Rounded to the nearest 100 ms and clamped to 100 ms…60 s (`model::interval_ms`, shared by `--interval`, `--rule`, `record --interval` and the `+`/`-` keys).
+- **Phase alignment.** Deadlines are wall-clock multiples: `next = (now_ms / interval + 1) * interval`, using integer division (`model::next_due`, one unit-tested formula). The `+ 1` form makes sure that a tick which fires exactly on a multiple schedules the *next* multiple rather than itself, which a `ceil` form would not. All nodes therefore sample at the same instant, and sums across nodes compare like with like. This assumes NTP. The header shows the largest `T` skew across nodes. If the wall clock steps back, a deadline more than one interval ahead is re-phased to the new time (`Sampler::next_due`), so sampling does not pause for the size of the step. The keepalive is timed on the monotonic clock, so a forward step does not end the agent.
 - **Timers.** The agent keeps one entry per distinct effective interval (usually 1–3) and sleeps with `recv_timeout` on its control channel until the earliest deadline. Missed deadlines are skipped, never caught up in a burst.
 
 ### 6.2 Control protocol (TUI → agents, srun stdin broadcast; local: mpsc)
@@ -469,15 +472,15 @@ Verified in Slurm 25.11 source:
 
 **Compatibility.**
 
-- `proto` governs only the line grammar. A TUI refuses a node whose `H.proto` differs and shows the reason on that node's row.
+- `proto` governs only the line grammar. A TUI ignores every line of a node whose `H.proto` differs and logs the reason (`node N: proto X, need Y: ignored`, in the footer and help pane), since such a node has no rows to show it on.
 - Different unjam **versions** with the same proto interoperate, because columns are matched by `D` names. Adding metrics never bumps `proto`.
 - Parsers ignore extra trailing fields on `H`, `D` and `T` lines. A later field (such as a self-CPU stretch, or a cost class in `D`) can therefore be appended without a proto bump. `self_rss_bytes` on `T` was added this way (D40).
 
 ### 7.3 TUI receive path
 
-- **One channel (D38).** The main thread blocks on a single `sync_channel(64)` of `Msg::{Key, Resize, Lines, Stderr, Tick}`. One blocking `recv` is simpler than polling with timeouts. Keys travel on a separate unbounded queue that the main thread drains before each decode batch; the input thread only `try_send`s a wake-up into the channel, so a key never waits behind 64 queued line chunks and the input thread never blocks.
-- **Input thread.** Blocks in `crossterm::event::read()` and sends `Msg::Key` and `Msg::Resize`. A draw that blocks on a slow terminal (ssh) does not delay key reading, and `q` or Ctrl-C set a quit flag at once.
-- **stdout reader thread.** `read()` into a 64 KiB buffer, split at the last `\n`, keep the remainder, and send whole-line chunks as `Msg::Lines`. It counts bytes for the header's `in` rate. The bounded channel makes srun's pipe fill up, which pushes back to the agents, whose writer threads absorb it (§7.5).
+- **Data channel and key queue (D38).** The main thread blocks on one data channel, a `sync_channel(64)` that carries `Msg::Lines`, `Msg::Stderr`, `Msg::End` (srun's stdout closed) and the 1 Hz `Msg::Tick`. One blocking `recv` is simpler than polling with timeouts. Keys (`Msg::Key`, `Msg::Resize`) travel on a separate unbounded queue that the main thread drains before it handles each received message; the input thread only `try_send`s a `Msg::Resize` wake-up into the data channel, so a key never waits behind 64 queued line chunks and the input thread never blocks.
+- **Input thread.** Blocks in `crossterm::event::read()`, queues `Msg::Key` and `Msg::Resize` on the key queue and wakes the main thread. A draw that blocks on a slow terminal (ssh) does not delay key reading, and `q` or Ctrl-C set a quit flag at once.
+- **stdout reader thread.** `read()` into a 64 KiB buffer, split at the last `\n`, keep the remainder, and send whole-line chunks as `Msg::Lines`. A remainder that fills the whole buffer is dropped; the rest of that overlong line then arrives as one junk line. Unit tests drive the reader with short reads of varying size, and the 1,000-agent mux test feeds its interleaved stdout through it. It counts bytes for the header's `in` rate. The bounded channel makes srun's pipe fill up, which pushes back to the agents, whose writer threads absorb it (§7.5).
 - **Main thread.** Handles keys first. Then, for each line: `wire::split_node` gives the node (and counts the line), `wire::parse(line, &mut vals)` gives an `Event`, and `State::apply` stores it. Decode work per batch is capped at 10 ms, after which pending keys are handled again, so key latency stays under about 50 ms even during an 8 MB attach burst. `Msg::Tick` (1 Hz) drives the self-monitoring sample and staleness.
 - **stderr reader thread.** Sends `Msg::Stderr`. The last line goes to the footer, and the last 200 lines are kept in a ring for the log pane.
 
@@ -485,8 +488,8 @@ Verified in Slurm 25.11 source:
 
 | Situation | Response |
 |---|---|
-| Malformed line, or a value count that does not fit that node's `D` table | Increment the node's error counter, send `S <node>` (at most once per 10 s per node), show it in the status line |
-| No `T` for 3 × the node's longest interval | Node shown as stale (dimmed) |
+| Malformed line, or a value count that does not fit that node's `D` table | Increment the node's error counter, send `S <node>` (at most once per 10 s per node), show it in the status line. The resync re-sends only what the agent has, so the next `T` drops the cgroups and processes the node held at that `H` and did not re-announce (a lost `X`/`x`) |
+| No `T` for 3 × the node's longest active interval, or 3 × its 10 s structure rescan when every subtree is off | Node shown as stale (dimmed) |
 | Agent exits | srun's stderr says so, then the node becomes stale. The other agents keep running (§3.3) |
 | srun exits | Every node becomes "ended"; data is kept |
 | Agent write fails (`EPIPE`) | Agent exits 0 |
@@ -550,7 +553,7 @@ srun's I/O thread throughput and CPU at 1k tasks are **UNVERIFIED**. They will b
 
 ### 8.3 Lifecycle and crash safety
 
-1. `File::create_new` → `BufWriter` → `StreamWriter::try_new_with_options(…, IpcWriteOptions::default().try_with_compression(Some(CompressionType::LZ4_FRAME)))`. The schema message is written at once.
+1. Create new with mode 0600 (`create_new`, `OpenOptionsExt::mode`) → `BufWriter` → `StreamWriter::try_new_with_options(…, IpcWriteOptions::default().try_with_compression(Some(CompressionType::LZ4_FRAME)))`. The schema message is written at once.
 2. Rows go into arrow-array builders. A batch is cut every **10 s or 8,192 rows**, whichever comes first, then written and flushed.
    - Value memory at the row cap: 8,192 rows × about 30 UInt64 columns × 8 B ≈ 2.0 MB. Validity bitmaps, builder over-allocation and the Utf8 keyframe columns add about 20–50 %, so the bound is about 3 MB.
    - Typically about 100 KB. At 1,000 entities and a 5 s interval, a 10 s batch holds 2,000 rows.
@@ -562,16 +565,19 @@ srun's I/O thread throughput and CPU at 1k tasks are **UNVERIFIED**. They will b
 
 ### 8.4 Replay and seeking (`.arrows` only, one reader path)
 
-- **Open.** Wrap the file in `Counting<R>`, a `Read` that counts bytes. `StreamReader::try_new(counting, Some(vec![0]))` decodes only `ts`. `try_new` is unbuffered in arrow-ipc 60, so the count is exact. Keep the schema message bytes, and record `index: Vec<(offset, first_ts)>`.
-- **Seek(t).** Binary-search the index, then `StreamReader::try_new(Cursor::new(schema_bytes).chain(file_at(offset)), None)`, decode that one batch, and apply ticks up to t. Validation stays on; `with_skip_validation` (an `unsafe fn`) is never called.
+- **Open.** Wrap the buffered file in `Counting`, a `Read` that counts bytes. `StreamReader::try_new(counting, Some(vec![0]))` decodes only `ts`. `try_new` is unbuffered in arrow-ipc 60, so the count is exact. Keep the schema message bytes, and record `index: Vec<(offset, first_ts)>`.
+- **Seek(t).** Backward, rebuild each node from the batch holding t − 120 s (twice the longest rule interval), so every entity's previous sample is applied and its rates match forward play: at most about 13 batches per file, as batches are cut every 10 s. Binary-search the index, then `StreamReader::try_new(Cursor::new(schema_bytes).chain(file_at(offset)), None)`, decode that one batch, and apply ticks up to t. Validation stays on; `with_skip_validation` (an `unsafe fn`) is never called.
 - **Step.** Forward moves to the next tick and loads the next batch when needed. Back is `seek(t − interval)`.
-- **Several files** share one cursor, and each file shows its latest tick ≤ t. Rates use tick t and the tick before it, across batch boundaries. Applying a snapshot tick is `State::apply` per row followed by `State::retain_tick(node, ts)`.
+- **Several files** share one cursor over sampling rounds, and each file shows its latest tick ≤ t. Agents stamp a round a few ms after its due time, differently on each node, so ticks closer than half the shortest tick gap in any file form one round, and the cursor stands at the round's latest tick: one step advances every node by one tick. Rates use tick t and the tick before it, across batch boundaries. Applying a snapshot tick is `State::apply` per row; `Track::gone` then removes what the tick did not list.
+- **Malformed files.** A row whose parent path resolves to the cgroup itself or to one below it (possible only in a crafted or corrupted file) is ignored by `State`, which also moves a re-parented cgroup out of its old parent's kids, so the layouts always walk a tree. Replay inputs must still be trusted: arrow-ipc 60 preallocates an LZ4 buffer at the 8-byte uncompressed length the file states (`decompress_lz4`, `Vec::with_capacity`) before any check, so a crafted length aborts replay with an allocation failure, past the panic hook. A pre-scan of every buffer prefix would cost more lines than it is worth; the fix belongs upstream (a capped preallocation), followed by a dependency bump.
 - **Memory.** Only the current decoded batch per file is held: typically about 250 KB per node and at most about 3 MB (the row cap), so about 250 MB at 1k nodes in the typical case (K8).
 
 ### 8.5 Recording in the TUI (D41)
 
 - `r` starts or stops recording in a live viewer; `--slurm --record DIR` starts it at launch. Without `--record`, `r` records into `unjam-rec-<secs>` in the current directory.
-- The TUI feeds the events it receives into `record::Writer`, one `.arrows` file per node (`DIR/<host>.arrows`, created with `File::create_new`). The schema metadata carries `unjam.source=tui`, so a reader can tell such a file from a `record` journal. Batching, keyframes and crash safety are those of §8.3; replay reads both.
+- The TUI feeds the events it receives into `record::Writer`, one `.arrows` file per node (`DIR/<host>.arrows`, `/` in the host name replaced by `_`, created new with mode 0600; a missing `DIR` is created with mode 0700, since the files hold other users' command lines when root records). The schema metadata carries `unjam.source=tui`, so a reader can tell such a file from a `record` journal. Batching, keyframes and crash safety are those of §8.3; replay reads both.
+- A node's tick is written when its next tick starts, at that node's first structure or `T` line after it: an agent sends a tick's structure before its `T`, so writing at `T` would mix in the next tick's structure (entities that just exited would lose their last sample).
+- Every viewer exit closes the journals with their last batch and end-of-stream marker: `q`, SIGTERM and SIGHUP (also with `--batch`), and errors such as a failed `--batch` write (`EPIPE` under `| head`) or a lost terminal.
 - Values arrive at the rule intervals that are active, so a TUI recording is as sparse or dense as the view was. About 50 LOC.
 
 ### 8.6 Interop claims (each tested in IT 6)
@@ -605,11 +611,11 @@ srun's I/O thread throughput and CPU at 1k tasks are **UNVERIFIED**. They will b
 - **Header, line 1:** the source (`unjam`, `--slurm=J` or `--replay`), node count with stale nodes, process count, interval, layout, sort column and clock. Replay shows the cursor time and `[▶]` or `[⏸]`.
 - **Header, line 2: self-monitoring (D40, always shown, local mode too).**
   - `tui`: CPU and RSS of the whole TUI process. The main thread `pread`s a cached `/proc/self/stat` (utime, stime, rss) once per second; CPU% is over wall time and covers all TUI threads.
-  - `in` (bytes and lines per second into the TUI) and `out` (control bytes to the agents): the stdout reader counts bytes, `split_node` counts lines per node, `Remote::send` counts control bytes. Plain u64 counters, rate over the last second.
+  - `in` (bytes and lines per second into the TUI) and `out` (control bytes to the agents): `App::ingest` counts bytes and lines, `App::send` counts control bytes. Plain u64 counters, rate over the last second.
   - `agents max`: the highest agent CPU (rate of `T.self_cpu_us`) and RSS (`T.self_rss_bytes`), with that node's name. In local mode the sampler is a TUI thread and counts under `tui`.
   - `drop` and `err`: summed dropped ticks and decode errors.
   - About 30 LOC. The help pane adds a per-node table: CPU, RSS, out B/s, msg/s, drops, errors and clock skew.
-- **Node heat strip (D41, Slurm mode).** One cell per ⌈N / width⌉ nodes. A cell's colour is the `theme.heat` band of the highest CPU% among its nodes; a cell whose nodes are all `Off` is dotted. About 40 LOC.
+- **Node heat strip (D41, Slurm mode).** One cell per ⌈N / width⌉ nodes. A cell's colour is the `theme.heat` band of the highest CPU% among its nodes, relative to the busiest node of the job (at least one core, as the wire carries no core count), so imbalance shows on many-core nodes; a cell whose nodes are all `Off` is dotted. About 40 LOC.
 - **CPU history bar (D41).** Every row draws its last 16 CPU samples from `hist` (§4.5) as a bar sparkline in `theme.heat` colours. About 35 LOC.
 
 The mock assumes `EnableExtraControllers=io,pids`. Without it, IO-R/s and IO-W/s are hidden and PIDS shows `~`-marked summed threads where processes are sampled (§4.3, §9.2).
@@ -621,7 +627,7 @@ The mock assumes `EnableExtraControllers=io,pids`. Without it, IO-R/s and IO-W/s
   - **node**: node → cgroup tree → processes.
   - **flat**: one row per process, or per task cgroup where processes are `Off`, with a NODE column and one global sort. In local mode this is the classic `top`.
   - Local mode has no node level: `v` toggles between the cgroup tree and flat.
-- **Sort.** The sort column orders siblings only; a row never leaves its parent. Tree layouts sort every sibling set at every level by the row's own value; flat has one sibling set, so its sort is global. Counter → rate, Gauge → value, NA always last in both directions, NAME and NODE in natural order (NODE sorts by host, then NAME), ties in natural order. The cursor follows its entity across redraws.
+- **Sort.** The sort column orders siblings only; a row never leaves its parent. Tree layouts sort every sibling set at every level by the row's own value; flat has one sibling set, so its sort is global. Counter → rate, Gauge → value, NA always last in both directions, NAME and NODE in natural order (NODE sorts by host, then NAME), ties in natural order. The cursor follows its entity across redraws, and a key acts on that entity even when data re-sorted the rows since the last frame.
 - **Folded node ranges (D41, step layout).** Under a step, the top nodes by the sort column fill the window, and the remaining nodes collapse into one aggregate row such as `n0418 … n1024 (606 folded)`. Unfolding it lists them. About 25 LOC.
 - **Not in round one:** a "by command" layout and a RANK column. Rank labels ("rank 0-95") need `SLURM_PROCID` from `/proc/<pid>/environ` once per new task, which is not designed yet.
 - **Detail** (`Enter`): every column the node announced, including future-source metrics, shown raw and as a rate, plus the full path or cmdline. Where a value is NA because a controller is absent, it says so.
@@ -652,11 +658,11 @@ The mock assumes `EnableExtraControllers=io,pids`. Without it, IO-R/s and IO-W/s
 
 ### 9.4 Rendering cost
 
-- `state::rows(&State, &View, height, &mut Vec<Row>)` walks only unfolded subtrees, with `Row = (node, kind, key, depth)` in a reused `Vec`.
-  - Sibling sets of at most `height` rows get a full sort.
-  - Larger sets (process lists) use `select_nth_unstable_by` on the first `scroll + height` rows.
-  - The walk stops once `scroll + height` rows have been produced.
-- `draw` builds ratatui `Row`s and `Cell`s **only for the visible slice**. Numbers are formatted into one reused `String` arena per frame.
+- `state::rows(&State, &View, limit) -> Vec<Row>` walks only open subtrees and returns a new `Vec` per call; each sibling set is collected into its own `Vec` on the way. A `Row` holds the key, node, id, depth, fold state, the name (borrowed from `State`; only cross-node rows own theirs), the values and the CPU history.
+  - `draw` passes `limit = scroll + height` (at least the cursor's index + 1); `--batch` takes every row. When the cursor's entity was re-sorted beyond the limit, `tui::follow` builds all rows once, so keys and draw act on that entity, not on its old index.
+  - A sibling set larger than the rows still missing is first cut with `select_nth_unstable_by` to those rows (not while a filter is set, and not a step's node set, whose surplus folds into a range row), then sorted.
+  - The walk stops once `limit` rows have been produced.
+- `draw` builds ratatui `Row`s and `Cell`s **only for the visible slice**; its cell texts are formatted per visible row.
 - The flat layout at 100k processes costs about 1 ms per frame (`select_nth_unstable_by`). Folded node ranges keep the step layout's row count bounded at any node count.
 - Rows are rebuilt and redrawn at most at 4 Hz for data-driven changes, and immediately on a key press. `State::derive` runs in the same 4 Hz slot. ratatui's buffer diff writes only changed cells.
 - `--batch N` renders the same `rows` as text.
@@ -673,7 +679,7 @@ pub struct Theme {
     pub heat: [Color; 4],                      // value bands: idle, low, high, saturated
     pub glyphs: Glyphs,
 }
-pub struct Glyphs { pub open: &'static str, pub closed: &'static str, pub guide: [&'static str; 3] }
+pub struct Glyphs { pub open: &'static str, pub closed: &'static str, pub guide: [&'static str; 2] }
 pub const THEMES: &[Theme] = &[NORD, NIGHT, MOCHA, GRUVBOX, SOLAR, AMBER, MONO];
 ```
 
@@ -692,16 +698,16 @@ One package, one binary. No lib target, no workspace, no cargo features of our o
 
 ```
 src/main.rs      CLI (clap derive: viewer flags with the source group, record, agent), dispatch, exit codes, parse_dur
-src/model.rs     Metric/Kind/Ent/NA, Event, What/Rule/TaskSet/Control, effective(), next_due()
+src/model.rs     Metric/Kind/Ent/NA, metric(), Event, What/Rule/TaskSet/Control, effective(), interval_ms(), next_due()
 src/source.rs    trait Source, Target, Env, Probe, SOURCES, Files (tiered fd cache + self-check), kv(), kv_eq()
-src/cgroup.rs    Cgroup source, walk(), procs(), io_sum(), psi(), job_root()/record_root(), v2 check
-src/procfs.rs    Proc source, stat(), cmdline(), auxv(), hostname(), btime(), nofile()
-src/agent.rs     Sampler (rules, timers, discovery, emit, self-CPU/RSS accounting), run(), Out (writer, budget, stagger), --unlink-self
+src/cgroup.rs    Cgroup source (with the stacked-disk list), walk(), procs(), io_sum(), psi(), self_cgroup(), job_root()/record_root(), v2 check
+src/procfs.rs    Proc source, stat(), ident(), cmdline(), auxv(), nofile(), usage(), env(), host_btime()
+src/agent.rs     Sampler (rules, timers, discovery, emit, self-CPU/RSS accounting), run(), Out (writer, budget, stagger), setup(), step_id(), --unlink-self
 src/wire.rs      Event and Control text codec, split_node(), line cap and value splitting
 src/slurm.rs     job resolution, squeue/scontrol queries, srun_args() (incl. --bcast), spawn and reader threads, Remote teardown
-src/record.rs    run_record(), schema(), Writer (also for TUI recording), Reader (index, seek), Counting<R>
-src/state.rs     State/Node/Cg/Proc/Columns, apply() (incl. CPU history), retain_tick(), derive(), rate(), rows() (3 layouts, sort, filter, folded node ranges)
-src/tui.rs       App, Feed, Msg, input thread, event loop, keys, draw (header, self-monitoring, heat strip, history bars), fmt, batch output, recording toggle, default_rules()
+src/record.rs    run_record(), schema(), Writer, Rec (TUI recording), Reader (index, rounds, seek), Counting, replay()
+src/state.rs     State/Node/Cg/Proc/Columns, apply() (incl. CPU history, resync sweep, parent-cycle guard), derive(), rate(), rows() (3 layouts, sort, filter, folded node ranges)
+src/tui.rs       App, Feed, Msg, input thread, event loop, keys (follow the highlighted entity), draw (header, self-monitoring, heat strip, history bars), fmt, batch output, recording toggle, default_rules()
 src/theme.rs     Theme, Glyphs, THEMES, pick()
 ```
 
@@ -719,7 +725,7 @@ Counted as code lines, excluding blanks, comments and `#[cfg(test)]` modules. Re
 | agent.rs | 275 | theme.rs | 60 (+ theme data) |
 | | | **Total** | **≈ 2,700** (hard total cap 2,900) |
 
-The table is the plan. As built, the hard total cap is **3,460** (owner decision pending): record and replay measured about 580 lines against the planned 330, and the sampler (agent.rs) about 490 against 275, so `docs/budget.txt` holds the measured module budgets with a one-line reason each and is the authoritative gate. Modules that do not exist yet are skipped by the gate, and every file in `src/` needs a line. Theme data sits between `// budget: data` and `// budget: end` and is not counted. A budget may be re-baselined with a one-line reason in `docs/budget.txt`.
+The table is the plan. As built, the hard total cap is **3,460** (owner decision): record and replay measured about 580 lines against the planned 330, and the sampler (agent.rs) about 490 against 275, so `docs/budget.txt` holds the measured module budgets with a one-line reason each and is the authoritative gate. Modules that do not exist yet are skipped by the gate, and every file in `src/` needs a line. Theme data sits between `// budget: data` and `// budget: end` and is not counted. A budget may be re-baselined with a one-line reason in `docs/budget.txt`.
 
 Changes from the owner review: the three layouts (+50 in state.rs), self-monitoring (+30), the heat strip, CPU history, TUI recording and folded node ranges (+150, D41), `--bcast` with `--unlink-self` (+30) and the input thread (+10).
 
@@ -792,20 +798,20 @@ Every item carries a `///` doc stating why it exists, enforced by `tests/budget.
 | `Target<'a>` | source | Tells a source what to sample and hands it the entity's fd slots, without generics |
 | `Env` | source | Injected `proc_root`/`cg_root`, page size, CLK_TCK. Makes fixture tests possible |
 | `Probe`, `SOURCES` | source | Compile-time registry. Probe errors fail soft as `W` lines. No dynamic loading |
-| `Files` | source | Bounded, tiered fd cache, read buffer and self-check result. The single hot-path read policy |
+| `Files` | source | Bounded, tiered fd cache, read buffer, self-check result and the first permission-denied path (one `W` per agent). The single hot-path read policy |
 | `Cgroup` | cgroup | cgroup v2 source |
 | `Proc`, `Stat<'a>` | procfs | /proc source. `Stat` parses `stat` once for both discovery and values |
 | `Sampler`, `CgEnt`, `ProcEnt` | agent | Sampling state machine (rules, timers, discovery), used by local, agent and record modes |
 | `Out` | agent | Writer-thread handle, token bucket, pending structure buffer and stagger: the backpressure point |
-| `Job` | slurm | squeue/scontrol result (id, nodes, state) needed to build the srun argv |
+| `Job` | slurm | squeue/scontrol result (id, nodes, owner uid) needed to build the srun argv and to refuse `--bcast` into another user's job |
 | `Remote` | slurm | Owns the srun child, its stdin and the step id, for control and staged teardown |
 | `Writer` | record | Arrow builders plus per-batch keyframe tracking |
-| `Reader`, `Counting<R>` | record | Multi-file replay with seek index and exact byte offsets |
+| `Reader`, `Counting` | record | Multi-file replay with seek index and exact byte offsets |
 | `State`, `Node`, `Cg`, `Proc` | state | The TUI data store filled by every feed |
 | `Columns` | state | Interns `(Ent, name)` → `ColId` from `D` lines. This is how future metrics reach the TUI without code changes |
 | `View`, `Layout`, `Row` | state | Rows to render: one of three level orders (step, node, flat), fold, sibling sort, filter, folded node ranges |
 | `App`, `Feed` | tui | UI state. `Feed` is `Live { ctl }` or `Replay(Reader)`: two variants, no trait |
-| `Msg` | tui | The one channel the main thread blocks on: `Key`, `Resize`, `Lines`, `Stderr`, `Tick` (D38) |
+| `Msg` | tui | What the main thread handles: `Lines`, `Stderr`, `End` and `Tick` on the data channel it blocks on, `Key` and `Resize` on the key queue (D38) |
 | `Theme`, `Glyphs` | theme | The theme plug-in contract (R19) |
 
 ### 11.2 Non-trivial functions
@@ -816,56 +822,60 @@ Every item carries a `///` doc stating why it exists, enforced by `tests/budget.
 | `parse_dur(&str) -> Result<Duration, String>` | `500ms`, `2s`, `1m` for clap `value_parser`, without humantime |
 | `model::effective(&[Rule], task, path) -> (u32, What)` | The one resolver used by agent and TUI |
 | `model::pattern_match(pat, path) -> bool` | Segment-wise prefix match with `*` |
+| `model::interval_ms(ms) -> u32` | One rounding (nearest 100 ms) and clamp (100 ms…60 s) for `--interval`, `--rule`, `record --interval` and `+`/`-` |
 | `model::next_due(now_ms, interval_ms) -> u64` | Wall-clock phase alignment, one formula (`(now / i + 1) * i`) |
 | `TaskSet::parse / contains`, `Rule::parse` | `*`, `0-3,8`, and the `R` text, also used by `--rule` (prefixed with `R\t`) |
 | `source::sources(&Env) -> (Vec<Box<dyn Source>>, Vec<String>)` | Runs the probes; collects failures as warnings |
 | `Files::read(slot, hot, dir, name) -> io::Result<&[u8]>` | Cached `pread`, tiered cap policy, `ESRCH` handling |
 | `Files::self_check(&Env) -> bool` | Proves `pread`@0 regeneration on procfs and kernfs; otherwise disables caching |
 | `source::kv(text, key)`, `kv_eq(text, key)` | `key value` and `key=value` formats (cpu.stat, memory.events, memory.stat, /proc/pid/io; io.stat, PSI) |
-| `Cgroup::sample`, `Proc::sample` | Fill the metric slice |
-| `cgroup::walk(root, exclude, f)` | Discovery; reports `(path, ino, parent)` |
+| `Source::sample(t, slots, io, out) -> io::Result<()>` (`Cgroup`, `Proc`) | Fill the metric slice; `Err` means the entity is gone |
+| `cgroup::walk(root, exclude) -> Vec<(PathBuf, u64, u64)>` | Discovery; `(path, ino, parent ino)`, parents first, the excluded own step left out |
 | `cgroup::procs(buf, out: &mut Vec<u32>)` | Parses and sorts `cgroup.procs` for the merge-diff |
-| `cgroup::io_sum(text) -> (u64, u64)` | Sums rbytes and wbytes over devices |
-| `cgroup::job_root(self_cg) -> Result<(PathBuf, PathBuf), String>` | Structural Slurm detection: root plus excluded own step (§5.5) |
-| `cgroup::record_root(self_cg)` | `…/step_S/user` for record mode |
+| `cgroup::io_sum(text, skip) -> (u64, u64)` | Sums rbytes and wbytes over devices, skipping the disks held by a dm or md device (listed once by `probe`) |
+| `cgroup::self_cgroup() -> Result<(&Path, String), String>` | The cgroup2 mount and the text of `/proc/self/cgroup`, one read for agent and recorder |
+| `cgroup::job_root(mount, self_cg) -> Result<(PathBuf, PathBuf), String>` | Structural Slurm detection: root plus excluded own step, which must exist below the mount (§5.5) |
+| `cgroup::record_root(mount, self_cg)` | `…/step_S/user` for record mode |
 | `procfs::stat(buf) -> Option<Stat>` | Splits at the last `)`; safe for any comm |
-| `procfs::auxv`, `hostname`, `btime`, `nofile`, `cmdline` | Constants and metadata without libc |
-| `Sampler::new / tick / control / next_due / snapshot` | Sampling core, including the fork-storm self-rule |
-| `agent::run(ctl: Receiver<String>, out: Out, opts)` | Shared loop for remote and local; keepalive |
-| `Out::spawn(w: impl Write + Send) / send_tick / set_budget` | Writer thread, try_send, drop and pending policy, stagger |
+| `procfs::auxv`, `host_btime`, `nofile`, `cmdline`, `ident` | Constants and metadata without libc |
+| `procfs::usage(files, slot, env) -> Option<(u64, u64)>` | Own CPU µs and RSS bytes from a cached `/proc/self/stat`, for the agent's `T` and the TUI header |
+| `Sampler::new / tick / control / next_due(now) / snapshot` | Sampling core, including the fork-storm self-rule; `next_due` re-phases deadlines after a wall-clock step |
+| `agent::run(ctl: &Receiver<String>, out: &mut Out, s: &mut Sampler, keep) -> io::Result<()>` | Shared loop for remote and local; keepalive on `Instant` |
+| `Out::spawn(w, node, ntasks) / push / send` | Writer thread, try_send, token bucket, drop and pending policy, stagger |
 | `wire::write(buf, node, &Event)` / `wire::parse(line, vals) -> Option<Event>` | Codec with the 1000-byte cap, value splitting and tolerance for extra trailing fields |
 | `wire::write_control / parse_control` | Control codec |
 | `wire::split_node(&[u8]) -> Option<(u32, &[u8])>` | Demultiplexes by the self-written node prefix |
-| `wire::sanitize(&str, &mut String)` | Makes strings tab- and newline-safe |
-| `slurm::resolve(Option<&str>) -> Result<String, String>` | Job resolution: value, `$SLURM_JOB_ID`, the only running job of `squeue --me`, else the job list and exit 2 (D43) |
-| `slurm::job(id) -> io::Result<Job>`, `slurm::count_nodes(list)` | squeue and scontrol calls |
-| `slurm::srun_args(&Job, &SlurmArgs) -> Vec<OsString>` | The one place the srun argv is built, including the forwarded `--keepalive` and `--bcast`/`--unlink-self` (golden-tested, `--print-srun`) |
-| `slurm::spawn(.., tx: SyncSender<Msg>) -> io::Result<Remote>` | Starts srun and the two reader threads, which send `Msg::Lines` and `Msg::Stderr` |
-| `Remote::send(&Control)`, `Remote::stop(self)` | Control and the staged teardown |
-| `record::run_record(args) -> io::Result<ExitCode>` | `exec` for LOCALID≠0; recorder loop and lifetime rule otherwise |
-| `record::schema(&[Metric], meta) -> Schema` | Generated schema |
-| `record::expand(pattern) -> PathBuf` | `%j %s %n %%` |
-| `Writer::push(&Event) / cut() / finish()` | Rows, keyframed batch boundary (10 s or 8,192 rows), end of stream |
-| `Reader::open(paths) / seek(ts, f) / step(±1, f)` | Replay |
-| `State::apply(node, Event)`, `State::retain_tick(node, ts)` | The single state mutation path |
-| `State::derive(node)` | PIDS fallback: subtree sum of `p_threads` where `cg_pids_current` is NA |
+| `wire::sanitize(&str, max, &mut Vec<u8>)` | Makes strings tab- and newline-safe |
+| `slurm::resolve(&str) -> Result<String, String>` | Job resolution: value, `$SLURM_JOB_ID`, the only running job of `squeue --me`, else the job list and exit 2 (D43) |
+| `slurm::job(arg, nodelist) -> Result<Job, String>` | squeue (the running task of an array job id, the owner) and `scontrol show hostnames` for `--nodelist` |
+| `slurm::srun_args(&Job, &SlurmArgs, exe, uid, nonce) -> Vec<OsString>` | The one place the srun argv is built, including the forwarded `--keepalive` and `--bcast`/`--unlink-self` (golden-tested, `--print-srun`) |
+| `slurm::spawn(argv, tx: &SyncSender<Msg>, ctl: Receiver<String>) -> io::Result<Remote>` | Starts srun, the two reader threads, which send `Msg::Lines` (then `Msg::End`) and `Msg::Stderr`, and the thread that writes control lines to srun's stdin |
+| `Remote::stop(self, step)` | The staged teardown |
+| `record::run_record(args) -> Result<ExitCode, String>` | `exec` for LOCALID≠0; recorder loop and lifetime rule otherwise |
+| `record::schema(&Columns, meta) -> Schema` | Generated schema |
+| `record::expand(pattern, job, step, host) -> PathBuf` | `%j %s %n %%` |
+| `Writer::create / node(st, i) / cut() / finish()` | A node's tick as rows, keyframed batch boundary (10 s or 8,192 rows), end of stream |
+| `Reader::open(paths) / find(ts) / goto(st, k)` | Replay over sampling rounds; a backward `goto` rebuilds from 120 s earlier |
+| `State::apply(node, &Event, now) -> Result<(), ()>` | The single state mutation path; `Err` asks for a resync |
+| `State::derive()` | PIDS fallback: subtree sum of `p_threads` where `cg_pids_current` is NA |
 | `state::rate(kind, v, pv, dt) -> Option<f64>` | Counter → rate, Gauge → value |
-| `state::rows(&State, &View, h, &mut Vec<Row>)` | Visible-window walk over the layout's level order with partial sibling sort, cross-node sums and folded node ranges |
+| `state::rows(&State, &View, limit) -> Vec<Row>` | Visible-window walk over the layout's level order with partial sibling sort, cross-node sums and folded node ranges |
 | `tui::input(keys: &Sender<Msg>, wake: &SyncSender<Msg>)` | Input thread: blocking `event::read()`, queues keys and wakes the main thread, sets the quit flag on `q`/Ctrl-C (D38) |
-| `tui::run(App, rx: Receiver<Msg>) -> io::Result<()>` | Loop: block on `Msg`, keys first, bounded decode, replay step, draw at ≤ 4 Hz |
-| `tui::on_key(&mut App, KeyEvent)` | Bindings → view changes or `Control` |
-| `tui::draw(&mut Frame, &App)` | Header with self-monitoring, heat strip, table with history bars (hiding all-NA default columns), footer, overlays |
-| `tui::batch(&App, &mut impl Write)` | `--batch` text snapshot (shared `rows`) |
-| `tui::fmt(unit, f64, &mut String)` | Human-readable units; unknown units shown raw |
-| `tui::default_rules(nodes, interval) -> Vec<Rule>` | §6.3 defaults |
-| `theme::pick(Option<&str>) -> usize` | Flag, env and NO_COLOR resolution |
+| `tui::view(app, tx, rx, batch, out) -> io::Result<()>` | Ticker, signals, then `--batch` snapshots or the terminal; finishes a recording on every exit |
+| `tui::event_loop(app, [data, keys], term)` | Loop: block on the data channel, keys first, bounded decode, draw at ≤ 4 Hz |
+| `App::on_key(KeyEvent)` | Bindings → view changes or `Control`, on the highlighted entity (`tui::follow`) |
+| `tui::draw(&mut Frame, &mut App)` | Header with self-monitoring, heat strip, table with history bars (hiding all-NA default columns), footer, overlays |
+| `tui::snapshot(&App, &mut dyn Write)` | `--batch` text snapshot (shared `rows`; control characters printed as `?`) |
+| `tui::fmt(unit, f64) -> String` | Human-readable units; unknown units shown raw |
+| `tui::default_rules(nodes, interval_ms) -> Vec<Rule>` | §6.3 defaults |
+| `theme::pick(flag, env, no_color) -> Result<usize, String>` | Flag, env and NO_COLOR resolution |
 
 ---
 
 ## 12. unsafe policy
 
 - **Production code has zero `unsafe`.** Lints: `unsafe_code = "deny"` (not `forbid`, ADR D24), `unsafe_op_in_unsafe_fn = "deny"`, `clippy::undocumented_unsafe_blocks = "deny"`, `clippy::multiple_unsafe_ops_per_block = "deny"`.
-- **Any use** needs a local `#[allow(unsafe_code, reason = "…")]`, a `// SAFETY:` comment and an entry in `docs/unsafe.md`. `tests/budget.rs` fails when the number of `allow(unsafe_code)` sites in `src/` differs from the number of `## ` entries in the ledger's "Our code" part.
+- **Any use** needs a local `#[allow(unsafe_code, reason = "…")]`, a `// SAFETY:` comment and an entry in `docs/unsafe.md`. `tests/budget.rs` fails unless the `allow(unsafe_code)` and `expect(unsafe_code)` sites in `src/` and the ledger's "Our code" entries name the same `<file>:<item>`s.
 - **The one planned use** is test-only: `src/main.rs` `#[cfg(test)] mod alloc_count` implements `unsafe impl GlobalAlloc`. It delegates to `System` and counts in a `const`-initialised `thread_local!` `Cell<u64>`, which has no destructor and does not allocate. It lets a test assert zero allocations per steady-state tick. Implementing `GlobalAlloc` is unsafe by definition. Ledger entry #1.
 
 | Where unsafe would usually appear | What we do instead |
@@ -995,7 +1005,8 @@ SIND_REALM = "{{ get_env(name='SIND_REALM', default='unjam-it') }}"
 [tasks]
 fmt = { run = "cargo fmt --check" }
 lint = { run = "cargo clippy --all-targets --locked -- -D warnings" }
-"lint:sarif" = { run = "cargo clippy --all-targets --locked --message-format=json -- -D warnings | clippy-sarif | tee clippy-results.sarif | sarif-fmt" }
+# pipefail: the step fails with clippy, not with sarif-fmt, and the SARIF file is still written.
+"lint:sarif" = { shell = "bash -o errexit -o pipefail -c", run = "cargo clippy --all-targets --locked --message-format=json -- -D warnings | clippy-sarif | tee clippy-results.sarif | sarif-fmt" }
 test = { run = "cargo test --locked" }  # includes tests/budget.rs
 build = { run = "cargo build --release --locked" }
 # Static release binary for this machine's architecture (publish.yml `binaries` job).
@@ -1073,21 +1084,21 @@ Measured after record and replay: 3,466,568 bytes (3.31 MiB, 2 % over the target
 | Slurm layout | `job_root` and `record_root` on 25.11, 26.05-SLUID, `node1_slurmstepd.scope` and a `0::/` namespace root (must fail); rejection of non-step paths and of v1 format |
 | Rules | `pattern_match`, `effective` and `TaskSet` tables. `Rule::parse` rejects `- p`, `500 o` and the removed level `d`. `next_due` table including `now` on an exact multiple, which must return the *next* multiple. `--rule` text is parsed with an `R\t` prefix |
 | Sampler | Timer grouping. Pid reuse: rewriting `start` gives `x` then `P`. Cgroup recreation: new inode gives `X` then `G`. Structure-only `Off`. `Files` tiers: past `cap − cap/8`, cold files take the uncached path while hot files are still cached, and at `cap` both are uncached. Self-check failure gives cap 0 (forced via `Env`). The fork-storm fallback applies `R * . <longest> c`, which `Rule::parse` accepts |
-| Zero allocation | `alloc_count`: after a warm-up tick, 100 ticks over the 25.11 fixture allocate 0 times in the sampler and encoder |
+| Zero allocation | `zero_allocations_per_steady_state_tick`, counted by `alloc_count`: after a warm-up tick, 100 samples (`Sampler::sample`, a tick without its discovery walk) over the 25.11 fixture allocate 0 times in the sampler and encoder. The walk, which runs on nearly every due tick, allocates for std `read_dir` and its entry names only; the same test bounds it at 2 per directory entry |
 | Writer path | A blocked writer drops values and keeps structure; the budget limits bytes per second; the stagger delay formula |
 | Wire | Round trip for every variant; the 1000-byte cap; value splitting with `first`; sanitizing; extra trailing fields on `H`/`D`/`T` ignored |
 | Mux (graft) | 1000 simulated agents over fixture data. Output is cut into ≤ 1024-byte whole-line chunks (slurmstepd semantics), interleaved randomly into one reader, and fed through `split_node`, `parse` and `State`. Each node's `State` must equal the reference exactly. Also: one injected corrupt line triggers exactly one `S` |
 | `srun_args` | Golden argv for: default; `--nodelist`; `--srun-arg`; `--agent-keepalive 5` (forwards `agent --keepalive 5`) |
 | Record | Round trip to a temporary file: generated schema and field metadata; keyframe metadata on the first row per batch; a batch is cut at 8,192 rows; seek to the middle equals linear replay; a journal truncated at 200 random offsets always yields its valid prefix, never a panic |
 | State and TUI | `state::rows` for each of the 3 layouts (golden rows; fold, sibling-only sort with NA last, cross-node sums, folded node ranges). CPU history ring wrap-around. Heat strip cell grouping. `State::derive` over the `no-controllers` fixture gives `~` PIDS equal to summed threads. All-NA default columns are hidden. `tui::draw` against `TestBackend` with theme `mono`, compared to stored buffers. `NO_COLOR` gives `mono`. `--batch` text against a golden file |
-| Benchmarks | `bench_*` (`#[ignore]`, `mise run bench`): ns per cgroup and process sample, ns per file for `cpu.stat`/`io.stat`/`memory.stat` (fixture parse only; kernel cost is measured in sind), bytes per tick, TUI apply ns per value, on fixtures replicated to 100, 1k and 10k processes. Report only |
+| Benchmarks | `bench_*` (`#[ignore]`, `mise run bench`, release build): `bench_sample_and_encode` gives ns per cgroup (level `c`) and per process, sample and encode, and bytes per tick (level `p`) on the 25.11 fixture (8 cgroups, 3 processes; plain files, so no rstat flush: kernel cost is measured in sind); `bench_apply_values` gives TUI decode and apply ns per value. Best of 40 blocks. Report only |
 
 **`tests/budget.rs`** (integration test, std only, does not import the crate; modules listed in `docs/budget.txt` but not yet written are skipped):
 
 1. LOC per module and total against `docs/budget.txt` (+10 %).
 2. Every `fn`, `struct`, `enum`, `trait`, `type`, `const`, `static` and `mod` item in `src/` is preceded by a `///` doc line (attributes may sit in between). The `#[cfg(test)]` module, by convention the last item of a file, is exempt.
-3. Every `[dependencies]` key appears in `docs/deps.md`.
-4. The count of `allow(unsafe_code)` sites equals the number of entries in the "Our code" part of `docs/unsafe.md`. Dependency rows are checked by `scripts/unsafe-deps.sh`.
+3. Every key of `[dependencies]`, `[build-dependencies]` and their `[target.….]` forms appears in `docs/deps.md`.
+4. The `<file>:<item>` of every `allow(unsafe_code)` or `expect(unsafe_code)` site in `src/` matches the `## <n>. <file>:<item>` entries in the "Our code" part of `docs/unsafe.md`, one to one. Dependency rows are checked by `scripts/unsafe-deps.sh`.
 
 Its own line counter is unit-tested inside the file.
 
@@ -1127,7 +1138,7 @@ slurm:
 - Commands run as alice through `sind exec unjam --user alice --` (on the submitter) or `sind ssh alice@worker-N.unjam --`.
 - Record output goes to `/home/alice`.
 
-**`tests/sind/run.sh`** (`bash`, `set -euo pipefail`). It starts with the smoke tests of the scaffold: `sinfo`; `srun -N3 hostname` as alice gives three hosts; the job cgroup's `cgroup.subtree_control`, found by stripping `/step_*` from the task's `/proc/self/cgroup`, lists `io` and `pids` where `EXTRA` is set; and the static binary runs on a worker. Assertions of the tests below use `--batch` output. A helper `wait_running JOBID… [timeout 60s]` polls `squeue -h -j … -o %T` and fails unless every job is `RUNNING`.
+**`tests/sind/run.sh`** (`bash`, `set -Eeuo pipefail`). Every check reports `ok` or `not ok` and the run goes on; a command that still aborts it is reported as `not ok` with its line, and the `failures:` summary is printed on every exit. It starts with the smoke tests of the scaffold: `sinfo`; `srun -N3 hostname` as alice gives three hosts; the job cgroup's `cgroup.subtree_control`, found by stripping `/step_*` from the task's `/proc/self/cgroup`, lists `io` and `pids` where `EXTRA` is set; and the static binary runs on a worker. Assertions of the tests below use `--batch` output. A helper `wait_running JOBID… [timeout 60s]` polls `squeue -h -j … -o %T` and fails unless every job is `RUNNING`.
 
 | # | Test | Assertion |
 |---|---|---|
@@ -1182,7 +1193,7 @@ Open:
 - **Q5.** Are compiled-in themes enough (no theme files, no parser dependency)?
 - **Q6.** Is 16 nodes the right threshold for turning processes off by default? Is attaching as operator or root wanted? srun's permissions decide either way.
 - **Q7.** Heterogeneous jobs and multiple clusters are out of scope for v1. Is that acceptable?
-- **Q8.** There are no host-level metrics (`/proc/stat`, `meminfo`) in round one, because the cgroup root covers totals. Is that acceptable?
+- **Q8.** There are no host-level metrics (`/proc/stat`, `meminfo`) on the wire in round one, because the cgroup root covers totals. Only the local TUI reads `/proc/meminfo`, for its host memory bar (§5.3). Is that acceptable?
 - **Q9.** Do any target sites run Slurm steps in a cgroup namespace (`namespace/linux` or a container plugin)? If so, a resolution via `scontrol listpids` would be needed.
 - **Q11.** Default record interval of 5 s: acceptable? And if measurements show the agent above 1 % of one core under default rules, should an automatic interval stretch be added (about 30 LOC)?
 
@@ -1227,9 +1238,9 @@ Open:
 | D33 | CI integration matrix: 25.11, 26.05, 26.05 with `CgroupJobIdPaths=yes`, on pinned `v0.15.0-*` images | 25.11 and 26.05 only | Tests both job-directory naming schemes on 26.05 (must-fix) |
 | D34 | Reject a TUI-side ingest guard | extensible's guard | The per-agent budget is authoritative; the header shows the ingest rate |
 | D35 | No in-tree Parquet writer; documented pyarrow recipe, tested in IT 6 | `unjam convert` with `parquet` + `arrow` feature | Saves about 3 MB, about 30 crates and about 110 LOC. The brief's "Arrow/Parquet" is met by the Arrow IPC journal. Q1 can bring it back |
-| D36 | **Revised by the owner (Q2):** built-in `--bcast` (srun `--bcast=/tmp/unjam.<J>.<uid>`, agent `--unlink-self` removes the copy at start; about 30 LOC) and static musl release binaries: publish.yml job `binaries` on x86_64 (`ubuntu-latest`) and aarch64 (`ubuntu-24.04-arm`), target `*-unknown-linux-musl`, `mise run build:musl`, `actions/attest-build-provenance`, assets `unjam-linux-{amd64,arm64}` plus `checksums.txt`. New IT 8 | Originally deferred, with `--srun-arg=--bcast=…` as the escape hatch | Sites without a shared filesystem get a working default, and the copy is never left behind. Static binaries run on any compute node's libc |
+| D36 | **Revised by the owner (Q2):** built-in `--bcast` (srun `--bcast=/tmp/unjam.<J>.<uid>.<nonce>`, agent `--unlink-self` removes the copy at start; about 30 LOC) and static musl release binaries: publish.yml job `binaries` on x86_64 (`ubuntu-latest`) and aarch64 (`ubuntu-24.04-arm`), target `*-unknown-linux-musl`, `mise run build:musl`, `actions/attest-build-provenance`, assets `unjam-linux-{amd64,arm64}` plus `checksums.txt`. New IT 8 | Originally deferred, with `--srun-arg=--bcast=…` as the escape hatch | Sites without a shared filesystem get a working default, and the copy is never left behind. Static binaries run on any compute node's libc |
 | D37 | Single CI realm `unjam-it`, passed to the action's `realm` input; mise `[env]` uses a template default | Per-matrix `unjam-<n>` realms | Each matrix job has its own runner and Docker daemon, so realms isolate nothing there (sind `guides/ci-cd.md`). mise `[env]` would override a per-job value anyway |
-| D38 | Dedicated input thread blocks in `crossterm::event::read()` and sends `Msg::Key`/`Msg::Resize` into the same channel as the srun readers. The main thread blocks on that one channel (`Msg::{Key, Resize, Lines, Stderr, Tick}`), handles keys first, decodes lines for at most 10 ms per batch, then checks for keys again (§3.1, §7.3) | Keys polled in the main loop with `event::poll(timeout)` | A draw can block on a slow terminal (ssh); keys still arrive and `q`/Ctrl-C set a quit flag at once. One blocking `recv` is simpler than poll plus timeouts. Cost: 1 thread, about 10 LOC |
+| D38 | Dedicated input thread blocks in `crossterm::event::read()`, queues `Msg::Key`/`Msg::Resize` on an unbounded key queue and wakes the main thread through the data channel of the srun readers. The main thread blocks on that one data channel (`Msg::{Lines, Stderr, End, Tick}`), handles the queued keys first, decodes lines for at most 10 ms per batch, then checks for keys again (§3.1, §7.3) | Keys polled in the main loop with `event::poll(timeout)` | A draw can block on a slow terminal (ssh); keys still arrive and `q`/Ctrl-C set a quit flag at once. One blocking `recv` is simpler than poll plus timeouts. Cost: 1 thread, about 10 LOC |
 | D39 | Exactly 3 layouts as level orders in `View`, walked by one `state::rows`: step (Slurm default: job → step → node → task → process), node (node → cgroup tree → processes), flat (NODE column, global sort; classic `top` locally). `v` cycles. Fold state keyed by `(level, key)`. The sort column orders siblings only. No "by command" layout and no RANK column in round one (§9.2) | Fixed by-node / by-path pivot | Each layout answers a different question. As data, cost ≈ +50 LOC in state.rs and 3 golden tests. Flat sort at 100k processes ≈ 1 ms per frame (select_nth). Replaces the generic by-path view |
 | D40 | Self-monitoring header: TUI CPU and RSS, bytes and messages per second in, control bytes out, the busiest agent's CPU and RSS with its node, drops and errors. `T` gains a 5th field `self_rss_bytes`; no proto bump (§9.1) | Self-CPU of the agents only | The tool must show its own cost on 1k-node jobs. About 30 LOC |
 | D41 | All mock features in v1 (Q13): node heat strip, CPU history bar per row (16 × u16 ring), `r` key and `--record DIR` (TUI writes received events via `record::Writer`, one `.arrows` per node, `unjam.source=tui`), folded node ranges in the step layout (§8.5, §9) | Defer them | Owner decision. About 150 LOC in total; the LOC budget was raised to ≈ 2,700 (cap 2,900) |
@@ -1322,10 +1333,10 @@ Every job runs `mise run <task>` through `jdx/mise-action@v5` (current major, ch
 
 | File | Trigger | Jobs |
 |---|---|---|
-| `.github/workflows/checks.yml` (reusable) | `workflow_call` | `reuse` (`mise run reuse`, reuse 6.2.0, replacing `fsfe/reuse-action`); `fmt`; `clippy` (`mise run lint:sarif` with the pinned clippy-sarif and sarif-fmt, then `upload-sarif` with `if: always()`, `security-events: write` kept); `build`; `test` (includes the budget test); `msrv` (`mise run msrv`); `deny` (`mise run deny`); `size` (`mise run size`, `size:self-test`, `unsafe-deps`, `unsafe-deps:self-test`; `size.sh` writes its numbers to `$GITHUB_STEP_SUMMARY`) |
+| `.github/workflows/checks.yml` (reusable) | `workflow_call` | `reuse` (`mise run reuse`, reuse 6.2.0, replacing `fsfe/reuse-action`); `fmt`; `clippy` (`mise run lint:sarif` with the pinned clippy-sarif and sarif-fmt; the task runs under `bash -o pipefail`, so a clippy error fails the job; then `upload-sarif` with `if: always()`, `security-events: write` kept); `build`; `test` (includes the budget test); `msrv` (`mise run msrv`); `deny` (`mise run deny`); `size` (`mise run size`, `size:self-test`, `unsafe-deps`, `unsafe-deps:self-test`; `size.sh` writes its numbers to `$GITHUB_STEP_SUMMARY`) |
 | `.github/workflows/integration.yml` (reusable) | `workflow_call`, `workflow_dispatch` | `sind`, see below |
 | `.github/workflows/ci.yml` | `push: [main]`, `pull_request`, `schedule: cron "0 4 * * 1"` (catches moving sind images) | `checks` and `integration` in parallel. Permissions `contents: read`, `security-events: write` |
-| `.github/workflows/publish.yml` | tag `v*` | `checks`; `integration`; `publish` (needs both; tag/version check and `cargo publish` kept); `binaries` (needs both; see below); `release` (needs `publish` and `binaries`) |
+| `.github/workflows/publish.yml` | tag `v*` | `verify` (tag on `main`, tag equals the `Cargo.toml` version, CHANGELOG has its section); `checks` and `integration` (need `verify`); `binaries` (needs both; see below); `release` (needs `binaries`); `publish` last (needs `release`, environment `crates-io`, trusted publishing; `cargo publish --locked --no-verify`, since `package` in `checks` verified the same commit and no dependency build script runs while the token is set) |
 | `.github/dependabot.yml` | monthly (kept) | cargo: `groups: { arrow: ["arrow-*"], tui: ["ratatui*", "crossterm", "signal-hook"] }`, `ignore: [{ dependency-name: "signal-hook", versions: [">=0.4"] }]` (crossterm 0.29 requires `^0.3.17`; a 0.4 bump would add a second signal-hook; recorded in `docs/deps.md` and lifted when crossterm moves); github-actions: one group for all actions |
 | cargo-release (`[package.metadata.release]`) | — | Unchanged (`publish = false`, signed commit and tag, `push-remote = "upstream"`). The tool is pinned via mise at 1.1.6; `CONTRIBUTING.md` installs it with `mise install` |
 
@@ -1356,8 +1367,8 @@ Integration needs no cleanup step: runners are ephemeral.
 **`publish.yml`, job `binaries` (D36 revised).**
 
 - Matrix: `amd64` on `ubuntu-latest` (`x86_64-unknown-linux-musl`) and `arm64` on `ubuntu-24.04-arm` (`aarch64-unknown-linux-musl`). A guarded step installs rustup where the runner image lacks it.
-- Steps: `mise run build:musl`; copy the binary to `unjam-linux-<arch>`; `actions/attest-build-provenance@v4` on it (permissions `id-token: write`, `attestations: write`); `actions/upload-artifact@v7`.
-- Job `release` (permissions `contents: write`) downloads both with `actions/download-artifact@v8`, writes `checksums.txt` with `sha256sum`, and runs `gh release create <tag> unjam-linux-amd64 unjam-linux-arm64 checksums.txt --verify-tag --generate-notes`. It needs `publish`, so a tag whose version does not match `Cargo.toml` gets no release. `gh` is preinstalled, so no third-party release action is needed.
+- Steps: `mise run build:musl`; copy the binary to `unjam-linux-<arch>`; run it with `--version` and `--batch 2` (tests and integration run on x86_64 only, so this is the one run of the arm64 binary); `actions/attest-build-provenance@v4` on it (permissions `id-token: write`, `attestations: write`); `actions/upload-artifact@v7`.
+- Job `release` (permissions `contents: write`) downloads both with `actions/download-artifact@v8`, writes `checksums.txt` with `sha256sum`, and runs `gh release create <tag> unjam-linux-amd64 unjam-linux-arm64 checksums.txt --verify-tag --draft` with the version's CHANGELOG section as notes. `verify` gates every job, so a tag whose version does not match `Cargo.toml` gets no release. `gh` is preinstalled, so no third-party release action is needed.
 
 ---
 
@@ -1391,7 +1402,7 @@ Integration needs no cleanup step: runners are ephemeral.
 **Acceptance:**
 
 1. `unjam` shows the cgroup tree with processes on a developer host and on a sind worker. `unjam --batch 2` output passes the golden test.
-2. All unit tests in §14.1 for parsers, sampler, wire (including mux at 1000 agents), state and draw pass. The `alloc_count` test shows 0 allocations per steady-state tick.
+2. All unit tests in §14.1 for parsers, sampler, wire (including mux at 1000 agents), state and draw pass. The `zero_allocations_per_steady_state_tick` test shows 0 allocations per steady-state sample and at most 2 per directory entry for the discovery walk.
 3. On a sind worker, `strace -c` and bench numbers are within the hot-path budgets and recorded in `docs/perf.md`. That includes the per-file read cost of `cpu.stat`, `io.stat` and `memory.stat` (which settles K13 and D12) and the fd-cache hit ratio. The fd-cache self-check passes on real procfs and kernfs, and the forced-failure fallback is tested.
 4. Key latency stays below 50 ms while sampling 2,000 synthetic processes (manual check plus the bounded-decode unit test).
 5. LOC within budget (≈ 1,700 for the phase-3 modules). Binary and crate count gates are re-baselined.

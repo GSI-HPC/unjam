@@ -16,7 +16,7 @@ pub const ESRCH: i32 = 3;
 const ENODEV: i32 = 19;
 
 /// One entity's cached file. `Missing` remembers an absent or unreadable file (controller not
-/// enabled, old kernel, no permission) so it is not retried before the next discovery walk.
+/// enabled, old kernel, no permission) so it is not retried every tick (the walk retries it).
 pub enum Slot {
     Empty,
     Open(File),
@@ -27,7 +27,7 @@ pub enum Slot {
 #[derive(Clone, Copy, Debug)]
 pub enum Target<'a> {
     Cgroup { dir: &'a Path },
-    Proc { pid: u32, start: u64 },
+    Proc { pid: u32, start: u64, comm: &'a str },
 }
 
 /// The metric-source extension point (R10). `&mut self`, because future likwid or PAPI handles
@@ -75,12 +75,15 @@ pub struct Files {
     path: PathBuf,
     pub open: usize,
     pub cap: usize,
+    /// The first permission-denied open as `W` text (`/proc/<pid>/io` of another user's
+    /// process); the sampler sends it once and leaves it empty, so later denials stay quiet.
+    pub denied: Option<String>,
 }
 
 impl Files {
     /// An empty cache that may keep up to `cap` fds open.
     pub fn new(cap: usize) -> Self {
-        Self { buf: vec![0; 4096], path: PathBuf::with_capacity(256), open: 0, cap }
+        Self { buf: vec![0; 4096], path: PathBuf::with_capacity(256), open: 0, cap, denied: None }
     }
 
     /// Reads `dir/name` through `slot`: one `pread` on a cached fd, otherwise open, read and keep
@@ -106,6 +109,10 @@ impl Files {
         match res {
             Ok(n) => Ok(&self.buf[..n]),
             Err(e) => {
+                if e.kind() == PermissionDenied && matches!(s, Slot::Empty) && self.denied.is_none()
+                {
+                    self.denied = Some(format!("{}: permission denied, NA", self.path.display()));
+                }
                 self.release(std::slice::from_mut(s));
                 let missing = matches!(e.kind(), NotFound | PermissionDenied)
                     || e.raw_os_error() == Some(ENODEV);

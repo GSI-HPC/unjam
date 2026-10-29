@@ -1,32 +1,32 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later
 // SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
 
-//! The viewer: one channel that the input thread, the sampler (or srun readers) and a 1 Hz
-//! ticker feed; key bindings, drawing with the self-monitoring header, heat strip and history
-//! bars, and the `--batch` text snapshots (§3.4, §7.3, §9).
+//! The viewer: a data channel that the sampler (or srun readers) and a 1 Hz ticker feed, and a
+//! key queue that the input thread fills (§7.3); key bindings, drawing with the self-monitoring
+//! header, heat strip and history bars, and the `--batch` text snapshots (§3.4, §9).
 
 use std::collections::{HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, LazyLock};
-use std::time::{Duration, Instant, SystemTime};
-use std::{fs, thread};
+use std::thread;
+use std::time::{Duration, Instant};
 
-use ratatui::crossterm::event::{
-    self, Event as Term, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-};
+use ratatui::crossterm::event::{self, Event as Term, KeyCode, KeyEvent};
+use ratatui::crossterm::event::{KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout as Split, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row as TRow, Table};
 use ratatui::{DefaultTerminal, Frame};
 
-use crate::model::{Control, Event, Kind, NA, Rule, TaskSet, What, effective, upsert};
+use crate::agent::{OFF_WALK_MS, now_ms};
+use crate::model::{self, Control, Event, Kind, NA, Rule, TaskSet, What, effective, upsert};
 use crate::record::{Reader, Rec};
-use crate::source::{Files, Slot, kv};
+use crate::source::{Env, Files, Slot, kv};
 use crate::state::{self, HIST, Key, Layout, NCOL, Row, State, View};
 use crate::theme::{THEMES, Theme};
 use crate::{procfs, wire};
@@ -76,8 +76,9 @@ pub struct Opts {
 
 /// The TUI's own cost and data rates for the self-monitoring header (D40).
 struct Mon {
-    /// Cached `/proc/self/stat`, page size and clock ticks.
-    stat: (Files, Slot, [u64; 2]),
+    /// Cached `/proc/self/stat` and (local mode) `/proc/meminfo`, and the page size and clock
+    /// ticks to read them with.
+    stat: (Files, [Slot; 2], Env),
     /// Time and own CPU µs at the last tick; own CPU % and RSS bytes.
     at: [u64; 2],
     tui: [f64; 2],
@@ -124,7 +125,7 @@ impl App {
     pub fn new(opts: Opts, ctl: Sender<String>) -> Self {
         let env = procfs::env("/proc".into(), PathBuf::new());
         let ncpu = thread::available_parallelism().map_or(1, usize::from) as f64;
-        let stat = (Files::new(1), Slot::Empty, [env.page_size, env.clk_tck.max(1)]);
+        let stat = (Files::new(2), [Slot::Empty, Slot::Empty], env);
         let (at, tui, count, rate) = ([now_ms(), 0], [f64::NAN; 2], [0; 3], [0.0; 3]);
         let mon = Mon { stat, at, tui, count, rate, host: [f64::NAN, f64::NAN, ncpu] };
         let layout = if opts.local { Layout::Node } else { Layout::Step };
@@ -186,7 +187,8 @@ impl App {
     }
 
     /// Decodes whole lines into the store. A bad line counts as a node error and asks that
-    /// node for a resync, at most once per 10 s (§7.4).
+    /// node for a resync, at most once per 10 s (§7.4). A recording takes a node's tick before
+    /// the next tick's first line, structure or `T`, changes it.
     pub fn ingest(&mut self, buf: &[u8]) {
         self.mon.count[0] += buf.len() as u64;
         for line in buf.split_inclusive(|&b| b == b'\n') {
@@ -199,9 +201,13 @@ impl App {
             nodes.resize_with(nodes.len().max(node as usize + 1), Default::default);
             let (ok, warn) = match wire::parse(rest, &mut self.vals) {
                 Some(Event::Warn(w)) => (true, Some(format!("node {node}: {w}"))),
+                Some(ev @ Event::Hello { proto, .. }) if proto != wire::PROTO => {
+                    let w = format!("node {node}: proto {proto}, need {}: ignored", wire::PROTO);
+                    (self.st.apply(node, &ev, self.now).is_ok(), Some(w))
+                }
                 Some(ev) => {
                     let tick = matches!(ev, Event::Tick { .. });
-                    let rec = self.rec.as_mut().filter(|_| tick);
+                    let rec = self.rec.as_mut().filter(|_| !ev.is_value());
                     self.ticks += u64::from(tick);
                     let err = rec.and_then(|r| r.node(&self.st, node).err());
                     (self.st.apply(node, &ev, self.now).is_ok(), err)
@@ -225,11 +231,9 @@ impl App {
     fn tick(&mut self) {
         let (now, m) = (now_ms(), &mut self.mon);
         let dt = (now.saturating_sub(m.at[0]) as f64 / 1000.0).max(0.001);
-        let (files, slot, [page, clk]) = &mut m.stat;
-        let stat = files.read(slot, true, Path::new("/proc"), "self/stat").ok();
-        if let Some(s) = stat.and_then(procfs::stat) {
-            let us = (s.utime + s.stime) * 1_000_000 / *clk;
-            m.tui = [us.saturating_sub(m.at[1]) as f64 / dt / 1e4, (s.rss * *page) as f64];
+        let (files, [me, mem], env) = &mut m.stat;
+        if let Some((us, rss)) = procfs::usage(files, me, env) {
+            m.tui = [us.saturating_sub(m.at[1]) as f64 / dt / 1e4, rss as f64];
             m.at[1] = us;
         }
         m.at[0] = now;
@@ -240,8 +244,8 @@ impl App {
             (n.agent[3], n.lines) = (n.lines as f64 / dt, 0);
         }
         if self.opts.local {
-            let info = fs::read("/proc/meminfo").unwrap_or_default();
-            let kb = |k| kv(&info, k).map_or(f64::NAN, |v| v as f64 * 1024.0);
+            let info = files.read(mem, false, &env.proc_root, "meminfo").unwrap_or_default();
+            let kb = |k| kv(info, k).map_or(f64::NAN, |v| v as f64 * 1024.0);
             (m.host[0], m.host[1]) = (kb("MemTotal") - kb("MemAvailable"), kb("MemTotal"));
         }
         self.now = now;
@@ -334,7 +338,8 @@ impl App {
             (_, c) if self.replay_key(c) => return,
             _ => {}
         }
-        let rows = state::rows(&self.st, &self.view, self.cursor.saturating_add(1));
+        let (at, rows) = follow(&self.st, &self.view, self.sel, self.cursor.saturating_add(1));
+        self.cursor = at.unwrap_or(self.cursor);
         let row = rows.get(self.cursor).map(|r| (r.key, r.open, target(&self.st, r)));
         drop(rows);
         match (k.code, row) {
@@ -399,11 +404,11 @@ impl App {
     /// interval; off restarts at `p` (§6.3).
     fn retarget(&mut self, row: Option<Target>, key: char) {
         let mut targets: Vec<_> = self.marks.iter().map(|m| (m.1.clone(), m.2.clone())).collect();
-        if targets.is_empty() {
-            targets.extend(row);
-        }
+        targets.extend(row.filter(|_| self.marks.is_empty()));
         for (tasks, pattern) in targets {
-            let (iv, what) = level(&self.view.rules, &tasks, &pattern);
+            let task = if let TaskSet::Ranges(r) = &tasks { r[0].0 } else { 0 };
+            let path = if pattern == "." { "" } else { &pattern };
+            let (iv, what) = effective(&self.view.rules, task, path);
             let (iv, what) = match (key, what) {
                 ('p', What::Procs) => (iv, What::Cg),
                 ('p', What::Cg) => (0, What::Off),
@@ -411,38 +416,53 @@ impl App {
                 ('+', w) => (iv / 2, w),
                 (_, w) => (iv * 2, w),
             };
-            let interval_ms =
-                if what == What::Off { 0 } else { (iv / 100 * 100).clamp(100, 60_000) };
+            let interval_ms = if what == What::Off { 0 } else { model::interval_ms(iv.into()) };
             let r = Rule { tasks, pattern: pattern.into(), interval_ms, what };
             upsert(&mut self.view.rules, r.clone());
             self.send(&Control::Rule(r));
         }
     }
 
-    /// Whether a node sent no `T` for 3 × the longest rule interval (§7.4), or srun ended.
-    fn stale(&self, i: usize) -> bool {
-        let longest = self.view.rules.iter().map(|r| r.interval_ms).max().unwrap_or(0).max(1000);
-        let n = self.st.nodes.get(i);
-        self.ended || n.is_some_and(|n| self.now.saturating_sub(n.seen) > 3 * u64::from(longest))
+    /// Whether node `i` sent no `T` for 3 × its longest active interval (§7.4), or srun ended.
+    /// Its newest `.` off rule shadows all older ones; with no active rule its agent only
+    /// rescans, every `OFF_WALK_MS`.
+    fn stale(&self, i: u32) -> bool {
+        let mine = self.view.rules.iter().rev().filter(|r| r.tasks.contains(i));
+        let live = mine.take_while(|r| r.what > What::Off || &*r.pattern != ".");
+        let longest = live.filter(|r| r.what > What::Off).map(|r| r.interval_ms.max(1000)).max();
+        let limit = 3 * longest.map_or(OFF_WALK_MS, u64::from);
+        let n = self.st.nodes.get(i as usize);
+        self.ended || n.is_some_and(|n| self.now.saturating_sub(n.seen) > limit)
+    }
+}
+
+/// Where a row's rule resolves, borrowed so drawing builds no owned target: the agent (0 for
+/// cross-node rows, as the agents resolve `*`) and the cgroup path (empty for the job).
+fn at<'a>(st: &'a State, r: &Row) -> Option<(u32, &'a str)> {
+    let c = st.nodes.get(r.node as usize)?.cgs.get(&r.id)?;
+    match r.key {
+        Key::Job => Some((0, "")),
+        Key::Step(_) => Some((0, &*c.path)),
+        Key::Cg(i, _) => Some((i, &*c.path)),
+        Key::Proc(..) | Key::Folded(_) => None,
     }
 }
 
 /// The rule target of a row: all agents for cross-node rows, the row's node otherwise.
 fn target(st: &State, r: &Row) -> Option<Target> {
-    let c = st.nodes.get(r.node as usize)?.cgs.get(&r.id)?;
-    let path = if c.path.is_empty() { ".".into() } else { c.path.to_string() };
-    match r.key {
-        Key::Job => Some((TaskSet::All, ".".into())),
-        Key::Step(_) => Some((TaskSet::All, path)),
-        Key::Cg(i, _) => Some((TaskSet::Ranges(vec![(i, i)]), path)),
-        Key::Proc(..) | Key::Folded(_) => None,
-    }
+    let (i, path) = at(st, r)?;
+    let tasks = if let Key::Cg(..) = r.key { TaskSet::Ranges(vec![(i, i)]) } else { TaskSet::All };
+    Some((tasks, if path.is_empty() { ".".into() } else { path.into() }))
 }
 
-/// The effective rule of a target as the agents resolve it (node 0 for `*`).
-fn level(rules: &[Rule], tasks: &TaskSet, pattern: &str) -> (u32, What) {
-    let task = if let TaskSet::Ranges(r) = tasks { r[0].0 } else { 0 };
-    effective(rules, task, if pattern == "." { "" } else { pattern })
+/// Rows up to `n`, or all when the cursor's entity `k` lies beyond them after a re-sort
+/// (D39), and `k`'s index: draw and keys both act on that entity, not on the index.
+fn follow<'a>(st: &'a State, v: &View, k: Option<Key>, n: usize) -> (Option<usize>, Vec<Row<'a>>) {
+    let mut rows = state::rows(st, v, n);
+    if k.is_some_and(|k| rows.len() == n && rows.iter().all(|r| r.key != k)) {
+        rows = state::rows(st, v, usize::MAX);
+    }
+    (k.and_then(|k| rows.iter().position(|r| r.key == k)), rows)
 }
 
 /// The §6.3 defaults: processes everywhere for small jobs; cgroups at half rate and task
@@ -453,18 +473,14 @@ pub fn default_rules(nodes: u32, interval_ms: u32) -> Vec<Rule> {
     text.iter().filter_map(|t| Rule::parse(t).ok()).collect()
 }
 
-/// Wall-clock milliseconds, the time base of `T` lines and staleness.
-fn now_ms() -> u64 {
-    let d = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
-    u64::try_from(d.as_millis()).unwrap_or(0)
-}
-
-/// Runs a viewer: the ticker, then `--batch` snapshots or the terminal with its input thread.
+/// Runs a viewer: the ticker, then `--batch` snapshots to `out` or the terminal with its input
+/// thread. SIGTERM and SIGHUP quit; the recording is finished on every exit, errors included.
 pub fn view(
     app: &mut App,
     tx: &SyncSender<Msg>,
     rx: &Receiver<Msg>,
     batch: Option<u32>,
+    out: &mut dyn Write,
 ) -> io::Result<()> {
     let (tick, keys) = (tx.clone(), tx.clone());
     thread::spawn(move || {
@@ -472,32 +488,32 @@ pub fn view(
             thread::sleep(Duration::from_secs(1));
         }
     });
-    if let Some(mut left) = batch {
-        let (mut seen, out) = (0, &mut io::stdout().lock());
-        while let Some(m) = (left > 0).then(|| rx.recv().ok()).flatten() {
+    for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGHUP] {
+        signal_hook::flag::register(sig, Arc::clone(&QUIT))?;
+    }
+    let res = if let Some(mut left) = batch {
+        let (mut seen, mut res) = (0, Ok(()));
+        while let Some(m) = (left > 0 && !QUIT.load(Relaxed)).then(|| rx.recv().ok()).flatten() {
             let tick = matches!(m, Msg::Tick);
             app.handle(m);
             if tick && app.ticks > seen {
-                (seen, left) = (app.ticks, left - 1);
-                snapshot(app, out)?;
+                (seen, left, res) = (app.ticks, left - 1, snapshot(app, out));
             }
-            left *= u32::from(!app.ended);
+            left *= u32::from(!app.ended && res.is_ok());
         }
+        res
     } else {
         let (ktx, krx) = mpsc::channel();
         thread::spawn(move || input(&ktx, &keys));
-        for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGHUP] {
-            signal_hook::flag::register(sig, Arc::clone(&QUIT))?;
-        }
         let mut term = ratatui::try_init()?;
         let res = event_loop(app, [rx, &krx], &mut term);
         ratatui::restore();
-        res?;
-    }
+        res
+    };
     if app.rec.is_some() {
         app.record();
     }
-    Ok(())
+    res
 }
 
 /// The input thread (D38): blocks on terminal events; `q`, Ctrl-C (or a dead terminal) set the
@@ -585,7 +601,7 @@ fn shown(rows: &[Row]) -> Vec<usize> {
 fn title(app: &App) -> [String; 2] {
     let (nodes, m, local) = (&app.st.nodes, &app.mon, app.opts.local);
     let procs: usize = nodes.iter().map(|n| n.procs.len()).sum();
-    let stale = (0..nodes.len()).filter(|&i| app.stale(i)).count();
+    let stale = (0..).zip(nodes).filter(|&(i, _)| app.stale(i)).count();
     let (seen, all) = (nodes.len(), (app.expect as usize).max(nodes.len()));
     let src = match nodes.first() {
         Some(n) if local => format!("unjam  {}", n.host),
@@ -595,24 +611,16 @@ fn title(app: &App) -> [String; 2] {
     let layout = ["step", if local { "tree" } else { "node" }, "flat"][app.view.layout as usize];
     let (iv, s, sort) =
         (interval(app.opts.interval_ms, What::Cg), app.now / 1000 % 86_400, SORTS[app.view.sort]);
-    let (arrow, clock) = (
-        if app.view.desc { '▼' } else { '▲' },
-        format!("{:02}:{:02}:{:02}Z", s / 3600, s / 60 % 60, s % 60),
-    );
+    let arrow = if app.view.desc { '▼' } else { '▲' };
+    let clock = format!("{:02}:{:02}:{:02}Z", s / 3600, s / 60 % 60, s % 60);
     let mode = match (&app.replay, &app.rec) {
         (Some(_), _) => ["  [⏸]", "  [▶]"][usize::from(app.playing)],
         (_, Some(_)) => "  ● rec",
         _ => "",
     };
     let l0 = format!(" {src}{mode}  {procs} procs  {iv}  {layout}  sort {sort} {arrow}  {clock}");
-    let [cpu, rss, inb, msg, out] = [
-        ("%", m.tui[0]),
-        ("B", m.tui[1]),
-        ("B/s", m.rate[0]),
-        ("1", m.rate[1]),
-        ("B/s", m.rate[2]),
-    ]
-    .map(|(u, v)| fmt(u, v));
+    let (cpu, rss) = (fmt("%", m.tui[0]), fmt("B", m.tui[1]));
+    let [inb, msg, out] = [("B/s", 0), ("1", 1), ("B/s", 2)].map(|(u, i)| fmt(u, m.rate[i]));
     let mut l1 = format!(" tui {cpu} {rss} · in {inb} {msg} msg/s · out {out}");
     let top = nodes.iter().max_by(|a, b| a.agent[0].total_cmp(&b.agent[0])).filter(|_| !local);
     if let Some(n) = top {
@@ -640,8 +648,8 @@ fn texts(app: &App, r: &Row) -> [String; 5 + NCOL] {
     out[1] = r.name.to_string();
     out[2] = if own { app.st.nodes[r.node as usize].host.clone() } else { String::new() };
     out[3] = if let Key::Proc(_, p) = r.key { p.to_string() } else { String::new() };
-    if let Some((tasks, pat)) = target(&app.st, r).filter(|_| !app.view.rules.is_empty()) {
-        let (iv, what) = level(&app.view.rules, &tasks, &pat);
+    if let Some((task, path)) = at(&app.st, r).filter(|_| !app.view.rules.is_empty()) {
+        let (iv, what) = effective(&app.view.rules, task, path);
         out[4] = format!("{:>5} {}", interval(iv, what), ["o", "c", "p"][what as usize]);
     }
     for (c, (_, unit, _)) in COLS.iter().enumerate() {
@@ -662,7 +670,7 @@ fn bar(t: &Theme, hist: &[u16]) -> Vec<Span<'static>> {
     let span = |h: u16| {
         let lvl = if h == 0 { 0 } else { 1 + (u32::from(h) * 7 / scale).min(7) as usize };
         let style = if h == 0 { t.dim } else { Style::new().fg(t.heat[band(f64::from(h))]) };
-        Span::styled(t.glyphs.bars[lvl].to_string(), style)
+        Span::styled(t.glyphs.bars[lvl], style)
     };
     hist.iter().map(|&h| span(h)).collect()
 }
@@ -681,12 +689,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let height = usize::from(body.height.saturating_sub(1));
     app.view.window = height.saturating_sub(4).max(4);
     let limit = app.cursor.saturating_add(1).max(app.scroll + height);
-    let mut rows = state::rows(&app.st, &app.view, limit);
-    if app.sel.is_some_and(|k| rows.len() == limit && rows.iter().all(|r| r.key != k)) {
-        rows = state::rows(&app.st, &app.view, usize::MAX); // follow it past the window (D39)
-    }
-    app.cursor = app.sel.and_then(|k| rows.iter().position(|r| r.key == k)).unwrap_or(app.cursor);
-    app.cursor = app.cursor.min(rows.len().saturating_sub(1));
+    let (at, rows) = follow(&app.st, &app.view, app.sel, limit);
+    app.cursor = at.unwrap_or(app.cursor).min(rows.len().saturating_sub(1));
     app.sel = rows.get(app.cursor).map(|r| r.key);
     app.scroll = app.scroll.min(app.cursor).max((app.cursor + 1).saturating_sub(height));
     table(f, app, t, &rows[app.scroll.min(rows.len())..rows.len().min(app.scroll + height)], body);
@@ -710,20 +714,21 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 }
 
 /// Local mode: host CPU history and memory gauge (nord-host mock); Slurm mode: the node heat
-/// strip, one cell per ⌈N / width⌉ nodes, dotted where no node has values (D41).
+/// strip, one cell per ⌈N / width⌉ nodes, dotted where no node has values (D41). The wire
+/// carries no core count, so cells band relative to the busiest node (at least one core).
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped bar widths")]
 fn strip_line(app: &App, t: &Theme, width: u16) -> Vec<Span<'static>> {
     let (nodes, [used, total, ncpu]) = (&app.st.nodes, app.mon.host);
-    let glyph =
-        |i: usize, style: Style, n| Span::styled(t.glyphs.bars[i].to_string().repeat(n), style);
+    let glyph = |i: usize, style: Style| Span::styled(t.glyphs.bars[i], style);
     let heat = |pm: f64| Style::new().fg(t.heat[band(pm)]);
     if !app.opts.local {
         let per = nodes.len().div_ceil(usize::from(width.saturating_sub(7)).max(1)).max(1);
         let cpu = |n: &state::Node| n.root_vals()?.get(0, Kind::Counter);
         let max = |c: &[state::Node]| c.iter().filter_map(cpu).max_by(f64::total_cmp);
+        let top = max(nodes).map_or(1e6, |us| us.max(1e6)) / 1e3;
         let cells = nodes
             .chunks(per)
-            .map(|c| max(c).map_or(glyph(0, t.dim, 1), |us| glyph(8, heat(us / 1e3), 1)));
+            .map(|c| max(c).map_or(glyph(0, t.dim), |us| glyph(8, heat(us / top))));
         return [Span::styled(" NODES ", t.dim)].into_iter().chain(cells).collect();
     }
     let v = nodes.first().and_then(state::Node::root_vals);
@@ -733,7 +738,8 @@ fn strip_line(app: &App, t: &Theme, width: u16) -> Vec<Span<'static>> {
     let full = if total > 0.0 { (used / total * 16.0).clamp(0.0, 16.0) as usize } else { 0 };
     let mut spans = vec![Span::styled(" CPU ", t.dim)];
     spans.extend(bar(t, &hist));
-    let mem = [glyph(8, heat(0.0), full), glyph(0, t.dim, 16 - full)];
+    let gauge = |i: usize, style, n| Span::styled(t.glyphs.bars[i].repeat(n), style);
+    let mem = [gauge(8, heat(0.0), full), gauge(0, t.dim, 16 - full)];
     spans.extend([Span::raw(format!(" {}  ", fmt("%", cpu))), Span::styled("MEM ", t.dim)]);
     spans.extend(mem);
     spans.push(Span::raw(format!(" {}/{}", fmt("B", used), fmt("B", total))));
@@ -765,7 +771,7 @@ fn table(f: &mut Frame, app: &App, t: &Theme, vis: &[Row], area: Rect) {
         cells.push(Cell::from(Line::from(bar(t, &r.hist[HIST - usize::from(hw)..]))));
         cells.extend(cols.iter().map(|&c| Cell::from(Line::from(take(5 + c)).right_aligned())));
         cells.push(Cell::from(take(4)));
-        let stale = matches!(r.key, Key::Cg(..) | Key::Proc(..)) && app.stale(r.node as usize);
+        let stale = matches!(r.key, Key::Cg(..) | Key::Proc(..)) && app.stale(r.node);
         let at = if app.scroll + i == app.cursor { 2 } else { usize::from(stale) };
         let look = [Style::new(), t.warn, t.selected][at];
         TRow::new(cells).style(look)
@@ -820,7 +826,8 @@ fn help(app: &App) -> Vec<String> {
 }
 
 /// One `--batch` snapshot (`top -b`): header, every row of the current layout as text, and a
-/// footer with node, stale, error and drop counts.
+/// footer with node, stale, error and drop counts. Names come from agents and journals and go
+/// straight to a terminal, so every control char (ESC, DEL, C1) but `\n` becomes `?`.
 pub fn snapshot(app: &App, w: &mut dyn Write) -> io::Result<()> {
     let rows = state::rows(&app.st, &app.view, usize::MAX);
     let (cols, [l0, l1]) = (shown(&rows), title(app));
@@ -839,14 +846,16 @@ pub fn snapshot(app: &App, w: &mut dyn Write) -> io::Result<()> {
         line(&mut out, &(tx[0].clone() + &tx[1]), [&tx[2], &tx[3], &tx[4]], &|c| tx[5 + c].clone());
     }
     let (nodes, n) = (&app.st.nodes, app.st.nodes.len());
-    let (stale, errors) =
-        ((0..n).filter(|&i| app.stale(i)).count(), nodes.iter().map(|x| x.errors).sum::<u64>());
+    let stale = (0..).zip(nodes).filter(|&(i, _)| app.stale(i)).count();
+    let errors: u64 = nodes.iter().map(|x| x.errors).sum();
     let dropped: u64 = nodes.iter().map(|x| u64::from(x.dropped)).sum();
+    let out = out.replace(|c: char| c.is_control() && c != '\n', "?");
     writeln!(w, "{out}nodes={n} stale={stale} errors={errors} dropped={dropped}\n")
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::Path;
     use std::sync::mpsc;
 
@@ -1008,6 +1017,68 @@ mod tests {
     }
 
     #[test]
+    fn batch_snapshot_replaces_terminal_controls() {
+        let (mut app, _rx) = app(false, "mono");
+        host(&mut app, 0, "n\u{1b}]0;PWNED\u{7}", 1);
+        feed(&mut app, 0, &["P 30 1 3 1 x\u{7f} \u{9b}2J".into()]);
+        app.st.derive();
+        let mut out = Vec::new();
+        snapshot(&app, &mut out).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(!out.chars().any(|c| c.is_control() && c != '\n'), "{out:?}");
+        assert!(out.contains("n?]0;PWNED?"), "{out}");
+    }
+
+    #[test]
+    fn recording_takes_each_tick_before_the_next_ticks_structure() {
+        let dir = std::env::temp_dir().join(format!("unjam-tui-rec-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (mut app, _rx) = app(false, "mono");
+        (app.rec_dir, app.now) = (Some(dir.clone()), 0);
+        app.record();
+        let lines =
+            ["H 1 0.1 n1 42.0 1 0", "D p 0 p_rss_bytes B gauge", "G 1 0 ", "T 1000 0 0 0 -"];
+        feed(&mut app, 0, &lines.map(str::to_owned));
+        let next = ["P 50 1 1 1 sh sh", "T 2000 0 0 0 -", "p 50 0 777", "x 50", "T 3000 0 0 0 -"];
+        feed(&mut app, 0, &next.map(str::to_owned));
+        app.record();
+        let (mut r, warns) = Reader::open(&[dir.join("n1.arrows")]).unwrap();
+        assert!(warns.is_empty(), "{warns:?}");
+        assert_eq!(r.times, [1000, 2000, 3000]);
+        let mut st = State::new();
+        let mut rss = || {
+            let k = r.at.wrapping_add(1);
+            r.goto(&mut st, k).unwrap();
+            st.nodes[0].procs.get(&50).map(|p| p.vals.v[2])
+        };
+        assert_eq!([rss(), rss(), rss()], [None, Some(777), None], "pid 50 lives for tick 2000");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_batch_write_still_finishes_the_recording() {
+        let dir = std::env::temp_dir().join(format!("unjam-tui-fin-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (mut app, _ctl) = app(false, "mono");
+        app.rec_dir = Some(dir.clone());
+        app.record();
+        let (tx, rx) = mpsc::sync_channel(64);
+        let lines = ["H 1 0.1 n1 42.0 1 0", "G 1 0 ", "T 1000 0 0 0 -", "T 2000 0 0 0 -"];
+        let mut wire = String::new();
+        for l in lines {
+            let _ = writeln!(wire, "0\t{}", l.replace(' ', "\t"));
+        }
+        tx.send(Msg::Lines(wire.into_bytes())).unwrap();
+        tx.send(Msg::Tick).unwrap();
+        let mut full: &mut [u8] = &mut [];
+        assert!(view(&mut app, &tx, &rx, Some(5), &mut full).is_err(), "like EPIPE under `| head`");
+        let (r, warns) = Reader::open(&[dir.join("n1.arrows")]).unwrap();
+        assert!(warns.is_empty(), "the end-of-stream marker is written: {warns:?}");
+        assert_eq!(r.times, [1000, 2000]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn corrupt_lines_ask_for_one_resync() {
         let (mut app, rx) = app(false, "mono");
         host(&mut app, 0, "n1", 1);
@@ -1025,6 +1096,16 @@ mod tests {
     }
 
     #[test]
+    fn other_proto_is_logged_and_ignored() {
+        // A node with another proto used to be blank with no error and no log line.
+        let (mut app, rx) = app(false, "mono");
+        feed(&mut app, 0, &["H 2 9.0 n1 42.0 1 0".into(), "G 1 0 ".into()]);
+        assert_eq!(app.log.front().unwrap(), "node 0: proto 2, need 1: ignored");
+        assert!(app.st.nodes[0].cgs.is_empty());
+        assert_eq!((app.st.nodes[0].errors, rx.try_iter().count()), (0, 0), "no resync loop");
+    }
+
+    #[test]
     fn srun_end_marks_every_node_ended() {
         let (mut app, _rx) = app(false, "mono");
         host(&mut app, 0, "n1", 1);
@@ -1034,6 +1115,28 @@ mod tests {
         assert!(app.ended && app.stale(0));
         assert!(title(&app)[0].contains(" 1/4 nodes (ended) "), "{}", title(&app)[0]);
         assert!(app.log.front().unwrap().starts_with("srun ended"));
+    }
+
+    #[test]
+    fn a_node_with_every_subtree_off_is_stale_only_after_its_rescans() {
+        let (mut app, _rx) = app(false, "mono");
+        for (i, n) in ["n1", "n2"].iter().enumerate() {
+            host(&mut app, u32::try_from(i).unwrap(), n, 1);
+        }
+        app.now = app.st.nodes[0].seen + 5_000;
+        assert!(app.stale(0) && app.stale(1), "1 s ticks: stale after 3 s");
+        upsert(&mut app.view.rules, Rule::parse("0\t.\t-\to").unwrap());
+        assert!(!app.stale(0) && app.stale(1), "node 0 is off: it reports every 10 s");
+        upsert(&mut app.view.rules, Rule::parse("0\tuser.slice\t2000\tc").unwrap());
+        assert!(!app.stale(0), "an active subtree again: 3 × 2 s");
+        app.now += 2_000;
+        assert!(app.stale(0));
+        for r in ["*\t.\t-\to", "0\tuser.slice\t-\to"] {
+            upsert(&mut app.view.rules, Rule::parse(r).unwrap());
+        }
+        assert!(!app.stale(0) && !app.stale(1), "everything off: 3 × 10 s");
+        app.now += 24_000;
+        assert!(app.stale(0) && app.stale(1));
     }
 
     #[test]
@@ -1073,6 +1176,27 @@ mod tests {
         let sent: Vec<String> = rx.try_iter().collect();
         assert_eq!(sent[..2], ["C\t*\n", "B\t*\t524288\n"], "the job's node count and --budget");
         assert!(app.marks.is_empty() && app.view.rules.len() == 1);
+    }
+
+    #[test]
+    fn keys_act_on_the_highlighted_row_after_a_resort() {
+        let (mut app, rx) = app(false, "mono");
+        host(&mut app, 0, "n1", 1);
+        app.view.layout = Layout::Node;
+        let name = |app: &App| state::rows(&app.st, &app.view, 9)[app.cursor].name.to_string();
+        app.cursor = state::rows(&app.st, &app.view, 9)
+            .iter()
+            .position(|r| r.name == "system.slice")
+            .unwrap();
+        frame(&mut app, 100, 14);
+        let up =
+            [format!("T {} 0 0 0 -", NOON + 1000), "g 2 0 4590000".into(), "g 3 0 2430000".into()];
+        feed(&mut app, 0, &up);
+        app.st.derive();
+        assert_ne!(name(&app), "system.slice", "user.slice moved onto the cursor index");
+        app.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), ["R\t0\tsystem.slice\t1000\tc\n"]);
+        assert_eq!(name(&app), "system.slice");
     }
 
     #[test]
@@ -1117,6 +1241,16 @@ mod tests {
         assert_eq!(wide, " NODES ██████·");
         let narrow: String = strip(10);
         assert_eq!(narrow, " NODES ██·", "cells of three nodes; the last holds the silent one");
+    }
+
+    #[test]
+    fn heat_strip_bands_relative_to_the_busiest_node() {
+        let (mut app, _rx) = app(false, "nord");
+        host(&mut app, 0, "small", 2);
+        host(&mut app, 1, "big", 50);
+        let t = &THEMES[app.opts.theme];
+        let fg: Vec<_> = strip_line(&app, t, 20)[1..].iter().map(|s| s.style.fg).collect();
+        assert_eq!(fg, [Some(t.heat[0]), Some(t.heat[3])], "1.4 of 34 cores is idle beside 34");
     }
 
     #[test]

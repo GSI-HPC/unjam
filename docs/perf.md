@@ -21,12 +21,19 @@ commit, the machine (sind worker, Slurm line, kernel) and the command that produ
 | — | — | `cpu.stat` | — | — | rstat flush |
 | — | — | `io.stat` | — | — | rstat flush |
 | — | — | `memory.stat` | — | — | |
+| 485e292 | 6.18.44 (dev container, not a sind worker) | `/proc/meminfo` (1.5 KB) | 1.5–2.0 | 2.6–3.5 | Local TUI only, once per second; `fs::read` with its heap buffer was 4.6–5.9 µs. 20,000 reads per case, 3 runs |
 
 ## Benchmarks (`mise run bench`)
 
 | Commit | ns/cgroup | ns/process | bytes/tick | apply ns/value | Notes |
 |---|---|---|---|---|---|
-| — | — | — | — | — | |
+| 48110de | 2,700–3,200 | 1,050–1,100 | 987 | 54–60 | 25.11 fixture (8 cgroups at `c`, 3 processes), release build, dev container on 6.18.44 (not a sind worker); 3 runs. Plain fixture files: no rstat flush. Apply includes `wire::parse` |
+
+## Allocations (unit test, fixtures)
+
+| Commit | Fixture | Sample + encode | Discovery walk | Notes |
+|---|---|---|---|---|
+| — | 25.11, 8 cgroups at `p`, 3 processes | 0 | 143 per walk (2 per directory for `read_dir`, 1 name per entry, 1 path per cgroup) | Walk builds paths for directories only (335 when every entry built one). A real cgroup directory has about 40–60 entries, so about 50 per cgroup per walk (estimate) |
 
 ## Integration measurements
 
