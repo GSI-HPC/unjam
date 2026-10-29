@@ -2,13 +2,13 @@
  tui - - ·┌ detail · any key closes ─────────────────────────────────────────────────────┐
  CPU ▁▁▁▁▁│ cgroup /  (vm)                                                               │
 NAME      │                                                                              │     INT W
-▾ /       │ cg_cpu_usage_usec                   6120000 us   680000 us/s                 │~4    1s p
+▾ /       │ cg_cpu_usage_usec                   6120000 us  68.0%                        │~4    1s p
   ▾ system│ cg_mem_current_bytes             3221225472 B   3.0G                         │12    1s p
-    ▾ sshd│ cg_io_read_bytes           NA (not announced, or the controller or file is   │ 2    1s p
-      └ ss│absent)                                                                       │ 3
-  ▾ user.s│ cg_io_write_bytes          NA (not announced, or the controller or file is   │ 3    1s p
-    └ -bas│absent)                                                                       │ 1
-          │ cg_pids_current            NA (not announced, or the controller or file is   │
+    ▾ sshd│ cg_io_read_bytes           NA (not announced or absent)                      │ 2    1s p
+      └ ss│ cg_io_write_bytes          NA (not announced or absent)                      │ 3
+  ▾ user.s│ cg_pids_current            NA (not announced or absent)                      │ 3    1s p
+    └ -bas│                                                                              │ 1
+          │                                                                              │
           └──────────────────────────────────────────────────────────────────────────────┘
 
  ? help q quit ↑↓ move ←→ fold ␣ mark p level +/- rate v layout s sort / filter r record t theme

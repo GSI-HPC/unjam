@@ -854,27 +854,36 @@ fn table(f: &mut Frame, app: &App, t: &Theme, vis: &[Row], area: Rect) {
     f.render_widget(Table::new(rows, widths).header(header).column_spacing(1).style(t.base), area);
 }
 
-/// Detail popup lines: every column the node announced, raw and as shown, plus path or cmdline.
+/// Detail popup lines: the path or the full command line, then every column the node
+/// announced, raw and as the table shows it; a cross-node row lists its sums.
 fn detail(app: &App, r: &Row) -> Vec<String> {
     let n = &app.st.nodes[r.node as usize];
     let found = match r.key {
         Key::Cg(_, id) => n.cgs.get(&id).map(|c| (0, &c.vals, format!("cgroup /{}", c.path))),
         Key::Proc(_, pid) => {
-            n.procs.get(&pid).map(|p| (1, &p.vals, format!("pid {pid} {}: {}", p.comm, p.cmd)))
+            n.procs.get(&pid).map(|p| (1, &p.vals, format!("pid {pid} {}\n {}", p.comm, p.cmd)))
         }
         _ => None,
     };
     let Some((ent, vals, what)) = found else {
-        return vec![" cross-node row: sums over its nodes".into()];
+        let sums = COLS.iter().zip(r.v).map(|((c, u, _), v)| format!(" {c:<26} {}", fmt(u, v)));
+        let head = [format!(" {}: sums over its nodes", r.name), String::new()];
+        return head.into_iter().chain(sums).collect();
     };
     let mut out = vec![format!(" {what}  ({})", n.host), String::new()];
     for (c, (name, unit, kind)) in app.st.cols.0[ent].iter().enumerate() {
         let (raw, shown) =
             (vals.v.get(c).copied().unwrap_or(NA), vals.get(c, *kind).unwrap_or(f64::NAN));
         let per = if *kind == Kind::Counter { "/s" } else { "" };
+        let (unit, shown) = match (&**unit, kind) {
+            ("us", Kind::Counter) => ("us", fmt("%", shown / 1e4)),
+            ("char", _) => ("", u8::try_from(raw).map_or('?', char::from).to_string()),
+            ("1", _) => ("", fmt("1", shown) + per),
+            (u, _) => (u, fmt(u, shown) + per),
+        };
         out.push(match raw {
-            NA => format!(" {name:<26} NA (not announced, or the controller or file is absent)"),
-            _ => format!(" {name:<26} {raw:>16} {unit}   {}{per}", fmt(unit, shown)),
+            NA => format!(" {name:<26} NA (not announced or absent)"),
+            _ => format!(" {name:<26} {raw:>16} {unit:<3} {shown}"),
         });
     }
     out
@@ -1050,6 +1059,22 @@ mod tests {
         golden("draw-local-mono.txt", &text(&frame(&mut app, 100, 14)));
         app.overlay = 1;
         golden("draw-detail-mono.txt", &text(&frame(&mut app, 100, 14)));
+    }
+
+    #[test]
+    fn detail_shows_the_command_line_letters_and_cross_node_sums() {
+        let (mut app, _rx) = app(false, "mono");
+        host(&mut app, 0, "n1", 1);
+        feed(&mut app, 0, &["D p 3 p_state char gauge".into(), "p 10 0 1 1 3 82".into()]);
+        app.st.derive();
+        let rows = state::rows(&app.st, &app.view, usize::MAX);
+        let sshd = rows.iter().find(|r| r.key == Key::Proc(0, 10)).unwrap();
+        let text = detail(&app, sshd).join("\n");
+        assert!(text.starts_with(" pid 10 sshd\n sshd: /usr/sbin/sshd -D  (n1)"), "{text}");
+        assert!(text.contains(" p_state                                  82     R"), "{text}");
+        assert!(text.contains(" p_threads                                 3     3"), "{text}");
+        let job = detail(&app, &rows[0]).join("\n");
+        assert!(job.starts_with(" job 42: sums over its nodes\n\n CPU%  "), "{job}");
     }
 
     #[test]
