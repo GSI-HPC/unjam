@@ -627,11 +627,12 @@ pub fn fmt(unit: &str, v: f64) -> String {
     if i > 0 && x < 10.0 { format!("{x:.1}{s}{per}") } else { format!("{x:.0}{s}{per}") }
 }
 
-/// `2s` or `500ms`; `-` for off.
+/// `2s`, `7.5s` or `500ms` (at most 5 cells); `-` for off.
 fn interval(ms: u32, what: What) -> String {
     match what {
         What::Off => "-".into(),
         _ if ms.is_multiple_of(1000) => format!("{}s", ms / 1000),
+        _ if ms >= 1000 => format!("{:.1}s", f64::from(ms) / 1000.0),
         _ => format!("{ms}ms"),
     }
 }
@@ -1406,6 +1407,10 @@ mod tests {
         assert_eq!(fmt("ms", 7.0), "7 ms");
         assert_eq!(fmt("B", f64::NAN), "-");
         assert_eq!(interval(500, What::Cg), "500ms");
+        assert_eq!(
+            (interval(7500, What::Cg), interval(3000, What::Procs)),
+            ("7.5s".into(), "3s".into())
+        );
         assert_eq!(interval(2000, What::Procs), "2s");
         let mut r = Row { v: [1.0, f64::NAN, f64::NAN, 2.0, f64::NAN], ..Row::default() };
         assert_eq!(shown(&[r.clone()]), [0, 3]);
