@@ -130,8 +130,9 @@ impl App {
         let mon = Mon { stat, at, tui, count, rate, host: [f64::NAN, f64::NAN, ncpu] };
         let layout = if opts.local { Layout::Node } else { Layout::Step };
         let (toggled, filter, local) = (HashSet::new(), String::new(), opts.local);
+        let (rules, stale) = (vec![], vec![]);
         let view =
-            View { layout, sort: 1, desc: true, toggled, filter, rules: vec![], window: 16, local };
+            View { layout, sort: 1, desc: true, toggled, filter, rules, window: 16, local, stale };
         let (st, log, now) = (State::new(), VecDeque::new(), now_ms());
         let (cursor, sel, scroll, marks, overlay, ticks, vals) = (0, None, 0, vec![], 0, 0, vec![]);
         Self {
@@ -253,6 +254,7 @@ impl App {
             self.seek(|_| at);
         }
         self.now = self.replay.as_ref().map_or(now, Reader::now);
+        self.view.stale = (0..).zip(&self.st.nodes).map(|(i, _)| self.stale(i)).collect();
         self.st.derive();
     }
 
@@ -310,6 +312,7 @@ impl App {
             Msg::Stderr(s) => self.log(s),
             Msg::End => {
                 (self.ended, self.now) = (true, now_ms());
+                self.view.stale = vec![true; self.st.nodes.len()];
                 self.log("srun ended: the job is over or every agent has gone".into());
                 QUIT.fetch_or(self.st.nodes.is_empty(), Relaxed);
             }
@@ -423,7 +426,8 @@ impl App {
         }
     }
 
-    /// Whether node `i` sent no `T` for 3 × its longest active interval (§7.4), or srun ended.
+    /// Whether node `i` sent no `T` for 3 × its longest active interval since its first one
+    /// (§7.4), or srun ended.
     /// Its newest `.` off rule shadows all older ones; with no active rule its agent only
     /// rescans, every `OFF_WALK_MS`.
     fn stale(&self, i: u32) -> bool {
@@ -432,7 +436,7 @@ impl App {
         let longest = live.filter(|r| r.what > What::Off).map(|r| r.interval_ms.max(1000)).max();
         let limit = 3 * longest.map_or(OFF_WALK_MS, u64::from);
         let n = self.st.nodes.get(i as usize);
-        self.ended || n.is_some_and(|n| self.now.saturating_sub(n.seen) > limit)
+        self.ended || n.is_some_and(|n| n.seen > 0 && self.now.saturating_sub(n.seen) > limit)
     }
 }
 
@@ -648,8 +652,11 @@ fn texts(app: &App, r: &Row) -> [String; 5 + NCOL] {
     let own = matches!(r.key, Key::Cg(..) | Key::Proc(..));
     let mut out: [String; 5 + NCOL] = Default::default();
     out[0] = format!("{:w$}{glyph}", "", w = usize::from(r.depth) * 2);
-    out[1] = r.name.to_string();
-    out[2] = if own { app.st.nodes[r.node as usize].host.clone() } else { String::new() };
+    // The job row exists before any node has reported.
+    let host = app.st.nodes.get(r.node as usize).map_or("", |n| &n.host);
+    let dead = matches!(r.key, Key::Cg(..)) && *r.name == *host && app.stale(r.node);
+    out[1] = format!("{}{}", r.name, if dead { " (stale)" } else { "" });
+    out[2] = if own { host.to_owned() } else { String::new() };
     out[3] = if let Key::Proc(_, p) = r.key { p.to_string() } else { String::new() };
     if let Some((task, path)) = at(&app.st, r).filter(|_| !app.view.rules.is_empty()) {
         let (iv, what) = effective(&app.view.rules, task, path);
@@ -726,12 +733,12 @@ fn strip_line(app: &App, t: &Theme, width: u16) -> Vec<Span<'static>> {
     let heat = |pm: f64| Style::new().fg(t.heat[band(pm)]);
     if !app.opts.local {
         let per = nodes.len().div_ceil(usize::from(width.saturating_sub(7)).max(1)).max(1);
-        let cpu = |n: &state::Node| n.root_vals()?.get(0, Kind::Counter);
-        let max = |c: &[state::Node]| c.iter().filter_map(cpu).max_by(f64::total_cmp);
-        let top = max(nodes).map_or(1e6, |us| us.max(1e6)) / 1e3;
-        let cells = nodes
-            .chunks(per)
-            .map(|c| max(c).map_or(glyph(0, t.dim), |us| glyph(8, heat(us / top))));
+        let live = (0..).zip(nodes).map(|(i, n)| n.root_vals().filter(|_| !app.stale(i)));
+        let live: Vec<_> = live.map(|v| v.and_then(|v| v.get(0, Kind::Counter))).collect();
+        let max = |c: &[Option<f64>]| c.iter().flatten().copied().max_by(f64::total_cmp);
+        let top = max(&live).map_or(1e6, |us| us.max(1e6)) / 1e3;
+        let cells =
+            live.chunks(per).map(|c| max(c).map_or(glyph(0, t.dim), |us| glyph(8, heat(us / top))));
         return [Span::styled(" NODES ", t.dim)].into_iter().chain(cells).collect();
     }
     let v = nodes.first().and_then(state::Node::root_vals);
@@ -814,13 +821,16 @@ fn help(app: &App) -> Vec<String> {
     let keys = " Enter detail  a clear marks  0 reset rules  S reverse sort  Esc close";
     let mut out = vec![format!(" {HINTS}"), keys.into(), String::new()];
     out.push(format!(" {:<16}     CPU     RSS     OUT/s   MSG/s  DROP   ERR SKEW ms", "NODE"));
-    for n in &app.st.nodes {
+    for (i, n) in (0..).zip(&app.st.nodes) {
         let [c, r, o, m] =
             [("%", 0), ("B", 1), ("B/s", 2), ("1", 3)].map(|(u, i)| fmt(u, n.agent[i]));
         let skew = i128::from(n.prev[0]) - i128::from(n.seen);
         out.push(format!(
-            " {:<16} {c:>7} {r:>7} {o:>9} {m:>7} {:>5} {:>5} {skew:>7}",
-            n.host, n.dropped, n.errors
+            " {:<16} {c:>7} {r:>7} {o:>9} {m:>7} {:>5} {:>5} {skew:>7}{}",
+            n.host,
+            n.dropped,
+            n.errors,
+            if app.stale(i) { " stale" } else { "" }
         ));
     }
     out.push(String::new());
@@ -972,6 +982,8 @@ mod tests {
     #[test]
     fn draw_slurm_narrow() {
         let (mut app, _rx) = app(false, "mono");
+        let empty = text(&frame(&mut app, 80, 16));
+        assert!(empty.contains("job"), "before any node reported:\n{empty}");
         for (i, n) in ["n1", "n2", "n3"].iter().enumerate() {
             host(&mut app, u32::try_from(i).unwrap(), n, 3 - i as u64);
         }
@@ -1151,7 +1163,8 @@ mod tests {
         let start: Vec<String> = rx.try_iter().collect();
         assert_eq!(start, ["B\t*\t524288\n", "R\t*\t.\t1000\tp\n"]);
         let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
-        app.view.layout = Layout::Node;
+        // NAME order: an off row has no CPU% and would sort last under the cursor index.
+        (app.view.layout, app.view.sort, app.view.desc) = (Layout::Node, 0, false);
         app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         let rows = state::rows(&app.st, &app.view, 9);
         let name = rows[app.cursor].name.to_string();
