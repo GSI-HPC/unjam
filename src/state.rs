@@ -528,22 +528,32 @@ impl<'a> Walk<'a, '_> {
     }
 
     /// Step layout: every node's job-level cgroups (steps), or those of one step, as rows
-    /// named by their host, each with its step name.
+    /// named by their host, each with its step name. Below a step root (`unjam record`
+    /// journals) the root's kids are tasks: their step is the node's, `4242.1`.
     fn members(&self, step: Option<u64>) -> impl Iterator<Item = (&'a str, Row<'a>)> + '_ {
         let st = self.st;
         let per_node = (0..).zip(&st.nodes).filter_map(|(i, n)| Some((i, n, n.cgs.get(&n.root)?)));
         let all = per_node.flat_map(|(i, n, root)| {
             root.kids.iter().filter_map(move |k| Some((i, n, *k, n.cgs.get(k)?)))
         });
-        all.filter(move |(.., c)| step.is_none_or(|h| hash(seg(&c.path)) == h))
-            .map(move |(i, n, k, c)| (seg(&c.path), self.cg(i, k, c, Some(&n.host))))
+        let name = |n: &'a Node, c: &'a Cg| match seg(&c.path) {
+            s if s.starts_with("task_") && !n.step.is_empty() => &*n.step,
+            s => s,
+        };
+        all.filter(move |(_, n, _, c)| step.is_none_or(|h| hash(name(n, c)) == h))
+            .map(move |(i, n, k, c)| (name(n, c), self.cg(i, k, c, Some(&n.host))))
     }
 
-    /// Flat layout: every process, plus leaf cgroups whose processes are not sampled.
+    /// Flat layout: every process, plus leaf cgroups whose processes are not sampled (with no
+    /// rules, as in replay: that hold none).
     fn flat(&self, i: u32, n: &'a Node, out: &mut Vec<Row<'a>>) {
         out.extend(n.procs.keys().filter_map(|&p| self.proc_row(i, p)));
-        let leaf =
-            |c: &&Cg| c.kids.is_empty() && effective(&self.v.rules, i, &c.path).1 < What::Procs;
+        let rules = &self.v.rules;
+        let unsampled = |c: &Cg| match &rules[..] {
+            [] => c.procs.is_empty(),
+            _ => effective(rules, i, &c.path).1 < What::Procs,
+        };
+        let leaf = |c: &&Cg| c.kids.is_empty() && unsampled(c);
         out.extend(n.cgs.iter().filter(|(_, c)| leaf(c)).map(|(&id, c)| self.cg(i, id, c, None)));
     }
 
@@ -859,13 +869,25 @@ mod tests {
 "
         );
         let mut v = view(Layout::Flat);
-        assert_eq!(dump(&rows(&st, &v, 3)), "  task_0 120\n  ./a.out -n 4 100\n  task_0 60\n");
+        let replay = dump(&rows(&st, &v, 3));
+        assert_eq!(replay, "  ./a.out -n 4 100\n  ./a.out -n 4 50\n  task_10 40\n", "no rules");
         v.rules = vec![Rule::parse("*\t.\t1000\tp").unwrap()];
         let flat = dump(&rows(&st, &v, 4));
         assert_eq!(flat, "  ./a.out -n 4 100\n  ./a.out -n 4 50\n  kworker 20\n  kworker 10\n");
         (v.sort, v.desc) = (NCOL + 1, false);
         let by_node = dump(&rows(&st, &v, 4));
         assert_eq!(by_node, "  ./a.out -n 4 100\n  kworker 20\n  ./a.out -n 4 50\n  kworker 10\n");
+    }
+
+    #[test]
+    fn a_step_journal_names_its_step() {
+        let mut st = State::new();
+        feed(&mut st, 0, &["H 1 0.1 n1 4242.1 1 0"]);
+        feed(&mut st, 0, &DESC[1..]);
+        feed(&mut st, 0, &["G 1 0 ", "G 2 1 task_0"]);
+        let rows = rows(&st, &view(Layout::Step), 9);
+        let names: Vec<_> = rows.iter().map(|r| r.name.to_string()).collect();
+        assert_eq!(names, ["job 4242", "4242.1", "n1"], "not task_0");
     }
 
     #[test]
