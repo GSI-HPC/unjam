@@ -316,6 +316,11 @@ impl Track {
         Ok(())
     }
 
+    /// An `unjam.*` schema metadata value, `""` if absent.
+    fn tag(&self, k: &str) -> &str {
+        self.schema.metadata().get(&format!("unjam.{k}")).map_or("", String::as_str)
+    }
+
     /// Empties node `i` and announces the journal's identity and columns (`H`, `D`).
     fn reset(&mut self, st: &mut State, i: u32) {
         if let Some(n) = st.nodes.get_mut(i as usize) {
@@ -421,7 +426,8 @@ pub struct Reader {
 }
 
 impl Reader {
-    /// Opens and indexes every journal; the warnings name truncated ones. Nodes stamp a round
+    /// Opens and indexes every journal; the warnings name truncated ones, repeated hosts and
+    /// other jobs or steps than the first file's. Nodes stamp a round
     /// a few ms apart, so ticks closer than half the shortest tick gap of any journal form one
     /// round, which the cursor visits at its latest tick.
     pub fn open(paths: &[PathBuf]) -> Result<(Self, Vec<String>), String> {
@@ -429,6 +435,17 @@ impl Reader {
         for p in paths {
             let (t, ts, cut) = Track::open(p)?;
             warns.extend(cut.map(|n| format!("{}: truncated at byte {n}", p.display())));
+            if tracks.iter().any(|o: &Track| o.tag("host") == t.tag("host")) {
+                warns.push(format!("{}: host {} again", p.display(), t.tag("host")));
+            }
+            if tracks.first().is_some_and(|o| ["job", "step"].iter().any(|&k| o.tag(k) != t.tag(k)))
+            {
+                warns.push(format!(
+                    "{}: another job or step than {}",
+                    p.display(),
+                    paths[0].display()
+                ));
+            }
             gap = ts.windows(2).map(|w| w[0].abs_diff(w[1])).fold(gap, u64::min);
             tracks.push(t);
             times.extend(ts);
@@ -441,6 +458,11 @@ impl Reader {
         (!times.is_empty())
             .then_some((Self { tracks, times, at: usize::MAX }, warns))
             .ok_or_else(none)
+    }
+
+    /// An `unjam.*` metadata value of the first journal, `""` if absent.
+    pub fn tag(&self, k: &str) -> &str {
+        self.tracks[0].tag(k)
     }
 
     /// The cursor time.
@@ -476,23 +498,31 @@ fn bare_tick(ts_ms: u64) -> Event<'static> {
     Event::Tick { ts_ms, self_cpu_us: NA, out_bytes: NA, dropped: 0, self_rss: NA }
 }
 
-/// `--at`: `start`, `end`, `+DUR` after the start, `-DUR` before the end, or `HH:MM[:SS]` UTC
-/// on the first day of the recording (the next day if that is before its start).
+/// `--at`: `start`, `end`, `+DUR` after the start, `-DUR` before the end, or `HH:MM[:SS][Z]`
+/// UTC on the first day of the recording (the next day if that is before its start and in
+/// the recording, else the start).
 fn at(s: &str, first: u64, last: u64) -> Result<u64, String> {
     let dur = |d: &str| crate::parse_dur(d).map(|d| u64::try_from(d.as_millis()).unwrap_or(0));
     let bad = || format!("bad --at {s:?} (start, end, +DUR, -DUR or HH:MM[:SS])");
-    let hms: Result<Vec<u64>, _> = s.split(':').map(str::parse).collect();
+    let hms: Result<Vec<u64>, _> =
+        s.strip_suffix('Z').unwrap_or(s).split(':').map(str::parse).collect();
     let secs = match (s, hms.as_deref()) {
         ("start", _) => return Ok(first),
         ("end", _) => return Ok(last),
         _ if s.starts_with('+') => return Ok(first + dur(&s[1..])?),
         _ if s.starts_with('-') => return Ok(last.saturating_sub(dur(&s[1..])?)),
-        (_, Ok([h, m])) => h * 3600 + m * 60,
-        (_, Ok([h, m, sec])) => h * 3600 + m * 60 + sec,
+        (_, Ok([h, m])) if *h < 24 && *m < 60 => h * 3600 + m * 60,
+        (_, Ok([h, m, sec])) if *h < 24 && *m < 60 && *sec < 60 => h * 3600 + m * 60 + sec,
         _ => return Err(bad()),
     };
     let t = first / DAY * DAY + secs * 1000;
-    Ok(if t < first { t + DAY } else { t })
+    Ok(if t >= first {
+        t
+    } else if t + DAY <= last {
+        t + DAY
+    } else {
+        first
+    })
 }
 
 /// `unjam --replay FILE…`: `--batch N` prints N snapshots one tick apart from `--at`;
@@ -507,12 +537,14 @@ pub fn replay(
     let (first, last) = (r.times[0], r.times[r.times.len() - 1]);
     let k = r.find(at_.map_or(Ok(first), |s| at(s, first, last))?);
     let ((tx, rx), (ctl, _)) = (mpsc::sync_channel(64), mpsc::channel());
-    let mut app = App::new(tui::Opts { source: "--replay".into(), ..opts }, ctl);
+    // The recorded interval, not the --interval default, is what the header should name.
+    let interval_ms = r.tag("interval_ms").parse().unwrap_or(opts.interval_ms);
+    let mut app = App::new(tui::Opts { source: "--replay".into(), interval_ms, ..opts }, ctl);
     app.view.layout = Layout::Node;
     r.goto(&mut app.st, k)?;
+    app.replay = Some(r);
     let Some(n) = n else {
         app.log.extend(warns);
-        app.replay = Some(r);
         let res = tui::view(&mut app, &tx, &rx, None, &mut io::sink());
         return res.map_err(|e| format!("tui: {e}"));
     };
@@ -520,12 +552,15 @@ pub fn replay(
     for w in &warns {
         let _ = writeln!(err, "unjam: {w}");
     }
-    snapshots(&mut app, &mut r, n, &mut io::stdout().lock())
+    snapshots(&mut app, n, &mut io::stdout().lock())
 }
 
-/// `--batch N` for replay: a snapshot per tick from the cursor, at most N, until the end.
-fn snapshots(app: &mut App, r: &mut Reader, n: u32, out: &mut dyn Write) -> Result<(), String> {
+/// `--batch N` for replay: a snapshot per tick from the cursor, at most N, until the end. The
+/// batch plays, so the header shows `[▶]`, then `[end]`.
+fn snapshots(app: &mut App, n: u32, out: &mut dyn Write) -> Result<(), String> {
+    app.playing = true;
     for i in 0..n {
+        let Some(r) = app.replay.as_mut() else { break };
         if i > 0 && r.at + 1 >= r.times.len() {
             break;
         }
@@ -1078,8 +1113,9 @@ mod tests {
         app.view.layout = Layout::Node;
         let k = r.find(at("+5s", r.times[0], r.times[13]).unwrap());
         r.goto(&mut app.st, k).unwrap();
+        app.replay = Some(r);
         let mut out = Vec::new();
-        snapshots(&mut app, &mut r, 3, &mut out).unwrap();
+        snapshots(&mut app, 3, &mut out).unwrap();
         let got = String::from_utf8(out).unwrap();
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/golden/batch-replay.txt");
@@ -1090,6 +1126,15 @@ mod tests {
             fs::read_to_string(&path).unwrap_or_default() == got,
             "UNJAM_BLESS=1 rewrites it:\n{got}"
         );
+    }
+
+    #[test]
+    fn a_repeated_host_warns() {
+        let dir = tmp("warn");
+        let (p1, _) = journal(&dir.0, "n1", 3);
+        let (r, warns) = Reader::open(&[p1.clone(), p1]).unwrap();
+        assert!(warns.iter().any(|w| w.ends_with("host n1 again")), "{warns:?}");
+        assert_eq!(r.tag("host"), "n1");
     }
 
     #[test]
@@ -1106,11 +1151,14 @@ mod tests {
             ("+90s", first + 90_000),
             ("-1m", last - 60_000),
             ("01:30", DAY + 5_400_000),
-            ("00:30:01", 2 * DAY + 1_801_000),
+            ("01:30:15Z", DAY + 5_415_000),
+            ("00:30:01", first),
         ] {
             assert_eq!(at(s, first, last), Ok(want), "{s}");
         }
-        for bad in ["soon", "1:2:3:4", "+2h", ""] {
+        let midnight = (DAY + 23 * 3_600_000, 2 * DAY + 3_600_000);
+        assert_eq!(at("00:30", midnight.0, midnight.1), Ok(2 * DAY + 1_800_000), "the next day");
+        for bad in ["soon", "1:2:3:4", "+2h", "", "99:99", "07:01:99", "24:00"] {
             assert!(at(bad, first, last).is_err(), "{bad}");
         }
     }

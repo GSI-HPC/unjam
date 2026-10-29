@@ -138,7 +138,7 @@ pub struct App {
     vals: Vec<u64>,
     /// Replay: the reader and whether it plays; live: the recording and its `--record` DIR.
     pub replay: Option<Reader>,
-    playing: bool,
+    pub playing: bool,
     rec: Option<Rec>,
     pub rec_dir: Option<PathBuf>,
     /// `z`: the agent output held back while the view is paused.
@@ -708,17 +708,28 @@ fn title(app: &App) -> [String; 2] {
         _ => format!("unjam {}  {seen}/{all} nodes ({stale} stale)", app.opts.source),
     };
     let layout = ["step", if local { "tree" } else { "node" }, "flat"][app.view.layout as usize];
-    let (iv, s, sort) =
-        (interval(app.opts.interval_ms, What::Cg), app.now / 1000 % 86_400, SORTS[app.view.sort]);
+    let (iv, sort) = (interval(app.opts.interval_ms, What::Cg), SORTS[app.view.sort]);
     let arrow = if app.view.desc { '▼' } else { '▲' };
-    let clock = format!("{:02}:{:02}:{:02}Z", s / 3600, s / 60 % 60, s % 60);
+    let clock = |ms: u64| {
+        let s = ms / 1000 % 86_400;
+        format!("{:02}:{:02}:{:02}Z", s / 3600, s / 60 % 60, s % 60)
+    };
     let mode = match (&app.replay, &app.rec) {
         _ if app.held.is_some() => "  [paused]",
+        (Some(r), _) if r.at + 1 >= r.times.len() => "  [end]",
         (Some(_), _) => ["  [⏸]", "  [▶]"][usize::from(app.playing)],
         (_, Some(r)) => ["  ● rec", "  rec failed"][usize::from(r.failed())],
         _ => "",
     };
-    let l0 = format!(" {src}{mode}  {procs} procs  {iv}  {layout}  sort {sort} {arrow}  {clock}");
+    let now = clock(app.now);
+    let l0 = format!(" {src}{mode}  {procs} procs  {iv}  {layout}  sort {sort} {arrow}  {now}");
+    // Replay has no live agents to monitor: line 2 is the position in the recording.
+    if let Some(r) = &app.replay {
+        let (n, t) = (r.times.len(), &r.times);
+        let pos =
+            format!(" tick {}/{n}  {} … {}", r.at.min(n - 1) + 1, clock(t[0]), clock(t[n - 1]));
+        return [l0, pos];
+    }
     let (cpu, rss) = (fmt("%", m.tui[0]), fmt("B", m.tui[1]));
     let [inb, msg, out] = [("B/s", 0), ("1", 1), ("B/s", 2)].map(|(u, i)| fmt(u, m.rate[i]));
     let (drop, err) =
