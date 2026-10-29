@@ -58,7 +58,7 @@ const HINTS: &str = "? help q quit ↑↓ move ←→ fold ␣ mark p level +/- 
 const REPLAY: &str = "? help q quit ␣ play , . tick < > 60s g G start/end v layout / filter";
 // budget: data
 /// Help pane keys and legend, live; each line fits the 62 columns of the pane at 80x24.
-const HELP: [&str; 9] = [
+const HELP: [&str; 10] = [
     "↑↓ j k  PgUp PgDn  g G  move         Enter  detail",
     "← → h l  fold (← on a leaf: parent)  ␣  mark    a  clear",
     "p  level: p procs, c cgroups, o off  0  reset the rules",
@@ -66,6 +66,7 @@ const HELP: [&str; 9] = [
     "v  layout: step, node, flat          s S  sort, reverse",
     "/  filter by name or path (Enter keeps, Esc clears)",
     "r  record to DIR/<host>.arrows       t  theme    q  quit",
+    "z  pause: hold updates (z again resumes)",
     "INT W: interval and level of the row (p, c or o)",
     "PIDS ~N: summed threads (no pids controller)    -: no value",
 ];
@@ -140,6 +141,8 @@ pub struct App {
     playing: bool,
     rec: Option<Rec>,
     pub rec_dir: Option<PathBuf>,
+    /// `z`: the agent output held back while the view is paused.
+    held: Option<Vec<Vec<u8>>>,
 }
 
 impl App {
@@ -180,6 +183,7 @@ impl App {
             replay: None,
             playing: false,
             rec: None,
+            held: None,
             rec_dir: None,
         }
     }
@@ -263,6 +267,8 @@ impl App {
             m.at[1] = us;
         }
         m.at[0] = now;
+        // A paused view keeps its clock, so no node turns stale for the held output.
+        let now = if self.held.is_some() { self.now } else { now };
         let span = now.saturating_sub(m.at[2]);
         if span >= u64::from(self.opts.interval_ms.max(1000)) {
             let dt = span as f64 / 1000.0;
@@ -338,7 +344,12 @@ impl App {
         let now = matches!(m, Msg::Key(_) | Msg::Resize | Msg::End);
         match m {
             Msg::Key(k) => self.on_key(k),
-            Msg::Lines(b) => self.ingest(&b),
+            Msg::Lines(b) => match &mut self.held {
+                // A pause that holds more than this resumes by itself, to bound the memory.
+                Some(h) if h.len() < 4096 => h.push(b),
+                Some(_) => (self.pause(), self.ingest(&b)).1,
+                None => self.ingest(&b),
+            },
             Msg::Stderr(s) => self.log(s),
             Msg::End => {
                 (self.ended, self.now) = (true, now_ms());
@@ -352,6 +363,14 @@ impl App {
             Msg::Resize => {}
         }
         now
+    }
+
+    /// `z`: holds the agent output, or applies what was held and resumes.
+    fn pause(&mut self) {
+        match self.held.take() {
+            Some(h) => h.iter().for_each(|b| self.ingest(b)),
+            None => self.held = Some(vec![]),
+        }
     }
 
     /// Moves the cursor by `d` rows; it then stays on its index until the next key.
@@ -376,6 +395,10 @@ impl App {
         let (at, rows) = follow(&self.st, &self.view, self.sel, self.cursor.saturating_add(1));
         self.cursor = at.unwrap_or(self.cursor);
         let row = rows.get(self.cursor).map(|r| (r.key, r.open, target(&self.st, r)));
+        let parent = rows.get(self.cursor).and_then(|r| {
+            let p = rows[..self.cursor].iter().rposition(|p| p.depth < r.depth)?;
+            Some((p, rows[p].key))
+        });
         drop(rows);
         match (k.code, row) {
             (KeyCode::Up | KeyCode::Char('k'), _) => self.go(-1),
@@ -386,7 +409,9 @@ impl App {
             (KeyCode::End | KeyCode::Char('G'), _) => self.go(isize::MAX),
             (KeyCode::Left | KeyCode::Right | KeyCode::Char('h' | 'l'), Some((key, open, _))) => {
                 let unfold = matches!(k.code, KeyCode::Right | KeyCode::Char('l'));
-                if open.is_some_and(|o| o != unfold) && !self.view.toggled.remove(&key) {
+                if let Some((p, pk)) = parent.filter(|_| !unfold && open != Some(true)) {
+                    (self.cursor, self.sel) = (p, Some(pk));
+                } else if open.is_some_and(|o| o != unfold) && !self.view.toggled.remove(&key) {
                     self.view.toggled.insert(key);
                 }
             }
@@ -401,7 +426,7 @@ impl App {
     }
 
     /// Commands: quit, overlays, rules (`p`, `+`, `-`, `0`; live only), layout, sort, filter
-    /// (`/` edits the current text), theme.
+    /// (`/` edits the current text), theme, recording and pause (live only).
     fn act(&mut self, code: KeyCode, row: Option<Target>) {
         let (sort, local) = (self.view.sort, self.opts.local);
         match code {
@@ -434,6 +459,7 @@ impl App {
                 self.opts.theme = (self.opts.theme + 1) % THEMES.len();
             }
             KeyCode::Char('r') if self.replay.is_none() => self.record(),
+            KeyCode::Char('z') if self.replay.is_none() => self.pause(),
             _ => {}
         }
     }
@@ -488,10 +514,18 @@ fn at<'a>(st: &'a State, r: &Row) -> Option<(u32, &'a str)> {
     }
 }
 
-/// The rule target of a row: all agents for cross-node rows, the row's node otherwise.
+/// The rule target of a row: all agents for cross-node rows, the row's node otherwise; a
+/// process row targets its cgroup.
 fn target(st: &State, r: &Row) -> Option<Target> {
-    let (i, path) = at(st, r)?;
-    let tasks = if let Key::Cg(..) = r.key { TaskSet::Ranges(vec![(i, i)]) } else { TaskSet::All };
+    let (i, path) = match r.key {
+        Key::Proc(i, p) => {
+            let n = st.nodes.get(i as usize)?;
+            (i, &*n.cgs.get(&n.procs.get(&p)?.cg)?.path)
+        }
+        _ => at(st, r)?,
+    };
+    let own = matches!(r.key, Key::Cg(..) | Key::Proc(..));
+    let tasks = if own { TaskSet::Ranges(vec![(i, i)]) } else { TaskSet::All };
     Some((tasks, if path.is_empty() { ".".into() } else { path.into() }))
 }
 
@@ -601,7 +635,9 @@ fn event_loop(app: &mut App, rx: [&Receiver<Msg>; 2], t: &mut DefaultTerminal) -
     let (frame, mut drawn, mut dirty) = (Duration::from_millis(250), None::<Instant>, true);
     while !QUIT.load(Relaxed) {
         if dirty && drawn.is_none_or(|d| d.elapsed() >= frame) {
-            app.now = app.replay.as_ref().map_or_else(now_ms, Reader::now);
+            if app.held.is_none() {
+                app.now = app.replay.as_ref().map_or_else(now_ms, Reader::now);
+            }
             t.draw(|f| draw(f, app))?;
             (drawn, dirty) = (Some(Instant::now()), false);
         }
@@ -677,6 +713,7 @@ fn title(app: &App) -> [String; 2] {
     let arrow = if app.view.desc { '▼' } else { '▲' };
     let clock = format!("{:02}:{:02}:{:02}Z", s / 3600, s / 60 % 60, s % 60);
     let mode = match (&app.replay, &app.rec) {
+        _ if app.held.is_some() => "  [paused]",
         (Some(_), _) => ["  [⏸]", "  [▶]"][usize::from(app.playing)],
         (_, Some(r)) => ["  ● rec", "  rec failed"][usize::from(r.failed())],
         _ => "",
@@ -1350,6 +1387,26 @@ mod tests {
         let sent: Vec<String> = rx.try_iter().collect();
         assert_eq!(sent[..2], ["C\t*\n", "B\t*\t524288\n"], "the job's node count and --budget");
         assert!(app.marks.is_empty() && app.view.rules.len() == 1);
+    }
+
+    #[test]
+    fn a_process_row_targets_its_cgroup_left_climbs_and_z_holds_the_output() {
+        let (mut app, rx) = app(false, "mono");
+        host(&mut app, 0, "n1", 1);
+        let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        (app.view.layout, app.sel) = (Layout::Node, Some(Key::Proc(0, 10)));
+        app.on_key(key('p'));
+        let sent: Vec<String> = rx.try_iter().collect();
+        assert_eq!(sent, ["R\t0\tsystem.slice/sshd.service\t1000\tc\n"]);
+        app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(app.sel, Some(Key::Cg(0, 4)), "← on a leaf moves to its parent");
+        app.on_key(key('z'));
+        let ticks = app.ticks;
+        app.handle(Msg::Lines(b"0\tT\t43201000\t0\t0\t0\t-\n".to_vec()));
+        assert_eq!(app.ticks, ticks);
+        assert!(title(&app)[0].contains("[paused]"));
+        app.on_key(key('z'));
+        assert_eq!(app.ticks, ticks + 1, "z applies what it held");
     }
 
     #[test]
