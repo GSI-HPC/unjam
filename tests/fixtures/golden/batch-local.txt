@@ -7,5 +7,5 @@ NAME                                             PID   CPU%    MEM   PIDS   INT 
       └ sshd: /usr/sbin/sshd -D                   10  42.5%   8.0M      3
   ▾ user.slice                                        17.0%   512M      3    1s p
     └ -bash                                       20   8.5%   4.0M      1
-nodes=1 stale=0 errors=0 dropped=0
+nodes=1 stale=0 errors=0 dropped=0 missing=0
 

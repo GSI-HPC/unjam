@@ -173,7 +173,12 @@ pub fn v2_check(
         Err(_) => root.to_path_buf(),
     };
     if !root.join("cgroup.controllers").is_file() {
-        let e = format!("{}: not a cgroup v2 directory (no cgroup.controllers)", root.display());
+        let why = if root.exists() {
+            "not a cgroup v2 directory (no cgroup.controllers)"
+        } else {
+            "does not exist"
+        };
+        let e = format!("{}: {why}", root.display());
         return Err(if explicit { e } else { V1.into() });
     }
     Ok(if own.join("cpu.stat").is_file() { own } else { root.to_path_buf() })
@@ -379,7 +384,9 @@ mod tests {
         assert!(err.contains("cgroup v2 only"), "{err}");
         assert!(v2_check(&mount, &root, "1:cpu:/\n", false).unwrap_err().contains("v2 only"));
         assert_eq!(v2_check(&mount, &root, "1:cpu:/\n", true).unwrap(), root, "explicit --root");
-        let not_v2 = v2_check(&mount, &mount.join("nope"), me, true).unwrap_err();
+        let gone = v2_check(&mount, &mount.join("nope"), me, true).unwrap_err();
+        assert!(gone.ends_with("nope: does not exist"), "{gone}");
+        let not_v2 = v2_check(&mount, &root.join("cgroup.procs"), me, true).unwrap_err();
         assert!(not_v2.contains("not a cgroup v2 directory"), "{not_v2}");
     }
 }

@@ -346,8 +346,8 @@ pub enum Key {
 }
 
 /// How the rows are made: layout, sort column (0 = NAME, value column + 1, NCOL + 1 = NODE),
-/// folds, filter, the authoritative rule list, the folded-range window and whether this is
-/// local.
+/// folds, filter, the authoritative rule list, the folded-range window, whether this is local,
+/// and which nodes are stale (set by the TUI once per second).
 #[derive(Debug)]
 pub struct View {
     pub layout: Layout,
@@ -358,6 +358,7 @@ pub struct View {
     pub rules: Vec<Rule>,
     pub window: usize,
     pub local: bool,
+    pub stale: Vec<bool>,
 }
 
 impl View {
@@ -389,16 +390,18 @@ struct Walk<'a, 'v> {
     v: &'v View,
     out: Vec<Row<'a>>,
     limit: usize,
+    /// Inside the subtree of a filter match: shown in full, with its folds.
+    free: bool,
 }
 
 /// Builds the first `limit` rows of the view.
 pub fn rows<'a>(st: &'a State, v: &View, limit: usize) -> Vec<Row<'a>> {
-    let mut w = Walk { st, v, out: Vec::new(), limit };
+    let mut w = Walk { st, v, out: Vec::new(), limit, free: false };
     let mut top = Vec::new();
     for (i, n) in (0..).zip(&st.nodes) {
         match n.cgs.get(&n.root) {
             Some(_) if v.layout == Layout::Flat => w.flat(i, n, &mut top),
-            Some(c) => top.push(cg_row(i, n.root, c, Some(if v.local { "/" } else { &n.host }))),
+            Some(c) => top.push(w.cg(i, n.root, c, Some(if v.local { "/" } else { &n.host }))),
             None => {}
         }
     }
@@ -412,9 +415,11 @@ pub fn rows<'a>(st: &'a State, v: &View, limit: usize) -> Vec<Row<'a>> {
 
 impl<'a> Walk<'a, '_> {
     /// Sorts one sibling set, folds a step's surplus nodes into one range row, and emits each
-    /// row with its open subtree. Returns whether anything survived the filter.
+    /// row with its open subtree. Returns whether anything survived the filter: a match keeps
+    /// its ancestors (opened) and its whole subtree (as folded).
     fn siblings(&mut self, mut sibs: Vec<Row<'a>>, depth: u16, parent: Option<Key>) -> bool {
-        let (room, filter) = (self.limit.saturating_sub(self.out.len()), !self.v.filter.is_empty());
+        let room = self.limit.saturating_sub(self.out.len());
+        let filter = !self.v.filter.is_empty() && !self.free;
         let step = matches!(parent, Some(Key::Step(_)));
         if sibs.len() > room && room > 0 && !filter && !step {
             sibs.select_nth_unstable_by(room - 1, |a, b| self.cmp(a, b));
@@ -436,17 +441,38 @@ impl<'a> Walk<'a, '_> {
             }
             let kids =
                 if let Key::Folded(_) = r.key { std::mem::take(&mut rest) } else { self.kids(&r) };
-            let open = filter || self.v.is_open(r.key);
+            let hit = !filter || self.hit(&r);
+            let open = (filter && !hit) || self.v.is_open(r.key);
             (r.depth, r.last, r.open) = (depth, i + 1 == n, (!kids.is_empty()).then_some(open));
-            let (mark, key, hit) = (self.out.len(), r.key, r.name.contains(&*self.v.filter));
+            let (mark, key) = (self.out.len(), r.key);
             self.out.push(r);
-            if hit | (open && !kids.is_empty() && self.siblings(kids, depth + 1, Some(key))) {
+            let free = self.free;
+            self.free |= hit;
+            let deep = open && !kids.is_empty() && self.siblings(kids, depth + 1, Some(key));
+            self.free = free;
+            if hit || deep {
                 any = true;
             } else {
                 self.out.truncate(mark);
             }
         }
         any
+    }
+
+    /// Filter match: an ASCII case-insensitive substring of the name, a process's comm or a
+    /// cgroup's path; a leading `/` is ignored, so a path matches as typed.
+    fn hit(&self, r: &Row) -> bool {
+        let q = self.v.filter.trim_start_matches('/').as_bytes();
+        let has = |h: &str| {
+            q.is_empty() || h.as_bytes().windows(q.len()).any(|w| w.eq_ignore_ascii_case(q))
+        };
+        let n = self.st.nodes.get(r.node as usize);
+        has(&r.name)
+            || match r.key {
+                Key::Cg(_, id) => n.and_then(|n| n.cgs.get(&id)).is_some_and(|c| has(&c.path)),
+                Key::Proc(_, p) => n.and_then(|n| n.procs.get(&p)).is_some_and(|p| has(&p.comm)),
+                _ => false,
+            }
     }
 
     /// Sibling order: the sort column with NA last in both directions, ties and NAME in
@@ -489,9 +515,9 @@ impl<'a> Walk<'a, '_> {
                 for (k, kc) in c.kids.iter().filter_map(|k| Some((*k, n.cgs.get(k)?))) {
                     if step && seg(&kc.path) == "user" {
                         let tasks = kc.kids.iter().filter_map(|t| Some((*t, n.cgs.get(t)?)));
-                        out.extend(tasks.map(|(t, tc)| cg_row(i, t, tc, None)));
+                        out.extend(tasks.map(|(t, tc)| self.cg(i, t, tc, None)));
                     } else {
-                        out.push(cg_row(i, k, kc, None));
+                        out.push(self.cg(i, k, kc, None));
                     }
                 }
                 out.extend(c.procs.iter().filter_map(|&p| self.proc_row(i, p)));
@@ -502,31 +528,58 @@ impl<'a> Walk<'a, '_> {
     }
 
     /// Step layout: every node's job-level cgroups (steps), or those of one step, as rows
-    /// named by their host, each with its step name.
-    fn members(&self, step: Option<u64>) -> impl Iterator<Item = (&'a str, Row<'a>)> {
+    /// named by their host, each with its step name. Below a step root (`unjam record`
+    /// journals) the root's kids are tasks: their step is the node's, `4242.1`.
+    fn members(&self, step: Option<u64>) -> impl Iterator<Item = (&'a str, Row<'a>)> + '_ {
         let st = self.st;
         let per_node = (0..).zip(&st.nodes).filter_map(|(i, n)| Some((i, n, n.cgs.get(&n.root)?)));
         let all = per_node.flat_map(|(i, n, root)| {
             root.kids.iter().filter_map(move |k| Some((i, n, *k, n.cgs.get(k)?)))
         });
-        all.filter(move |(.., c)| step.is_none_or(|h| hash(seg(&c.path)) == h))
-            .map(move |(i, n, k, c)| (seg(&c.path), cg_row(i, k, c, Some(&n.host))))
+        let name = |n: &'a Node, c: &'a Cg| match seg(&c.path) {
+            s if s.starts_with("task_") && !n.step.is_empty() => &*n.step,
+            s => s,
+        };
+        all.filter(move |(_, n, _, c)| step.is_none_or(|h| hash(name(n, c)) == h))
+            .map(move |(i, n, k, c)| (name(n, c), self.cg(i, k, c, Some(&n.host))))
     }
 
-    /// Flat layout: every process, plus leaf cgroups whose processes are not sampled.
+    /// Flat layout: every process, plus leaf cgroups whose processes are not sampled (with no
+    /// rules, as in replay: that hold none).
     fn flat(&self, i: u32, n: &'a Node, out: &mut Vec<Row<'a>>) {
         out.extend(n.procs.keys().filter_map(|&p| self.proc_row(i, p)));
-        let leaf =
-            |c: &&Cg| c.kids.is_empty() && effective(&self.v.rules, i, &c.path).1 < What::Procs;
-        out.extend(n.cgs.iter().filter(|(_, c)| leaf(c)).map(|(&id, c)| cg_row(i, id, c, None)));
+        let rules = &self.v.rules;
+        let unsampled = |c: &Cg| match &rules[..] {
+            [] => c.procs.is_empty(),
+            _ => effective(rules, i, &c.path).1 < What::Procs,
+        };
+        let leaf = |c: &&Cg| c.kids.is_empty() && unsampled(c);
+        out.extend(n.cgs.iter().filter(|(_, c)| leaf(c)).map(|(&id, c)| self.cg(i, id, c, None)));
+    }
+
+    /// A cgroup row, blank when its node is stale or its effective level is off: neither sends
+    /// current values, so the row and the sums over it show none (§6.1, §7.4).
+    fn cg(&self, node: u32, id: u64, c: &'a Cg, name: Option<&'a str>) -> Row<'a> {
+        let (mut r, rules) = (cg_row(node, id, c, name), &self.v.rules);
+        let off = !rules.is_empty() && effective(rules, node, &c.path).1 == What::Off;
+        if off || self.v.stale.get(node as usize) == Some(&true) {
+            (r.v, r.approx, r.hist) = ([f64::NAN; NCOL], false, [0; HIST]);
+        }
+        r
     }
 
     /// A process row, named by its command line (comm for kernel threads).
     fn proc_row(&self, node: u32, pid: u32) -> Option<Row<'a>> {
         let p = self.st.nodes[node as usize].procs.get(&pid)?;
-        let v = values(&p.vals, cpu(&p.vals), [2, 3, 4, P_THREADS]);
+        let dead = self.v.stale.get(node as usize) == Some(&true);
+        let v = if dead {
+            [f64::NAN; NCOL]
+        } else {
+            values(&p.vals, cpu(&p.vals), [2, 3, 4, P_THREADS])
+        };
         let name = Cow::Borrowed(if p.cmd.is_empty() { &*p.comm } else { &*p.cmd });
-        let (key, id, hist) = (Key::Proc(node, pid), u64::from(pid), p.vals.hist());
+        let (key, id) = (Key::Proc(node, pid), u64::from(pid));
+        let hist = if dead { [0; HIST] } else { p.vals.hist() };
         Some(Row { key, node, id, name, v, hist, ..Row::default() })
     }
 }
@@ -704,6 +757,7 @@ mod tests {
             rules: vec![],
             window: 16,
             local: false,
+            stale: vec![],
         }
     }
 
@@ -782,6 +836,21 @@ mod tests {
     }
 
     #[test]
+    fn off_and_stale_rows_show_no_values_and_leave_the_step_sums() {
+        let st = two_nodes();
+        let mut v = view(Layout::Step);
+        v.rules = ["*\t.\t1000\tp", "1\tstep_0\t-\to"].map(|r| Rule::parse(r).unwrap()).into();
+        let text = dump(&rows(&st, &v, 4));
+        assert_eq!(text, "- job 42 270\n  - step_0 80\n    - n10 80\n      - task_0 60\n");
+        let n2 = rows(&st, &v, usize::MAX).into_iter().find(|r| r.name == "n2").unwrap();
+        assert!(n2.v[0].is_nan() && n2.hist == [0; HIST], "n2's step_0 is off");
+        v.rules.truncate(1);
+        v.stale = vec![false, true];
+        let text = dump(&rows(&st, &v, 3));
+        assert_eq!(text, "- job 42 90\n  - step_0 80\n    - n10 80\n", "n2 is stale");
+    }
+
+    #[test]
     fn node_and_flat_layouts() {
         let st = two_nodes();
         let mut v = view(Layout::Node);
@@ -800,13 +869,25 @@ mod tests {
 "
         );
         let mut v = view(Layout::Flat);
-        assert_eq!(dump(&rows(&st, &v, 3)), "  task_0 120\n  ./a.out -n 4 100\n  task_0 60\n");
+        let replay = dump(&rows(&st, &v, 3));
+        assert_eq!(replay, "  ./a.out -n 4 100\n  ./a.out -n 4 50\n  task_10 40\n", "no rules");
         v.rules = vec![Rule::parse("*\t.\t1000\tp").unwrap()];
         let flat = dump(&rows(&st, &v, 4));
         assert_eq!(flat, "  ./a.out -n 4 100\n  ./a.out -n 4 50\n  kworker 20\n  kworker 10\n");
         (v.sort, v.desc) = (NCOL + 1, false);
         let by_node = dump(&rows(&st, &v, 4));
         assert_eq!(by_node, "  ./a.out -n 4 100\n  kworker 20\n  ./a.out -n 4 50\n  kworker 10\n");
+    }
+
+    #[test]
+    fn a_step_journal_names_its_step() {
+        let mut st = State::new();
+        feed(&mut st, 0, &["H 1 0.1 n1 4242.1 1 0"]);
+        feed(&mut st, 0, &DESC[1..]);
+        feed(&mut st, 0, &["G 1 0 ", "G 2 1 task_0"]);
+        let rows = rows(&st, &view(Layout::Step), 9);
+        let names: Vec<_> = rows.iter().map(|r| r.name.to_string()).collect();
+        assert_eq!(names, ["job 4242", "4242.1", "n1"], "not task_0");
     }
 
     #[test]
@@ -827,7 +908,14 @@ mod tests {
         v.toggled.clear();
         (v.desc, v.filter) = (false, "task_".into());
         let names: Vec<_> = rows(&st, &v, usize::MAX).iter().map(|r| r.name.to_string()).collect();
-        assert_eq!(names[..6], ["job 42", "step_0", "n10", "task_10", "task_0", "task_9"]);
+        assert_eq!(names[..6], ["job 42", "step_0", "n10", "task_10", "task_0", "kworker"]);
+        v.filter = "TASK_0".into();
+        let hit = dump(&rows(&st, &v, usize::MAX));
+        assert!(hit.contains("task_0 120\n          kworker 20\n          ./a.out"), "{hit}");
+        v.filter = "/user/".into();
+        assert!(dump(&rows(&st, &v, usize::MAX)).contains("task_0 120"));
+        v.filter = "nomatch".into();
+        assert!(rows(&st, &v, usize::MAX).is_empty());
     }
 
     #[test]

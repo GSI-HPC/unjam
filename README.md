@@ -17,9 +17,12 @@ unjam --replay rec/*.arrows    # replay recordings, one file per node
 srun unjam record -o rec/%j.%s-%n.arrows -- ./app args   # record a job step
 ```
 
-Keys: `↑↓` move, `←→` fold, `v` layout (step, node, flat), `s` sort, `/` filter, `space` mark,
-`p` sampling level, `+`/`-` sampling rate, `r` record, `t` theme, `?` help, `q` quit.
-`--batch N` prints N text snapshots instead of starting the TUI.
+Keys: `?` help, `q` quit, `↑↓` move, `←→` fold (`←` on a leaf: parent), `Enter` detail,
+`v` layout (step, node, flat), `s` sort, `/` filter (name or path, any case; `Esc` clears),
+`space` mark, `p` sampling level, `+`/`-` sampling rate, `z` pause, `r` record, `t` theme.
+`--batch N` prints N text snapshots instead of starting the TUI; use it where stdout is not a
+terminal (`ssh node unjam` without `-t`, cron). `--rule '* . 2s c'` replaces the default
+sampling rules (here: every cgroup every 2 s, without processes).
 
 ## Site notes
 

@@ -1,16 +1,16 @@
  unjam 42  3/3 nodes (0 stale)  6 procs  1s  step  sort CPU% ▼  12:00:00Z
- tui - - · in 0 0 msg/s · out 0 · agents max 0.0% - (n3) · drop 0 err 0
- NODES ███
-NAME                               PID     CPU      CPU%   MEM    PIDS     INT W
-▾ job 42                                   ▅▅▅▆▆▇▇█ 408.0%   9.0G    ~12    1s p
-  ▾ system.slice                           ▅▅▅▆▆▇▇█ 306.0%   3.0G     36    1s p
-    ▾ n1                                   ▅▅▅▆▆▇▇█ 153.0%   1.0G     12    1s p
-      ▾ sshd.service                       ▅▅▅▆▆▇▇█ 153.0%    32M      2    1s p
-        └ sshd: /usr/sbin/sshd -D       10 ▅▅▅▆▆▇▇█ 127.5%   8.0M      3
-    ▾ n2                                   ▅▅▅▆▆▇▇█ 102.0%   1.0G     12    1s p
-      ▾ sshd.service                       ▅▅▅▆▆▇▇█ 102.0%    32M      2    1s p
-        └ sshd: /usr/sbin/sshd -D       10 ▄▄▅▅▅▆▆▆  85.0%   8.0M      3
-    ▾ n3                                   ▃▃▃▃▃▄▄▄  51.0%   1.0G     12    1s p
-      ▾ sshd.service                       ▃▃▃▃▃▄▄▄  51.0%    32M      2    1s p
-        └ sshd: /usr/sbin/sshd -D       10 ▂▂▃▃▃▃▃▃  42.5%   8.0M      3
- ↑↓ move ←→ fold ␣ mark p what +/- rate v layout s sort / filter r record t them
+ tui - - · in 0 0 msg/s · out 0 · drop 0 err 0 · agents max 0.0% - (n3)
+ NODES █▆▄  1 node per cell
+NAME                                       PID     CPU      CPU%   MEM    PIDS
+▾ job 42                                           ▅▅▅▆▆▇▇█ 408.0%   9.0G    ~12
+  ▾ system.slice                                   ▅▅▅▆▆▇▇█ 306.0%   3.0G     36
+    ▾ n1                                           ▅▅▅▆▆▇▇█ 153.0%   1.0G     12
+      ▾ sshd.service                               ▅▅▅▆▆▇▇█ 153.0%    32M      2
+        └ sshd: /usr/sbin/sshd -D               10 ▅▅▅▆▆▇▇█ 127.5%   8.0M      3
+    ▾ n2                                           ▅▅▅▆▆▇▇█ 102.0%   1.0G     12
+      ▾ sshd.service                               ▅▅▅▆▆▇▇█ 102.0%    32M      2
+        └ sshd: /usr/sbin/sshd -D               10 ▄▄▅▅▅▆▆▆  85.0%   8.0M      3
+    ▾ n3                                           ▃▃▃▃▃▄▄▄  51.0%   1.0G     12
+      ▾ sshd.service                               ▃▃▃▃▃▄▄▄  51.0%    32M      2
+        └ sshd: /usr/sbin/sshd -D               10 ▂▂▃▃▃▃▃▃  42.5%   8.0M      3
+ ? help q quit ↑↓ move ←→ fold ␣ mark p level +/- rate v layout s sort / filter

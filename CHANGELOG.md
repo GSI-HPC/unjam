@@ -10,6 +10,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- `z` pauses the live view and resumes it; the header shows `[paused]`.
+- The header shows the job name after the job id.
+- `--rule` takes its fields split by spaces (`--rule '* . 2s c'`) and intervals with units.
+
+### Changed
+
+- The footer starts with `? help q quit`, shows a new log line for 10 s, and shows an applied filter with how to edit or clear it.
+- The help pane lists the keys of the mode with a column legend, in a titled pane that fits 80×24.
+- `/` edits the current filter instead of clearing it. The filter ignores case, also matches a process's comm and a cgroup's path, and keeps a match's whole subtree.
+- `space`, `p`, `+` and `-` on a process row act on its cgroup; `←` on a leaf moves to its parent.
+- The detail popup shows the full command line, CPU as %, `char` values as letters, and the sums of job and step rows.
+- Replay names the recorded interval, shows `[end]`, and its header line 2 shows the position in the recording.
+- `--help` groups the attach flags under "Slurm attach (with --slurm)" and says that `--slurm` and `--bcast` take a value only with `=`.
+
 ### Fixed
 
 - The agent keeps sampling after a backward wall-clock step, and a forward step no longer ends it through the keepalive.
@@ -31,6 +47,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - A backward seek in replay restores the rates of entities on slow rules.
 - Replay of several journals steps by sampling round instead of one node at a time.
 - `unjam record` prints why it runs the app unrecorded before it does.
+- CPU% of 1000% and more is shown in full instead of as `6.9k%`.
+- Rows whose level is off and the rows of stale nodes show no values instead of their last ones; stale nodes read `(stale)`.
+- The first `--batch` snapshot waits for every node's first rate; its footer counts the nodes that never reported, and `| head` exits 0.
+- At 80 columns, NAME no longer loses its width to an INT W that every row shares; cut names end in `…`; NAME stops at 72 cells on wide terminals; a terminal below 80×8 says so.
+- The local header labels the host CPU as a share of all CPUs.
+- The scroll position no longer leaves the last page part-empty.
+- Without `--batch`, a stdout that is not a terminal fails with a hint instead of drawing into it.
+- Common setup errors say what is wrong: missing Slurm commands, an unknown job, no running jobs, `--bcast` on another user's job, a bad `UNJAM_THEME`, a file that is no recording, a missing `--root`.
+- `--record` shows `rec failed` when no journal could be opened, reports the recording on stderr at exit and exits 1 when it failed; a node stale before the start is not recorded.
+- The heat strip shows bands by height as well as colour, with a "nodes per cell" legend; history bars of many-core nodes band against the busiest node; amber has an ASCII ramp.
+- `t` no longer leaves mono while `NO_COLOR` is set.
+- Header rates are taken over one interval, so they no longer drop to 0 every other second; small byte rates show `B/s`.
+- Intervals of 1 s and more read `7.5s`, not `7500ms`.
+- "srun ended" is logged only after some node reported.
+- `--at` accepts a trailing `Z`, refuses out-of-range times, and no longer jumps to the end for a time before the start.
+- Replay warns about a repeated host or files of another job or step.
+- Replay of `unjam record` files names the step by its id, and flat replay lists processes, not task cgroups.
+- Replay ignores the rule keys.
 
 ### Security
 

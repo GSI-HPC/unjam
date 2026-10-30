@@ -3,5 +3,5 @@ night: uRgb(122, 162, 247)/Rgb(31, 35, 53)/BOLD ARgb(122, 162, 247)/Rgb(31, 35, 
 mocha: uRgb(203, 166, 247)/Rgb(24, 24, 37)/BOLD ARgb(203, 166, 247)/Rgb(24, 24, 37)/BOLD  Rgb(205, 214, 244)/Rgb(49, 50, 68)/NONE hRgb(203, 166, 247)/Rgb(30, 30, 46)/BOLD ▁Rgb(166, 227, 161)/Rgb(30, 30, 46)/NONE
 gruvbox: uRgb(250, 189, 47)/Rgb(80, 73, 69)/BOLD ARgb(250, 189, 47)/Rgb(80, 73, 69)/BOLD  Rgb(235, 219, 178)/Rgb(60, 56, 54)/NONE hRgb(250, 189, 47)/Rgb(40, 40, 40)/BOLD ▁Rgb(184, 187, 38)/Rgb(40, 40, 40)/NONE
 solar: uRgb(38, 139, 210)/Rgb(238, 232, 213)/BOLD ARgb(38, 139, 210)/Rgb(238, 232, 213)/BOLD  Rgb(101, 123, 131)/Rgb(238, 232, 213)/NONE hRgb(38, 139, 210)/Rgb(253, 246, 227)/BOLD ▁Rgb(133, 153, 0)/Rgb(253, 246, 227)/NONE
-amber: uRgb(255, 194, 51)/Rgb(42, 28, 0)/BOLD ARgb(255, 194, 51)/Rgb(42, 28, 0)/BOLD  Rgb(255, 176, 0)/Rgb(58, 39, 0)/NONE hRgb(255, 194, 51)/Rgb(20, 12, 0)/BOLD #Rgb(138, 95, 0)/Rgb(20, 12, 0)/NONE
+amber: uRgb(255, 194, 51)/Rgb(42, 28, 0)/BOLD ARgb(255, 194, 51)/Rgb(42, 28, 0)/BOLD  Rgb(255, 176, 0)/Rgb(58, 39, 0)/NONE hRgb(255, 194, 51)/Rgb(20, 12, 0)/BOLD _Rgb(138, 95, 0)/Rgb(20, 12, 0)/NONE
 mono: uReset/Reset/BOLD | REVERSED AReset/Reset/BOLD | REVERSED  Reset/Reset/REVERSED hReset/Reset/BOLD ▁Reset/Reset/NONE

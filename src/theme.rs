@@ -113,12 +113,12 @@ pub const THEMES: &[Theme] = &[
         [0x859900, 0xB58900, 0xCB4B16, 0xDC322F],
         UNI,
     ),
-    // Amber phosphor: one hue, ASCII bars like a 1980s terminal.
+    // Amber phosphor: one hue, an ASCII ramp like a 1980s terminal.
     palette(
         "amber",
         [0x140C00, 0x2A1C00, 0x3A2700, 0xFFB000, 0x8A5F00, 0xFFC233, 0xFFE08A],
         [0x8A5F00, 0xC48800, 0xFFB000, 0xFFE08A],
-        Glyphs { bars: [".", "#", "#", "#", "#", "#", "#", "#", "#"], ..UNI },
+        Glyphs { bars: [".", "_", "-", "=", "+", "*", "#", "%", "@"], ..UNI },
     ),
     Theme {
         name: "mono",
@@ -141,9 +141,10 @@ pub const THEMES: &[Theme] = &[
 pub fn pick(flag: Option<&str>, env: Option<&str>, no_color: bool) -> Result<usize, String> {
     let name = if no_color { Some("mono") } else { flag.or(env) };
     let Some(name) = name else { return Ok(0) };
+    let src = if flag.is_none() && !no_color { "UNJAM_THEME: " } else { "" };
     THEMES.iter().position(|t| t.name == name).ok_or_else(|| {
         let names: Vec<&str> = THEMES.iter().map(|t| t.name).collect();
-        format!("unknown theme {name:?} (themes: {})", names.join(", "))
+        format!("{src}unknown theme {name:?} (themes: {})", names.join(", "))
     })
 }
 
@@ -160,6 +161,7 @@ mod tests {
         assert_eq!(pick(Some("solar"), Some("gruvbox"), false), Ok(4));
         assert_eq!(pick(Some("solar"), Some("gruvbox"), true), Ok(mono));
         assert!(pick(Some("nope"), None, false).unwrap_err().contains("nord, night"));
+        assert!(pick(None, Some("nope"), false).unwrap_err().starts_with("UNJAM_THEME: unknown"));
         let names: Vec<_> = THEMES.iter().map(|t| t.name).collect();
         assert_eq!(names, ["nord", "night", "mocha", "gruvbox", "solar", "amber", "mono"]);
     }
