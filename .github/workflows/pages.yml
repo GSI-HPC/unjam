@@ -78,6 +78,8 @@ jobs:
             gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" > /dev/null
           done
           echo "rpms=$(find rpms -name '*.rpm' | wc -l)" >> "$GITHUB_OUTPUT"
+      # Before the container writes to site/rpm as root, so that this step can still write there.
+      - run: install -Dm 0644 pkg/rpm/index.html site/rpm/index.html
       - name: Build the repository
         if: steps.download.outputs.rpms != '0'
         run: |
@@ -86,7 +88,6 @@ jobs:
             scripts/rpm.sh repo site/rpm rpms/*.rpm'
         env:
           RPM_SIGNING_KEY: ${{ secrets.RPM_SIGNING_KEY }}
-      - run: install -Dm 0644 pkg/rpm/index.html site/rpm/index.html
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: site-rpm
