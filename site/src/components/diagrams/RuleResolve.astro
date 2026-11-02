@@ -1,0 +1,50 @@
+---
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+
+// model::effective: the last rule that matches a cgroup path wins, like a firewall.
+const rules = [
+  { t: 'R  *    .              2000  c', m: true, n: 'every cgroup on every node: cgroups only, 2 s' },
+  { t: 'R  *    */user         -     o', m: true, n: 'the user subtree of every step: off' },
+  { t: 'R  3    step_0         500   p', m: true, n: 'node 3, step_0: with processes, 0.5 s' },
+  { t: 'R  0-1  step_batch     1000  p', m: false, n: 'other nodes only: no match on node 3' },
+];
+const T = 7;
+---
+
+<svg class="uj-d rr" viewBox="0 0 800 300" role="img" aria-labelledby="rr-t">
+  <title id="rr-t">For the cgroup step_0/user/task_1 on node 3, the first three rules match and the fourth does not. The last match wins: processes on, every 500 ms.</title>
+  <text x="20" y="30" class="sm muted">cgroup on node 3:</text>
+  <text x="150" y="30" class="mono b">step_0/user/task_1</text>
+  {
+    rules.map((r, i) => (
+      <g transform={`translate(20 ${52 + i * 50})`} class={`rr-r r${i}`}>
+        <rect width="760" height="38" rx="7" class={r.m ? 'box rr-m' : 'box'} />
+        <text x="14" y="24" class="mono" style="white-space:pre" xml:space="preserve">{r.t}</text>
+        <text x="370" y="24" class="sm muted">{r.n}</text>
+        <text x="742" y="25" text-anchor="end" class={`b ${r.m ? 'f-green' : 'f-red'}`}>{r.m ? 'match' : '—'}</text>
+      </g>
+    ))
+  }
+  <g class="rr-win">
+    <rect x="16" y="148" width="768" height="46" rx="9" fill="none" stroke="var(--uj-frost)" stroke-width="2.5" />
+    <text x="20" y="276" class="b f-frost">Last match wins → level p, interval 500 ms</text>
+  </g>
+</svg>
+
+<style define:vars={{ T: `${T}s` }}>
+  .rr .rr-r { animation: rr-scan var(--T) infinite; }
+  .rr .r1 { animation-delay: 0.6s; }
+  .rr .r2 { animation-delay: 1.2s; }
+  .rr .r3 { animation-delay: 1.8s; }
+  .rr .rr-win { animation: rr-win var(--T) infinite; }
+  @keyframes rr-scan {
+    0% { opacity: 0.35; }
+    4%, 100% { opacity: 1; }
+  }
+  @keyframes rr-win {
+    0%, 34% { opacity: 0; }
+    40%, 95% { opacity: 1; }
+    100% { opacity: 0; }
+  }
+</style>

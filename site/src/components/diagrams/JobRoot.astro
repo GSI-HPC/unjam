@@ -1,0 +1,106 @@
+---
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+
+// cgroup::job_root: strip step_*/user/task_* from the agent's own cgroup; what is left is the
+// job, whatever its directory is called. The agent's own step is left out.
+const segs = [
+  { t: 'system.slice', w: 118 },
+  { t: 'slurmstepd.scope', w: 156 },
+  { t: 'job', w: 132 },
+  { t: 'step_7', w: 74, p: 'step_*' },
+  { t: 'user', w: 56, p: 'user' },
+  { t: 'task_0', w: 74, p: 'task_*' },
+];
+let x = 24;
+const pos = segs.map((s) => { const p = x; x += s.w + 10; return p; });
+const T = 8;
+---
+
+<svg class="uj-d jr" viewBox="0 0 800 270" role="img" aria-labelledby="jr-t">
+  <title id="jr-t">The agent reads its own cgroup from /proc/self/cgroup, checks that the last three segments are step_*, user and task_*, and strips them. The rest is the job root, named job_4242 on Slurm 25.11 and a SLUID on 26.05. The agent's own step is excluded.</title>
+  <text x="24" y="30" class="mono sm muted">/proc/self/cgroup  →  0::/</text>
+  {
+    segs.map((s, i) => (
+      <g class={`seg s${i}`} transform={`translate(${pos[i]} 62)`}>
+        <rect width={s.w} height="40" rx="7" class={i === 2 ? 'box s-frost' : 'box'} />
+        {i === 2 ? (
+          <>
+            <text x={s.w / 2} y="25" text-anchor="middle" class="mono b jr-a">job_4242</text>
+            <text x={s.w / 2} y="25" text-anchor="middle" class="mono b jr-b">01KJ8…QZ</text>
+          </>
+        ) : (
+          <text x={s.w / 2} y="25" text-anchor="middle" class="mono">{s.t}</text>
+        )}
+        {s.p && (
+          <text x={s.w / 2} y="-10" text-anchor="middle" class="mono sm f-green jr-p">{s.p} ✓</text>
+        )}
+      </g>
+    ))
+  }
+  <g class="jr-root">
+    <path d={`M24 116 v10 h${pos[2] + segs[2].w - 24} v-10`} fill="none" stroke="var(--uj-frost)" stroke-width="2" />
+    <text x={(24 + pos[2] + segs[2].w) / 2} y="146" text-anchor="middle" class="b f-frost">job root: every step on this node</text>
+  </g>
+  <g class="jr-name">
+    <text x={pos[2] + segs[2].w / 2} y="174" text-anchor="middle" class="sm muted jr-a">Slurm 25.11: job_&lt;id&gt;</text>
+    <text x={pos[2] + segs[2].w / 2} y="174" text-anchor="middle" class="sm muted jr-b">26.05: a SLUID</text>
+  </g>
+  <g class="jr-ex" transform={`translate(${pos[3]} 194)`}>
+    <rect width="214" height="44" rx="7" class="area s-red" />
+    <text x="107" y="20" text-anchor="middle" class="mono sm">step_7 (own step)</text>
+    <text x="107" y="36" text-anchor="middle" class="sm f-red">excluded from the view</text>
+  </g>
+  <text x="24" y="226" class="sm muted">Never matched by name:</text>
+  <text x="24" y="246" class="sm muted">no job_&lt;id&gt; search anywhere.</text>
+</svg>
+
+<style define:vars={{ T: `${T}s` }}>
+  .jr .seg, .jr .jr-p, .jr .jr-root, .jr .jr-ex, .jr .jr-a, .jr .jr-b {
+    animation-duration: var(--T);
+    animation-iteration-count: infinite;
+    animation-timing-function: ease-in-out;
+  }
+  .jr .s5 { animation-name: jr-peel; animation-delay: 0s; }
+  .jr .s4 { animation-name: jr-peel; animation-delay: 0.35s; }
+  .jr .s3 { animation-name: jr-peel; animation-delay: 0.7s; }
+  .jr .jr-p { animation-name: jr-check; }
+  .jr .s4 .jr-p { animation-delay: 0.35s; }
+  .jr .s3 .jr-p { animation-delay: 0.7s; }
+  .jr .jr-root { animation-name: jr-root; }
+  .jr .jr-ex { animation-name: jr-ex; }
+  .jr .jr-a { animation-name: jr-a; }
+  .jr .jr-b { animation-name: jr-b; opacity: 0; }
+  @keyframes jr-check {
+    0%, 8% { opacity: 0; }
+    14%, 100% { opacity: 1; }
+  }
+  @keyframes jr-peel {
+    0%, 22% { opacity: 1; translate: 0 0; }
+    32%, 92% { opacity: 0.18; translate: 0 18px; }
+    100% { opacity: 1; translate: 0 0; }
+  }
+  @keyframes jr-root {
+    0%, 30% { opacity: 0; }
+    38%, 94% { opacity: 1; }
+    100% { opacity: 0; }
+  }
+  @keyframes jr-ex {
+    0%, 42% { opacity: 0; }
+    50%, 94% { opacity: 1; }
+    100% { opacity: 0; }
+  }
+  @keyframes jr-a {
+    0%, 55% { opacity: 1; }
+    60%, 92% { opacity: 0; }
+    97%, 100% { opacity: 1; }
+  }
+  @keyframes jr-b {
+    0%, 55% { opacity: 0; }
+    60%, 92% { opacity: 1; }
+    97%, 100% { opacity: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .jr .jr-b { display: none; }
+  }
+</style>

@@ -1,0 +1,25 @@
+---
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+
+// The bounded fd cache: every file may use the lower 7/8 of the cap, hot files the rest.
+const x0 = 40, w = 700;
+const cold = (w * 7) / 8;
+---
+
+<svg class="uj-d" viewBox="0 0 800 200" role="img" aria-labelledby="fd-t">
+  <title id="fd-t">The fd cache holds at most cap files open. Any file is kept open while fewer than seven eighths of cap are in use; the top eighth is reserved for the hot files cpu.stat, memory.current, cgroup.procs and /proc/pid/stat.</title>
+  <rect x={x0} y="60" width={cold} height="44" rx="6" class="f-frost" opacity="0.55" />
+  <rect x={x0 + cold} y="60" width={w - cold} height="44" rx="6" class="f-orange" opacity="0.75" />
+  <text x={x0 + cold / 2} y="88" text-anchor="middle" class="b on-acc">any file: open, read, keep the fd</text>
+  <text x={x0 + cold + (w - cold) / 2} y="88" text-anchor="middle" class="b on-acc">hot only</text>
+  <line x1={x0} x2={x0} y1="48" y2="116" stroke="var(--uj-text)" />
+  <line x1={x0 + cold} x2={x0 + cold} y1="48" y2="116" stroke="var(--uj-text)" />
+  <line x1={x0 + w} x2={x0 + w} y1="48" y2="116" stroke="var(--uj-text)" />
+  <text x={x0} y="40" text-anchor="middle" class="mono sm">0</text>
+  <text x={x0 + cold} y="40" text-anchor="middle" class="mono sm">cap − cap/8</text>
+  <text x={x0 + w} y="40" text-anchor="middle" class="mono sm">cap</text>
+  <text x={x0} y="144" class="sm">cap = min(soft NOFILE − 64, 1024) for agent and record, 2048 locally</text>
+  <text x={x0} y="166" class="sm muted">Hot: cpu.stat, memory.current, cgroup.procs, /proc/&lt;pid&gt;/stat. No eviction; a slot</text>
+  <text x={x0} y="186" class="sm muted">frees when its cgroup or process goes away. Past cap: open, read, close (3 syscalls, not 1).</text>
+</svg>

@@ -1,0 +1,33 @@
+---
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+
+// The three layouts are level orders over one State, walked by one function (state::rows).
+const cols = [
+  { k: 'step', q: 'Each step, summed over nodes?', l: ['job', 'step', 'node', 'task', 'process'] },
+  { k: 'node', q: 'What runs on this node?', l: ['node', 'cgroup tree', 'process'] },
+  { k: 'flat', q: 'Who uses the most?', l: ['process (NODE column)', 'one global sort'] },
+];
+const colour = ['f-purple', 'f-blue', 'f-frost', 'f-teal', 'f-green'];
+---
+
+<svg class="uj-d" viewBox="0 0 800 300" role="img" aria-labelledby="ly-t">
+  <title id="ly-t">The step layout orders job, step, node, task, process. The node layout orders node, cgroup tree, process. The flat layout lists processes with a NODE column and one global sort. v cycles through them.</title>
+  {
+    cols.map((c, i) => (
+      <g transform={`translate(${16 + i * 262} 14)`}>
+        <rect width="246" height="270" rx="10" class="box" />
+        <text x="16" y="30" class="mono b f-frost">{c.k}</text>
+        <text x="16" y="54" class="sm muted">{c.q}</text>
+        {c.l.map((l, j) => (
+          <g transform={`translate(${16 + (c.k === 'flat' ? 0 : j * 14)} ${76 + j * 38})`}>
+            <rect width={200 - (c.k === 'flat' ? 0 : j * 14)} height="28" rx="5" class="f-panel2" />
+            <rect width="5" height="28" rx="2" class={c.k === 'flat' ? 'f-green' : colour[c.k === 'node' && j > 0 ? j + 1 : j]} />
+            <text x="14" y="19" class="sm">{l}</text>
+          </g>
+        ))}
+      </g>
+    ))
+  }
+  <text x="400" y="296" text-anchor="middle" class="sm muted">v cycles step → node → flat. Locally there is no node level: v toggles tree ↔ flat.</text>
+</svg>

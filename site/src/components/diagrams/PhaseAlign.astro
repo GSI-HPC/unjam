@@ -1,0 +1,95 @@
+---
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+
+// Phase-aligned sampling with staggered emission: every node samples at the same wall-clock
+// multiple of the interval; each writer then sends after its own small delay.
+const x0 = 120, x1 = 780, T = 6.6; // the playhead crosses x0..x1 in T seconds
+const ticks = [170, 370, 570];
+const rows = [0, 1, 2, 3];
+const ry = (i: number) => 74 + i * 44;
+const at = (x: number) => ((x - x0) / (x1 - x0)) * T;
+const stagger = 26;
+---
+
+<svg class="uj-d ph" viewBox="0 0 800 300" role="img" aria-labelledby="ph-t">
+  <title id="ph-t">Four nodes sample at the same instants, multiples of the interval on the wall clock. Each node sends its lines after a delay that grows with its node index.</title>
+  {
+    ticks.map((x, k) => (
+      <>
+        <line x1={x} x2={x} y1="44" y2="232" class="area" />
+        <text x={x} y="34" text-anchor="middle" class="mono sm muted">{`${k + 1}×interval`}</text>
+      </>
+    ))
+  }
+  <line x1={x0} x2={x1} y1="244" y2="244" class="edge" />
+  <text x={x1} y="266" text-anchor="end" class="sm muted">wall clock →</text>
+  {
+    rows.map((i) => (
+      <>
+        <text x="20" y={ry(i) + 5} class="mono">{`node ${i}`}</text>
+        <line x1={x0} x2={x1} y1={ry(i)} y2={ry(i)} stroke="var(--uj-line)" stroke-width="1" />
+        {ticks.map((x) => (
+          <>
+            <circle cx={x} cy={ry(i)} r="6" class="f-frost ph-dot" style={`animation-delay:${at(x)}s`} />
+            <rect
+              x={x + 14 + i * stagger}
+              y={ry(i) - 6}
+              width="20"
+              height="12"
+              rx="3"
+              class="f-orange ph-out"
+              style={`animation-delay:${at(x + 14 + i * stagger)}s`}
+            />
+          </>
+        ))}
+      </>
+    ))
+  }
+  <g class="motion">
+    <line x1={x0} x2={x0} y1="44" y2="244" stroke="var(--uj-frost)" stroke-width="2" class="ph-head" />
+  </g>
+  <g transform="translate(120 284)">
+    <circle cx="6" cy="-5" r="6" class="f-frost" />
+    <text x="18" y="0" class="sm">sample (same instant on every node)</text>
+    <rect x="300" y="-11" width="20" height="12" rx="3" class="f-orange" />
+    <text x="328" y="0" class="sm">send after procid × min(interval/2, 250 ms) / ntasks</text>
+  </g>
+</svg>
+
+<style define:vars={{ T: `${T}s`, span: `${x1 - x0}px` }}>
+  .ph .ph-head {
+    animation: ph-move var(--T) linear infinite;
+  }
+  .ph .ph-dot,
+  .ph .ph-out {
+    opacity: 0;
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: ph-pop var(--T) linear infinite;
+  }
+  .ph .ph-out {
+    animation-name: ph-send;
+  }
+  @keyframes ph-move {
+    to { transform: translateX(var(--span)); }
+  }
+  @keyframes ph-pop {
+    0% { opacity: 1; transform: scale(1.9); }
+    6% { transform: scale(1); }
+    90% { opacity: 1; }
+    100% { opacity: 0; }
+  }
+  @keyframes ph-send {
+    0% { opacity: 1; transform: translateX(-10px); }
+    8% { transform: translateX(0); }
+    90% { opacity: 1; }
+    100% { opacity: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .ph .ph-dot,
+    .ph .ph-out {
+      opacity: 1;
+    }
+  }
+</style>

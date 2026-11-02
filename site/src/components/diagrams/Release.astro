@@ -1,0 +1,53 @@
+---
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+
+// From a v* tag to installable packages.
+const steps = [
+  { x: 8, y: 30, t: 'tag v*', d: 'on main', c: 's-purple' },
+  { x: 166, y: 30, t: 'verify', d: 'version, CHANGELOG', c: '' },
+  { x: 324, y: 0, t: 'checks', d: 'fmt, clippy, tests, gates', c: '' },
+  { x: 324, y: 64, t: 'integration', d: 'sind: 3 Slurm setups', c: '' },
+  { x: 482, y: 30, t: 'binaries', d: 'musl amd64 + arm64, attested', c: 's-frost' },
+  { x: 640, y: 0, t: 'RPMs', d: 'EL 9, EL 10, Fedora; signed', c: 's-frost' },
+  { x: 640, y: 64, t: 'draft release', d: 'assets + checksums', c: '' },
+  { x: 482, y: 160, t: 'crates.io', d: 'trusted publishing', c: '' },
+  { x: 166, y: 160, t: 'publish draft', d: 'by hand', c: 's-orange' },
+  { x: 8, y: 240, t: 'Pages', d: 'docs at / · dnf repo at /rpm/', c: 's-green' },
+  { x: 324, y: 240, t: 'dnf install test', d: 'EL 9, EL 10, Fedora', c: 's-green' },
+  { x: 482, y: 240, t: 'mise install test', d: 'amd64, arm64', c: 's-green' },
+];
+const W = 152, H = 50;
+const c = (i: number, side: 'r' | 'l' | 't' | 'b') => {
+  const s = steps[i];
+  return side === 'r' ? [s.x + W, s.y + H / 2] : side === 'l' ? [s.x, s.y + H / 2] : side === 't' ? [s.x + W / 2, s.y] : [s.x + W / 2, s.y + H];
+};
+const edges: [number, string, number, string][] = [
+  [0, 'r', 1, 'l'], [1, 'r', 2, 'l'], [1, 'r', 3, 'l'], [2, 'r', 4, 'l'], [3, 'r', 4, 'l'],
+  [4, 'r', 5, 'l'], [4, 'r', 6, 'l'], [6, 'b', 7, 't'], [7, 'l', 8, 'r'], [8, 'b', 9, 't'], [8, 'b', 11, 't'], [9, 'r', 10, 'l'],
+];
+---
+
+<svg class="uj-d" viewBox="0 0 800 300" role="img" aria-labelledby="rl-t">
+  <title id="rl-t">A v tag on main runs verify, then checks and integration tests, then attested static binaries, RPMs and a draft release, then crates.io. Publishing the draft by hand rebuilds GitHub Pages with the docs and the dnf repository and tests dnf and mise installs.</title>
+  <defs>
+    <marker id="rl-h" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path class="head" d="M0 0L8 4L0 8z" /></marker>
+  </defs>
+  {
+    edges.map(([a, sa, b, sb]) => {
+      const [x1, y1] = c(a, sa as never), [x2, y2] = c(b, sb as never);
+      const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+      const d = sa === 'r' || sa === 'l' ? `M${x1} ${y1} C${mx} ${y1} ${mx} ${y2} ${x2} ${y2}` : `M${x1} ${y1} C${x1} ${my} ${x2} ${my} ${x2} ${y2}`;
+      return <path d={d} class="edge" marker-end="url(#rl-h)" />;
+    })
+  }
+  {
+    steps.map((s) => (
+      <g transform={`translate(${s.x} ${s.y})`}>
+        <rect width={W} height={H} rx="8" class={`box ${s.c}`} />
+        <text x="10" y="21" class="sm b">{s.t}</text>
+        <text x="10" y="39" class="sm muted" style="font-size:11px">{s.d}</text>
+      </g>
+    ))
+  }
+</svg>

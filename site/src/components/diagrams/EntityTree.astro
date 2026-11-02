@@ -1,0 +1,32 @@
+---
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+
+// The entity tree and the key of each level.
+const rows = [
+  { d: 0, n: 'job 4242  (or the host)', k: 'virtual root', c: 'f-purple' },
+  { d: 1, n: 'node i', k: 'SLURM_PROCID from the line prefix', c: 'f-blue' },
+  { d: 2, n: 'cgroup', k: '(node, inode): a new directory gets a new id', c: 'f-frost' },
+  { d: 3, n: 'cgroup …', k: 'parent id, path for display and rules only', c: 'f-frost' },
+  { d: 4, n: 'process', k: '(node, pid) + start time: pid reuse is caught', c: 'f-green' },
+];
+---
+
+<svg class="uj-d" viewBox="0 0 800 250" role="img" aria-labelledby="et-t">
+  <title id="et-t">The entity tree: a virtual root, then one node per agent, then the cgroup tree of that node, with processes under the cgroups that hold them.</title>
+  {
+    rows.map((r, i) => (
+      <g transform={`translate(${20 + r.d * 34} ${18 + i * 46})`}>
+        {r.d > 0 && <path d={`M-20 -28 V14 H-4`} fill="none" stroke="var(--uj-line)" stroke-width="1.5" />}
+        <rect width="230" height="30" rx="6" class="box" />
+        <rect width="6" height="30" rx="3" class={r.c} />
+        <text x="16" y="20" class="mono sm b">{r.n}</text>
+      </g>
+    ))
+  }
+  {
+    rows.map((r, i) => (
+      <text x="430" y={38 + i * 46} class="sm muted">{r.k}</text>
+    ))
+  }
+</svg>
