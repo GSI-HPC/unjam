@@ -14,7 +14,7 @@ import Layouts from '../../../components/diagrams/Layouts.astro';
 | Key | Action |
 |---|---|
 | <kbd>↑</kbd> <kbd>↓</kbd> or <kbd>k</kbd> <kbd>j</kbd> | Move one row |
-| <kbd>PgUp</kbd> <kbd>PgDn</kbd> | Move one screen |
+| <kbd>PgUp</kbd> <kbd>PgDn</kbd> | Move 20 rows |
 | <kbd>Home</kbd> <kbd>End</kbd> or <kbd>g</kbd> <kbd>G</kbd> | First and last row |
 | <kbd>←</kbd> <kbd>→</kbd> or <kbd>h</kbd> <kbd>l</kbd> | Fold and open a subtree. <kbd>←</kbd> on a leaf or a folded row moves to its parent |
 
@@ -36,7 +36,7 @@ On a host there is no node level, and <kbd>v</kbd> toggles between the tree and 
 
 ## Sort
 
-<kbd>s</kbd> selects the next sort column (NAME, CPU%, MEM, IO-R/s, IO-W/s, PIDS, and NODE when attached); <kbd>S</kbd> reverses it. The header shows the column and the direction (`sort CPU% ▼`).
+<kbd>s</kbd> selects the next sort column (NAME, CPU%, MEM, IO-R/s, IO-W/s, PIDS, and NODE with `--slurm` or `--replay`); <kbd>S</kbd> reverses it. The header shows the column and the direction (`sort CPU% ▼`).
 
 **Sort orders siblings only.** A row never leaves its parent: tree layouts sort each set of siblings at every level by the row's own value. Flat has one set of siblings, so its sort is global. Missing values (`-`) sort last in both directions; ties keep the natural order.
 
@@ -50,13 +50,13 @@ On a host there is no node level, and <kbd>v</kbd> toggles between the tree and 
 
 ## Detail
 
-<kbd>Enter</kbd> opens every value of the highlighted row: the full path or the pid, command name and full command line, then each metric the node announced, raw and formatted. It also shows metrics that have no column, such as the pressure stall times and page faults, and metrics of future sources. `NA` means the value was not announced or the file is absent. On a job, step or folded row, the values are the sums. Any key closes it.
+<kbd>Enter</kbd> opens every value of the highlighted row: the full path or the pid, command name and full command line, then each metric the node announced, raw and formatted. It also shows metrics that have no column, such as the pressure stall times and page faults, and metrics of future sources. `NA` means the value was not announced or the file is absent. On a job, step or folded row, the values are the sums. Any key but <kbd>q</kbd> closes it; <kbd>q</kbd> quits.
 
 <Terminal rec="slurm" frame={18} />
 
 ## Help and log
 
-<kbd>?</kbd> shows the keys of the current mode, a legend of the INT, W and PIDS columns, a table with each agent's CPU, memory, output, drops, errors and clock skew, and the newest log lines (srun messages, warnings from agents, recording events). Any key closes it.
+<kbd>?</kbd> shows the keys of the current mode, a legend of the INT, W and PIDS columns, a table with each agent's CPU, memory, output, drops, errors and clock skew, and the newest log lines (srun messages, warnings from agents, recording events). Any key but <kbd>q</kbd> closes it; <kbd>q</kbd> quits.
 
 ## Pause, theme, quit
 

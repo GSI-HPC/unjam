@@ -10,7 +10,7 @@ unjam --replay FILE.arrows... [OPTIONS]
 unjam record [OPTIONS] -- CMD...      record a job step
 ```
 
-`--slurm` and `--replay` exclude each other. Durations take `ms`, `s` and `m` (`500ms`, `2s`, `1m`); digits alone are milliseconds. Intervals are rounded to 100 ms and kept between 100 ms and 60 s.
+`--slurm` and `--replay` exclude each other. Durations take `ms`, `s` and `m` (`500ms`, `2s`, `1m`); digits alone are seconds, except in a `--rule` interval, where they are milliseconds. Intervals are rounded to 100 ms and kept between 100 ms and 60 s.
 
 ## Viewer
 
@@ -50,7 +50,7 @@ srun unjam record [OPTIONS] -- CMD [ARGS...]
 | `-o`, `--output PATTERN` | Output file. `%j` job id, `%s` step id, `%n` host name, `%%` a percent sign; a missing value becomes `na`. Default `unjam-%j.%s-%n.arrows`. Never overwrites |
 | `-i`, `--interval DUR` | Sampling interval, default `5s` |
 | `--no-procs` | Sample cgroups only |
-| `--root DIR` | Sample this cgroup instead of the own step's tasks (in Slurm) or the own cgroup (outside) |
+| `--root DIR` | Sample this cgroup instead of its own step's tasks (in Slurm) or its own cgroup (outside) |
 
 Exit code: the application's, or 128 + signal number after SIGTERM, SIGINT or SIGHUP.
 
@@ -59,7 +59,7 @@ Exit code: the application's, or 128 + signal number after SIGTERM, SIGINT or SI
 | Variable | Effect |
 |---|---|
 | `UNJAM_THEME` | Default theme |
-| `NO_COLOR` | Any value forces the `mono` theme |
+| `NO_COLOR` | Any non-empty value forces the `mono` theme |
 | `SLURM_JOB_ID` | Job for `--slurm` without a value |
 | `SLURM_CONF` | Passed to srun. All other `SLURM_*` and `SRUN_*` variables are removed from srun's environment, so options from an enclosing `salloc` cannot change the agent step |
 
@@ -71,4 +71,4 @@ srun starts `unjam agent` on each node. It is hidden from `--help` and not meant
 |---|---|
 | `--root DIR` | Sample this cgroup instead of the Slurm job |
 | `--keepalive SECS` | Exit after this many seconds without control input (default 120) |
-| `--unlink-self` | Delete the own executable at start (the `--bcast` copy) |
+| `--unlink-self` | Delete its own executable at start (the `--bcast` copy) |

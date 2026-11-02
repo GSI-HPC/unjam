@@ -15,7 +15,7 @@ unjam has seven themes, compiled into the binary: **nord** (Nord Frost, the defa
 2. else the `UNJAM_THEME` environment variable
 3. else `nord`
 
-`NO_COLOR` (any value) forces `mono`, and <kbd>t</kbd> then stays on mono. In the view, <kbd>t</kbd> cycles the themes; the help pane (<kbd>?</kbd>) names the current one.
+`NO_COLOR` (any non-empty value) forces `mono`, and <kbd>t</kbd> then stays on mono. In the view, <kbd>t</kbd> cycles the themes; the help pane (<kbd>?</kbd>) names the current one.
 
 ```sh
 export UNJAM_THEME=gruvbox
@@ -23,7 +23,7 @@ unjam --theme solar        # for a light terminal
 NO_COLOR=1 unjam           # for screen readers, logs, and colour-blind safe output
 ```
 
-Every theme also shows load by **height**, not only by colour: the history bars and the heat strip use `▁▂▃▄▅▆▇█`, so `mono` and printed output keep the information.
+Every theme also shows load by **height**, not only by colour: the history bars and the heat strip use `▁▂▃▄▅▆▇█` (amber: `_-=+*#%@`), so `mono` and printed output keep the information.
 
 ## Add a theme
 

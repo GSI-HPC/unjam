@@ -37,7 +37,7 @@ Each metric column has field metadata:
 | `unjam.version` | `0.2.0` | The unjam that wrote the file |
 | `unjam.source` | `record` or `tui` | `unjam record`, or a live viewer (<kbd>r</kbd>, `--record`) |
 | `unjam.host` | `node1` | Host name |
-| `unjam.job`, `unjam.step` | `4242`, `4242.1` | Slurm job and step; `na` and `-` outside Slurm |
+| `unjam.job`, `unjam.step` | `4242`, `4242.1` | Slurm job and step (in a viewer recording, the step of the unjam agents); outside Slurm `na` (`unjam` from a local viewer) and `-` |
 | `unjam.root` | `/sys/fs/cgroup/…/job_4242/step_1/user` | The sampled cgroup (`record` journals only) |
 | `unjam.interval_ms` | `1000` | Sampling interval |
 | `unjam.btime` | `1793627942` | Boot time (Unix seconds, or `na`); with `start` it gives a process's start time |
@@ -47,7 +47,7 @@ Each metric column has field metadata:
 - **Snapshots.** In a `record` journal, each tick is a complete snapshot of the scope. An entity that is missing from a tick has gone; no "gone" rows are written. A `tui` journal holds what the viewer received, at the rule intervals that were active.
 - **Batches** are cut every **10 s or 8,192 rows**, whichever comes first, then written and flushed.
 - **Keyframe rule.** The first row of each entity in a batch carries `path`, `comm`, `cmdline`, `ppid` and `start`; later rows leave them null. So every batch decodes on its own. To have them on every row, forward-fill per entity: `cg` for cgroup rows, `pid` for process rows. See [Analyze recordings](/unjam/guide/analysis/).
-- **Crash safety.** SIGKILL, OOM or a node crash loses at most the open batch. Readers get every complete batch; replay then says `truncated at byte N`.
+- **Crash safety.** SIGKILL or OOM loses at most the open batch. There is no fsync, so a node crash can lose more. Readers get every complete batch; replay then says `truncated at byte N`.
 - **Files** are created new with mode 0600 and never overwritten.
 
 ## Evolution

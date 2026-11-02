@@ -28,6 +28,7 @@ import Terminal from '../../../components/Terminal.astro';
 3. **Record a job step.** In a batch script, wrap the application:
 
    ```sh
+   mkdir -p rec
    srun unjam record -o rec/%j.%s-%n.arrows -- ./app args
    ```
 

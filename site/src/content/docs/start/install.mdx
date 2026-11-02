@@ -5,7 +5,7 @@ description: Install unjam from the signed dnf repository, with mise, as a stati
 
 import { Tabs, TabItem, Steps, Aside } from '@astrojs/starlight/components';
 
-Every release builds **one static binary per architecture** (x86_64 and aarch64, linked against musl). All install methods below deliver that same binary, so it runs on any Linux compute node, whatever its glibc. GitHub signs a **build provenance attestation** for each binary, which proves that the file came from this repository's release workflow.
+Every release builds **one static binary per architecture** (x86_64 and aarch64, linked against musl). The dnf, mise and static-binary methods below deliver that same binary, so it runs on any Linux compute node, whatever its glibc. GitHub signs a **build provenance attestation** for each binary, which proves that the file came from this repository's release workflow.
 
 ## Rocky Linux, RHEL and Fedora (dnf)
 

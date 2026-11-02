@@ -56,7 +56,7 @@ The step is named `unjam` in `squeue -s` and `sacct`.
 - Each agent reports its own CPU and memory; the viewer shows the busiest one in its header.
 - The agent keeps file descriptors open to read each file with one `pread`. The cache is capped at `min(soft NOFILE − 64, 1024)` descriptors. Each one holds a kernel buffer of about 4 KiB that is charged to the job's memory cgroup, so the cap bounds that at about 5 MiB.
 - Output is limited by a byte budget (default 4 MiB/s for the whole job), and jobs of more than 16 nodes start without process sampling.
-- A measured run with 1,500 processes sampled every 100 ms (far above the defaults) used 10 % of one core and 1.8 MiB per agent; see `docs/perf.md` in the repository.
+- A measured run with 500 processes per node (1,500 in all) sampled every 100 ms (far above the defaults) used at most 10 % of one core and 1.8 MiB per agent; see `docs/perf.md` in the repository.
 
 ## Install on a cluster
 

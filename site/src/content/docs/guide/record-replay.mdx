@@ -23,6 +23,7 @@ Wrap the application in `unjam record` in your batch script:
 ```sh
 #!/bin/bash
 #SBATCH -N 4 --ntasks-per-node=8
+mkdir -p rec
 srun unjam record -o rec/%j.%s-%n.arrows -- ./app args
 ```
 
@@ -39,7 +40,7 @@ srun unjam record -o rec/%j.%s-%n.arrows -- ./app args
 | `-o PATTERN` | Output file. `%j` job id, `%s` step id, `%n` host name, `%%` a percent sign. Default `unjam-%j.%s-%n.arrows`. Existing files are never overwritten |
 | `-i DUR` | Interval, default `5s` |
 | `--no-procs` | Cgroups only |
-| `--root DIR` | Record this cgroup directory instead of the own step (also works outside Slurm) |
+| `--root DIR` | Record this cgroup directory instead of its own step (also works outside Slurm) |
 
 The files are created with mode 0600, because they hold command lines.
 
@@ -49,9 +50,9 @@ If the recorder cannot start (the file exists, the directory is missing, no cgro
 
 ### Signals and crashes
 
-The recorder does not forward signals: Slurm already signals every process of the step. After SIGTERM, SIGINT or SIGHUP it keeps recording the shutdown of your application for at most 5 s, finishes the file, and exits with 128 + the signal number.
+The recorder does not forward signals: Slurm already signals every process of the step. After SIGTERM, SIGINT or SIGHUP it keeps recording the shutdown of your application for at most 5 s, finishes the file, and exits with the application's exit code, or with 128 + the signal number if the application is still running.
 
-<Figure caption="A journal is a schema message and a series of batches, cut every 10 s or 8,192 rows. Each batch decodes on its own. A SIGKILL, an OOM kill or a node crash loses at most the open batch.">
+<Figure caption="A journal is a schema message and a series of batches, cut every 10 s or 8,192 rows. Each batch decodes on its own. A SIGKILL or an OOM kill loses at most the open batch.">
   <Batches />
 </Figure>
 
@@ -73,7 +74,7 @@ These files hold what the viewer had: the nodes, subtrees and intervals of its r
 unjam --replay rec/*.arrows
 ```
 
-Give one file per node; they share one timeline. The header shows the cursor time and the recorded interval; line 2 shows the position (`tick 6/40` and the time range).
+Give one file per node; they share one timeline. The header shows the cursor time and the recorded interval; line 2 shows the position (`tick 8/40` and the time range).
 
 <Terminal rec="replay" frame={9} />
 

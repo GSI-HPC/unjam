@@ -19,7 +19,7 @@ Without options, unjam samples the whole cgroup2 mount at `/sys/fs/cgroup` every
 | Line | Shows |
 |---|---|
 | 1 | The source (`unjam` and the host name), the process count, the interval, the layout, the sort column and the clock (UTC). `● rec` while recording, `[paused]` after <kbd>z</kbd>. |
-| 2 | unjam's own cost: `tui` is the CPU and resident memory of the whole unjam process; `in` and `out` are bytes and lines per second between sampler and viewer; `drop` and `err` count lost ticks and decode errors. |
+| 2 | unjam's own cost: `tui` is the CPU and resident memory of the whole unjam process; `in` is the bytes and lines per second from the sampler to the viewer, `out` the control bytes per second back; `drop` and `err` count lost ticks and decode errors. |
 | 3 | The host: CPU as a share of all CPUs (a row's CPU% is per core, so 200% is two full cores), and memory in use against the total from `/proc/meminfo`. |
 
 ## The table
@@ -28,14 +28,14 @@ Without options, unjam samples the whole cgroup2 mount at `/sys/fs/cgroup` every
 |---|---|---|
 | NAME | Directory name; <kbd>▾</kbd> open, <kbd>▸</kbd> folded | The command line (cut with `…`) |
 | PID | | Process id |
-| CPU history | The last 16 CPU samples as bars, coloured by load | Same |
+| CPU history | The last 16 CPU samples as bars (8, headed CPU, below 100 columns), coloured by load | Same |
 | CPU% | `cpu.stat` usage of the whole subtree, per core | user + system time from `/proc/<pid>/stat` |
 | MEM | `memory.current` | Resident set size |
 | IO-R/s, IO-W/s | `io.stat` bytes, summed over disks | `/proc/<pid>/io` bytes |
 | PIDS | `pids.current`, or `~` and the summed threads of the sampled processes | Threads |
 | INT, W | The interval and level of the [sampling rule](/unjam/guide/sampling/) | |
 
-`-` means no value: the file does not exist (the controller is off, the kernel is old) or the row is not sampled. A column that is `-` on every visible row is hidden for that screen.
+`-` means no value: the file does not exist (the controller is off, the kernel is old) or the row is not sampled. A column other than CPU% that is `-` on every visible row is hidden for that screen.
 
 ## One subtree only
 

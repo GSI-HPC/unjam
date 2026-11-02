@@ -40,7 +40,7 @@ Run it where you run `squeue` and `srun`: on a login node, or inside the job's o
 
 **Header line 2** shows what unjam itself costs: the viewer's CPU and memory, the bytes and lines per second from the agents, the control bytes to them, dropped ticks and errors, and the **busiest agent's** CPU and memory with its node name. If unjam ever weighs on a job, you see it here first.
 
-**The heat strip** (`NODES`) has one cell per node, or per group of nodes on a big job (the legend says how many). The colour and the height show the highest CPU of the cell, relative to the busiest node. An idle or lagging node stands out at once. A dotted cell is a node whose sampling is off.
+**The heat strip** (`NODES`) has one cell per node, or per group of nodes on a big job (the legend says how many). The colour and the height show the highest CPU of the cell, relative to the busiest node. An idle or lagging node stands out at once. A dotted cell is a node that is stale or whose sampling is off.
 
 **The step layout** (the default) is job → step → node → task → process:
 
@@ -60,7 +60,7 @@ Run it where you run `squeue` and `srun`: on a login node, or inside the job's o
 
 ## Big jobs
 
-For jobs of **more than 16 nodes**, unjam starts with cheaper rules: cgroups only (no processes) at twice the interval, and the `user` subtree of each step off. That leaves about seven cgroups per node, so even 1,000 nodes send about 0.5 MB/s. Then turn on detail where you need it:
+For jobs of **more than 16 nodes**, unjam starts with cheaper rules: cgroups only (no processes) at twice the interval, and the `user` subtree of each step off. That leaves about seven cgroups per node, so even 1,000 nodes send about 0.26 MB/s. Then turn on detail where you need it:
 
 - Move to a node (or <kbd>space</kbd> to mark several) and press <kbd>p</kbd> to cycle its level: `p` processes → `c` cgroups → `o` off.
 - <kbd>+</kbd> and <kbd>-</kbd> halve and double the interval of the marked rows.
@@ -97,8 +97,8 @@ The header shows `● rec`. The files replay like those of `unjam record`; see [
 
 ## When a node or the job goes away
 
-- An agent that stops (the node failed, someone killed it) makes its node **stale**: dimmed, without values, and named `node7 (stale)`. The other agents keep running.
-- When the job ends, Slurm ends the step; unjam keeps the last data on screen until you quit.
+- An agent that stops (the node failed, someone killed it) makes its node **stale**: in the warning colour, without values, and named `node7 (stale)`. The other agents keep running.
+- When the job ends, Slurm ends the step; unjam marks every node stale, shows `(ended)` in the header and keeps the tree on screen until you quit.
 
 <Aside type="note" title="Site rules">
 Some sites restrict extra steps with `job_submit` or `cli_filter` plugins, SPANK plugins or `MaxStepCount`. `--srun-arg=ARG` passes further options to srun (repeat it for several). [For site administrators](/unjam/guide/site/) lists what unjam needs.

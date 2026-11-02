@@ -17,7 +17,7 @@ import EntityTree from '../../../components/diagrams/EntityTree.astro';
 |---|---|
 | Watch this host | `unjam` |
 | Watch every node of a running Slurm job | `unjam --slurm` or `unjam --slurm=JOBID` |
-| Record a job step to Arrow files, one per node | `srun unjam record -o rec/%j.%s-%n.arrows -- ./app` |
+| Record a job step to Arrow files, one per node (create `rec/` first) | `srun unjam record -o rec/%j.%s-%n.arrows -- ./app` |
 | Replay recordings on one timeline | `unjam --replay rec/*.arrows` |
 | Print text snapshots for scripts | `unjam --batch 3` |
 
@@ -37,10 +37,10 @@ For each cgroup: CPU time (user, system, throttled), current, peak, anonymous an
 
 ## What it needs
 
-- Linux with **cgroup v2** (the unified hierarchy). Pure cgroup v1 hosts are refused at start. Hybrid hosts work when a cgroup2 mount exists.
+- Linux with **cgroup v2** (the unified hierarchy). Pure cgroup v1 hosts are refused at start. Hybrid hosts work when you point `--root` at their cgroup2 mount.
 - For `--slurm`: **Slurm 25.11 or later** with the cgroup/v2 plugin, and the right to start a step in the job (you own it, or you are an operator or root).
 - Nothing else: no daemon, no database, no root, no site configuration. Sites can turn on two extra cgroup controllers to fill the IO and PIDS columns in jobs; see [For site administrators](/unjam/guide/site/).
 
 ## What it is not
 
-unjam is a live and forensic tool for one host or one job. It is not a cluster-wide time series database, it keeps no history beyond what you record, and it does not change anything on the nodes: it only reads files below `/sys/fs/cgroup` and `/proc`.
+unjam is a live and forensic tool for one host or one job. It is not a cluster-wide time series database, it keeps no history beyond what you record, and it does not change anything on the nodes: it only reads files below `/sys` and `/proc`.

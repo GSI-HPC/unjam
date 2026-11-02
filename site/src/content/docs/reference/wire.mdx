@@ -8,7 +8,7 @@ Agents write **tab-separated text lines** to stdout; srun carries them to the vi
 ```text
 0	H	1	0.2.0	node1	4242.3	4	1793627942
 0	D	c	0	cg_cpu_usage_usec	us	counter
-0	G	81723	0	.
+0	G	81723	0	
 0	G	81731	81723	step_0
 0	P	2459	88123	81755	2401	python3	python3 train.py --epochs 90
 0	T	1793628001000	2310	1520	0	4915200
@@ -25,7 +25,7 @@ Fields after `<node>\t`:
 | `H` | proto, version, host, step, ntasks, btime | Hello: wire grammar version (1), unjam version, host name, `<job>.<step>` or `-`, task count, boot time |
 | `D` | ent (`c` or `p`), idx, name, unit, `counter` or `gauge` | Describes value column `idx` of cgroups or processes |
 | `T` | unix_ms, self_cpu_us, out_bytes, dropped_ticks, self_rss_bytes | A tick: its time and the agent's own cost |
-| `G` | id, parent_id (0 for the root), rel_path | A cgroup (id = directory inode) |
+| `G` | id, parent_id (0 for the root), rel_path | A cgroup (id = directory inode). The root's rel_path is empty |
 | `g` | id, first, v… | Cgroup values from column `first` on, in `D` order |
 | `X` | id | The cgroup is gone |
 | `P` | pid, start, cg_id, ppid, comm, cmdline | A process (start = clock ticks since boot) |
@@ -48,6 +48,6 @@ Sent on srun's stdin, which srun copies to every agent. `tasks` is `*` or ranges
 | `C	tasks` | Clear all rules |
 | `S	tasks` | Resync: send `H`, `D` and all `G` and `P` again |
 | `B	tasks	bytes_per_s` | This agent's output budget |
-| `K` | Keepalive (every 30 s). An agent exits after 120 s without input |
+| `K` | Keepalive (after 30 s without another control line). An agent exits after 120 s without input |
 
 A malformed control line makes one `W` line and changes nothing.
