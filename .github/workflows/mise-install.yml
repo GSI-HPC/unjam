@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+
+# A draft release is invisible to mise. After the maintainer publishes it, prove that
+# `mise use github:GSI-HPC/unjam` installs it and that mise verifies the build provenance.
+name: Mise install
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to install (for example v0.2.0)
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    name: mise install (${{ matrix.runner }})
+    if: github.repository == 'GSI-HPC/unjam'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      GITHUB_TOKEN: ${{ github.token }}
+      MISE_GITHUB_ATTESTATIONS: "true"
+    steps:
+      - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d  # v5.2.4
+        with:
+          install: false
+      - name: Install from the release assets with attestation checks
+        run: mise use --global "github:GSI-HPC/unjam@${TAG#v}"
+      - name: Run the installed binary
+        run: |
+          mise exec -- unjam --version | tee version.txt
+          grep -F "${TAG#v}" version.txt

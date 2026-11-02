@@ -19,3 +19,6 @@
 /site/.astro/
 /site/src/content/docs/reference/design-document.md
 /site/src/content/docs/reference/changelog.md
+
+# Python
+__pycache__/

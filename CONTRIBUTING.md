@@ -83,7 +83,7 @@ CI then runs the following steps for the tag, which must be on `main`:
 4. Create a **draft** GitHub release with the binaries, the RPMs and the CHANGELOG section as notes.
 5. Wait for a reviewer of the `crates-io` environment to approve, then publish to [crates.io](https://crates.io/) with Trusted Publishing.
 
-Publish the draft release by hand after the crate is on crates.io. Publishing starts `pages.yml`: it builds the dnf repository at <https://gsi-hpc.github.io/unjam/rpm/> again from the RPMs of all published releases, deploys it and installs unjam from it on each distribution. To add RPMs to a release that has none, run `rpm.yml` by hand with its tag.
+Publish the draft release by hand after the crate is on crates.io. Publishing starts `pages.yml`: it builds the dnf repository at <https://gsi-hpc.github.io/unjam/rpm/> again from the RPMs of all published releases, deploys it and installs unjam from it on each distribution. `mise-install.yml` also starts: it installs the release with `mise use github:GSI-HPC/unjam` on both architectures and runs `unjam --version`. mise checks the attestation itself, so a failure there means the release assets or their provenance are wrong. To add RPMs to a release that has none, run `rpm.yml` by hand with its tag.
 
 ### RPM Signing Key
 

@@ -1,0 +1,14 @@
+#!/bin/bash
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+# Fake scontrol: only `show hostnames LIST` for node[1-4] style lists.
+[ "$1 $2" = "show hostnames" ] || { echo "fake scontrol: unsupported: $*" >&2; exit 1; }
+python3 - "$3" <<'PY'
+import re, sys
+for part in re.findall(r'[^,\[]+(?:\[[^\]]*\])?', sys.argv[1]):
+    m = re.match(r'(.*)\[(.*)\]', part)
+    if not m: print(part); continue
+    for r in m.group(2).split(','):
+        a, _, b = r.partition('-'); b = b or a
+        for i in range(int(a), int(b) + 1): print(f"{m.group(1)}{i:0{len(a)}d}")
+PY

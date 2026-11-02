@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+"""Fake srun for a 4-node job emulated with cgroup namespaces on one VM.
+
+Node N (node1..node4) is the cgroup subtree /sys/fs/cgroup/unified/nodeN. Each task runs in its
+own mount, UTS and cgroup namespace: hostname nodeN, cgroup2 mounted at /sys/fs/cgroup rooted at
+nodeN, and the task placed in job_4242/step_<S>/user/task_0. --input=all broadcasts stdin; stdout
+and stderr are merged line by line. --bcast=PATH copies the executable to PATH first.
+Env: FAKE_SRUN_FAIL=msg → print msg to stderr and exit 1 (as a refused step)."""
+import os, subprocess, sys, threading, shutil, itertools
+U = os.environ.get("BENCH_CG", os.environ.get("BENCH_UNIFIED", "/sys/fs/cgroup/unified"))
+args = sys.argv[1:]
+opts, i = {}, 0
+while i < len(args) and args[i].startswith("-"):
+    a = args[i]; k, _, v = a.partition("=")
+    if k[:2] in ("-N", "-n", "-w") and len(k) > 2 and not k.startswith("--"): k, v = k[:2], k[2:]
+    elif k in ("-N", "-n", "-w") and not v: i += 1; v = args[i]
+    opts.setdefault(k, []).append(v); i += 1
+cmd = args[i:]
+if os.environ.get("FAKE_SRUN_FAIL"):
+    print(os.environ["FAKE_SRUN_FAIL"], file=sys.stderr); sys.exit(1)
+if not cmd:
+    print("srun: fatal: No command given to execute.", file=sys.stderr); sys.exit(1)
+job = (opts.get("--jobid") or [os.environ.get("SLURM_JOB_ID", "4242")])[-1]
+if job != "4242":
+    print(f"srun: error: Unable to confirm allocation for job {job}: Invalid job id specified", file=sys.stderr); sys.exit(1)
+n = int((opts.get("--nodes") or opts.get("-N") or ["4"])[-1])
+hosts = [f"node{k}" for k in range(1, 5)]
+if "--nodelist" in opts or "-w" in opts:
+    lst = (opts.get("--nodelist") or opts.get("-w"))[-1]
+    hosts = subprocess.run([os.path.join(os.path.dirname(__file__), "scontrol"), "show", "hostnames", lst],
+                           capture_output=True, text=True).stdout.split()
+    bad = [h for h in hosts if h not in [f"node{k}" for k in range(1, 5)]]
+    if bad:
+        print(f"srun: error: Required node not available (down, drained or reserved): {','.join(bad)}", file=sys.stderr); sys.exit(1)
+hosts = hosts[:n]
+# step id: next free
+base = f"{U}/node1/system.slice/slurmstepd.scope/job_4242"
+step = next(s for s in itertools.count(1) if not any(os.path.isdir(f"{U}/{h}/system.slice/slurmstepd.scope/job_4242/step_{s}") for h in hosts))
+exe = cmd[0]
+if "--bcast" in opts:
+    dst = opts["--bcast"][-1]
+    shutil.copy(shutil.which(exe) or exe, dst); os.chmod(dst, 0o755); exe = dst
+procs = []
+for nid, h in enumerate(hosts):
+    tdir = f"system.slice/slurmstepd.scope/job_4242/step_{step}/user/task_0"
+    os.makedirs(f"{U}/{h}/{tdir}", exist_ok=True)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("SLURM_")}
+    env.update(SLURM_JOB_ID="4242", SLURM_JOBID="4242", SLURM_STEP_ID=str(step), SLURM_STEPID=str(step),
+               SLURM_PROCID=str(nid), SLURM_NODEID=str(nid), SLURM_LOCALID="0", SLURM_NTASKS=str(len(hosts)),
+               SLURM_NNODES=str(len(hosts)), SLURM_JOB_NODELIST="node[1-4]", SLURMD_NODENAME=h,
+               SLURM_TOPOLOGY_ADDR=h)
+    inner = ('hostname "$H" && { umount -l /sys/fs/cgroup 2>/dev/null; mount -t cgroup2 cgroup2 /sys/fs/cgroup; } && '
+             'echo $$ > "/sys/fs/cgroup/$T/cgroup.procs" && exec "$@"')
+    def pre(h=h):
+        with open(f"{U}/{h}/cgroup.procs", "w") as f: f.write(str(os.getpid()))
+    full = ["unshare", "-m", "-u", "-C", "--propagation", "private", "sh", "-c", inner, "sh", exe, *cmd[1:]]
+    env.update(H=h, T=tdir)
+    cwd = (opts.get("--chdir") or [os.getcwd()])[-1]
+    procs.append(subprocess.Popen(full, env=env, cwd=cwd, preexec_fn=pre, stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+lock = threading.Lock()
+def pump(src, dst):
+    for line in iter(src.readline, b""):
+        with lock: dst.write(line); dst.flush()
+ts = []
+for p in procs:
+    for s, d in ((p.stdout, sys.stdout.buffer), (p.stderr, sys.stderr.buffer)):
+        t = threading.Thread(target=pump, args=(s, d), daemon=True); t.start(); ts.append(t)
+def feed():
+    try:
+        for line in iter(sys.stdin.buffer.readline, b""):
+            for p in procs:
+                try: p.stdin.write(line); p.stdin.flush()
+                except OSError: pass
+    finally:
+        for p in procs:
+            try: p.stdin.close()
+            except OSError: pass
+threading.Thread(target=feed, daemon=True).start()
+rc = 0
+for p in procs: rc = max(rc, p.wait())
+for t in ts: t.join(1)
+sys.stdout.flush(); sys.stderr.flush()
+# the step cgroups go away with the step
+for h in hosts:
+    d = f"{U}/{h}/system.slice/slurmstepd.scope/job_4242/step_{step}"
+    for root, dirs, _ in os.walk(d, topdown=False):
+        try: os.rmdir(root)
+        except OSError: pass
+os._exit(rc)
