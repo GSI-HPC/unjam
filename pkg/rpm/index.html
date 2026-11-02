@@ -22,7 +22,8 @@ dnf install https://gsi-hpc.github.io/unjam/rpm/unjam-release-fedora.noarch.rpm 
 dnf install unjam
 </pre>
 <p>unjam-release installs <code>/etc/yum.repos.d/unjam.repo</code> and the signing key
-<a href="RPM-GPG-KEY-unjam">RPM-GPG-KEY-unjam</a>. dnf checks the signature of each package
+<a href="RPM-GPG-KEY-unjam">RPM-GPG-KEY-unjam</a>
+(fingerprint <code>1EC9 AAF8 6238 CE0B 2FC2  78F8 D014 7913 E1E0 5035</code>). dnf checks the signature of each package
 and of the repository metadata.</p>
 <p>The package holds the release binary without changes, so its build provenance stays
 valid:</p>

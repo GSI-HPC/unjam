@@ -17,8 +17,9 @@ dnf install https://gsi-hpc.github.io/unjam/rpm/unjam-release-el9.noarch.rpm  # 
 dnf install unjam
 ```
 
-`unjam-release` installs the repository configuration and its signing key; dnf checks the
-signatures of the packages and of the repository metadata. The package holds the release
+`unjam-release` installs the repository configuration and its signing key
+(fingerprint `1EC9 AAF8 6238 CE0B 2FC2  78F8 D014 7913 E1E0 5035`); dnf checks the signatures of the packages and of the repository
+metadata. The package holds the release
 binary without changes: `gh attestation verify /usr/bin/unjam -R GSI-HPC/unjam` checks its
 build provenance.
 
