@@ -775,6 +775,8 @@ fn texts(app: &App, r: &Row) -> [String; 5 + NCOL] {
     let gl = &THEMES[app.opts.theme].glyphs;
     let glyph = match r.open {
         Some(o) => [gl.closed, gl.open][usize::from(o)],
+        // Flat rows have no parent to hang from.
+        None if app.view.layout == Layout::Flat => "",
         None if matches!(r.key, Key::Proc(..)) => gl.guide[usize::from(r.last)],
         None => "  ",
     };
@@ -1238,6 +1240,17 @@ mod tests {
         assert_eq!(text, " ? help q quit ↑↓ move ←→ fold ");
         assert_eq!(line.spans[1].style, THEMES[0].accent.not_dim());
         assert_eq!(line.spans[3].style, Style::new());
+    }
+
+    #[test]
+    fn flat_rows_have_no_guides_and_a_cut_set_has_no_last_row() {
+        let (mut app, _rx) = app(true, "mono");
+        host(&mut app, 0, "vm", 1);
+        app.view.layout = Layout::Flat;
+        assert!(!state::rows(&app.st, &app.view, 1)[0].last, "a sibling follows past the window");
+        assert!(state::rows(&app.st, &app.view, usize::MAX).last().unwrap().last);
+        let flat = text(&frame(&mut app, 100, 14));
+        assert!(!flat.contains('├') && !flat.contains('└'), "{flat}");
     }
 
     #[test]
