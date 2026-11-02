@@ -1,0 +1,79 @@
+---
+title: Life of a sample
+description: Follow one CPU value from a cgroup file on a compute node to a cell on your screen, function by function.
+---
+
+import Figure from '../../../components/Figure.astro';
+import LifeOfSample from '../../../components/diagrams/LifeOfSample.astro';
+
+This page follows one value, `usage_usec` of a task cgroup on `node3`, from the kernel to the CPU% cell in the viewer. The same path serves every mode; only the transport between the agent and the viewer changes.
+
+<Figure caption="Twelve steps, six on the node and six in the viewer. Nothing on the agent side allocates in steady state, and nothing on the viewer side is computed for rows that are not visible.">
+  <LifeOfSample />
+</Figure>
+
+## On the node
+
+**1. The timer fires.** `Sampler::tick(now, emit)` collects the intervals whose deadline has passed and moves each to its next wall-clock multiple with `model::next_due`. If a discovery walk is due, `walk` runs first and emits `G`, `X`, `P` and `x` for what changed.
+
+```rust
+for (iv, due) in self.timers.iter_mut().filter(|t| t.1 <= now) {
+    self.due.push(*iv);
+    *due = next_due(now, *iv);
+}
+```
+
+**2. Read the file.** For each cgroup whose rule interval is due, the cgroup source reads its files through `Files::read`. `cpu.stat` is a hot file, so its fd is almost always cached: **one `pread` at offset 0**.
+
+**3. Parse.** `Cgroup::sample` fills the cgroup's slice of the value vector. `kv` finds `usage_usec` in the bytes, with no string allocation. A missing file leaves `NA`.
+
+```rust
+0 => CPU_KEYS.iter().zip(&mut *out).for_each(|(k, o)| *o = kv(b, k).unwrap_or(NA)),
+```
+
+**4. Make an event.** The sampler emits `Event::CgVals { id, first: 0, v: &values }`. The event **borrows** the reused value buffer.
+
+**5. Encode.** `Out::push` calls `wire::write`, which appends one `g` line to the tick's value buffer:
+
+```text
+2	g	766	0	689269733	683296272	5973460	-	-	…
+```
+
+`2` is the node index, `766` the cgroup's inode, `0` the first column. A line that would pass 1000 bytes continues on a second `g` line.
+
+**6. Send.** At the end of the tick, `Out::send` adds the `T` line to the structure buffer, checks the token bucket, and `try_send`s one buffer to the writer thread. The writer sleeps the node's stagger delay, then writes to stdout. slurmstepd forwards whole lines to srun, and srun to the viewer's pipe.
+
+## In the viewer
+
+**7. Read.** The stdout reader thread `read`s into 64 KiB, splits at the last newline, and sends whole-line chunks on the data channel as `Msg::Lines`.
+
+**8. Split.** The main thread takes the chunk, and for each line `wire::split_node` reads the `2` and counts the line for that node.
+
+**9. Decode.** `wire::parse(line, &mut vals)` gives back `Event::CgVals` with a slice into a reused buffer. A line that does not parse raises the node's error count and asks for a resync.
+
+**10. Store.** `State::apply(2, &event, now)` maps each local column index to the global `ColId` (learnt from the agent's `D` lines), moves the old value to `pv` and stores the new one in `v`, with the times. For a CPU counter it also pushes the rate into the 16-entry history ring.
+
+**11. Build rows.** At most four times per second (or at once after a key), `state::rows(&state, &view, limit)` walks only the open part of the current layout and stops after `limit` rows. The rate is computed here:
+
+```rust
+Kind::Counter => Some(v.checked_sub(pv)? as f64 * 1000.0 / dt_ms as f64),
+```
+
+A counter that went backwards gives `None`, shown as `-`. On a job or step row, the rates of all nodes are summed.
+
+**12. Draw.** `tui::draw` formats the visible rows only, and ratatui writes only the cells that changed. The value appears as `68.9%`, about 689 ms of CPU per second.
+
+## Time on the path
+
+| Steps | Where | Cost |
+|---|---|---|
+| 1–5 | agent | about 3 µs per cgroup, 1 µs per process (release build, fixtures) |
+| 6 | writer | the stagger delay, at most 250 ms |
+| 7–10 | viewer | about 55 ns per value; at most 10 ms per loop before keys are checked again |
+| 11–12 | viewer | at most 4 Hz; about 1 ms per frame for 100,000 processes in flat |
+
+## Other modes
+
+- **Local:** steps 1–6 run on the sampler thread, and step 6 writes into a channel instead of stdout. Steps 7–8 are skipped.
+- **Record:** steps 1–4 feed a local `State` directly; `record::Writer` writes rows from it. No encoding.
+- **Replay:** `record::Reader` decodes a batch and calls `State::apply` per row; steps 11–12 are the same.

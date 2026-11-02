@@ -1,0 +1,105 @@
+---
+title: Watch a Slurm job
+description: Attach to a running Slurm job with unjam --slurm, read the multi-node view, find a slow node, and handle large jobs and clusters without a shared filesystem.
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+import Terminal from '../../../components/Terminal.astro';
+import Figure from '../../../components/Figure.astro';
+import Architecture from '../../../components/diagrams/Architecture.astro';
+
+```sh
+unjam --slurm            # $SLURM_JOB_ID, else your only running job
+unjam --slurm=4242       # this job; the = is required
+```
+
+Run it where you run `squeue` and `srun`: on a login node, or inside the job's own allocation. You need the right to start a step in the job: you own the job, or you are a Slurm operator or root.
+
+<Terminal rec="slurm" frame={0} caption="Job 4242 on four nodes. node3 uses far less CPU than the others: its heat-strip cell and its history bars are low." />
+
+## What happens when you attach
+
+<Steps>
+
+1. unjam finds the job. Without a value, it takes `$SLURM_JOB_ID`; outside a job, it takes your only running job from `squeue --me`. With several running jobs it lists them and exits, so you can pick one. An array job id selects the running task of the array.
+2. It starts **one agent per node** in a new step of the job: `srun --jobid=J --overlap` with one task per node. `--overlap` lets the step share the job's CPUs and memory, so it never waits and never takes resources from your application.
+3. Each agent finds the job's cgroup on its node, leaves out its own step, and sends the tree and its values as short text lines on stdout. srun merges them; the viewer sorts them by node.
+4. On <kbd>q</kbd>, the viewer closes srun's stdin, the agents exit, and the step ends. If something hangs, unjam cancels the step after 3 s and kills srun after 3 s more.
+
+</Steps>
+
+<Figure caption="The viewer, srun and the agents. Data lines go to the viewer; control lines (rules, keepalive) go to every agent at once.">
+  <Architecture />
+</Figure>
+
+`unjam --slurm=4242 --print-srun` prints the exact srun command and exits.
+
+## Read the view
+
+**Header line 1** names the job and its name, the number of nodes that report (and how many are stale), the process count, the interval, the layout and the sort.
+
+**Header line 2** shows what unjam itself costs: the viewer's CPU and memory, the bytes and lines per second from the agents, the control bytes to them, dropped ticks and errors, and the **busiest agent's** CPU and memory with its node name. If unjam ever weighs on a job, you see it here first.
+
+**The heat strip** (`NODES`) has one cell per node, or per group of nodes on a big job (the legend says how many). The colour and the height show the highest CPU of the cell, relative to the busiest node. An idle or lagging node stands out at once. A dotted cell is a node whose sampling is off.
+
+**The step layout** (the default) is job → step → node → task → process:
+
+- A **node row** under a step is that step's cgroup on that node, measured by the kernel.
+- The **job and step rows** sum their nodes. Rates and memory add up; since every node samples at the same wall-clock instant, the sum compares like with like.
+- With many nodes, the busiest nodes fill the screen and the rest fold into one row such as `node0418 … node1024 (606 folded)`. <kbd>→</kbd> opens it.
+
+<kbd>v</kbd> switches to the node layout (each node's own cgroup tree) and the flat layout (one row per process, with a NODE column). See [Navigate the view](/unjam/guide/navigate/).
+
+## Find the slow node
+
+1. Look at the heat strip and the step rows. A pale cell or a short history bar is a node that does less than its peers.
+2. Sort by CPU% (the default) and keep the step layout: under each step, nodes sort by their own value, so the lagging node is at the bottom.
+3. Open it and its tasks. Press <kbd>Enter</kbd> on a process for every metric: state, page faults, IO, and on cgroups the pressure stall times (`cg_psi_*`), which say how long tasks waited for CPU, memory or IO.
+
+<Terminal rec="slurm" frame={23} caption="? shows the keys and a per-node table: each agent's CPU, memory, output rate, drops, errors and clock skew." />
+
+## Big jobs
+
+For jobs of **more than 16 nodes**, unjam starts with cheaper rules: cgroups only (no processes) at twice the interval, and the `user` subtree of each step off. That leaves about seven cgroups per node, so even 1,000 nodes send about 0.5 MB/s. Then turn on detail where you need it:
+
+- Move to a node (or <kbd>space</kbd> to mark several) and press <kbd>p</kbd> to cycle its level: `p` processes → `c` cgroups → `o` off.
+- <kbd>+</kbd> and <kbd>-</kbd> halve and double the interval of the marked rows.
+- <kbd>0</kbd> goes back to the defaults.
+
+The [sampling guide](/unjam/guide/sampling/) explains the rules. Two flags limit the cost from the start:
+
+| Flag | Effect |
+|---|---|
+| `--nodelist=LIST` | Start agents on these nodes only, for example `--nodelist=n[0001-0016]` |
+| `--budget=SIZE` | Total output of all agents in bytes per second (default `4M`, split over the nodes). Values past the budget are dropped, structure never |
+
+## No shared filesystem
+
+By default, the agent is the same file as the viewer, so it must exist at the same path on every node (true for an RPM install). If it does not:
+
+```sh
+unjam --slurm=4242 --bcast            # srun copies the binary to /tmp on each node
+unjam --slurm=4242 --bcast=/var/tmp   # where /tmp is mounted noexec
+unjam --slurm=4242 --agent=/opt/unjam/bin/unjam   # a binary that is already on the nodes
+```
+
+With `--bcast`, srun copies the binary to `DIR/unjam.<job>.<uid>.<random>`. The agent deletes that file as soon as it runs, so nothing stays on the nodes, even after a crash. The random part keeps other users from guessing the name. `--bcast` refuses a job of another user (whose `/tmp` that user controls); use `--agent` there.
+
+## Record while you watch
+
+<kbd>r</kbd> starts and stops a recording of what the viewer receives, one file per node in `unjam-rec-<secs>/`. To start recording at once:
+
+```sh
+unjam --slurm=4242 --record=rec/
+```
+
+The header shows `● rec`. The files replay like those of `unjam record`; see [Record and replay](/unjam/guide/record-replay/).
+
+## When a node or the job goes away
+
+- An agent that stops (the node failed, someone killed it) makes its node **stale**: dimmed, without values, and named `node7 (stale)`. The other agents keep running.
+- When the job ends, Slurm ends the step; unjam keeps the last data on screen until you quit.
+
+<Aside type="note" title="Site rules">
+Some sites restrict extra steps with `job_submit` or `cli_filter` plugins, SPANK plugins or `MaxStepCount`. `--srun-arg=ARG` passes further options to srun (repeat it for several). [For site administrators](/unjam/guide/site/) lists what unjam needs.
+</Aside>

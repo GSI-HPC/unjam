@@ -1,0 +1,111 @@
+---
+title: Architecture
+description: How unjam is built - one binary, one sampler, one text ingest path for every mode.
+---
+
+import Figure from '../../../components/Figure.astro';
+import Architecture from '../../../components/diagrams/Architecture.astro';
+
+unjam is **one Rust package that builds one binary**. The same binary is the viewer, the per-node agent and the recorder. Every mode shares three parts:
+
+- **one sampler** (`agent::Sampler`) that reads cgroup and `/proc` files,
+- **one interchange type** (`Event<'a>`) that borrows its data, so no event allocates,
+- **one store** (`state::State`) that the viewer draws from.
+
+The design priorities are, in order: **correct, small, fast**. Each item in the code must have a reason, and tests and CI gates enforce the size limits (see [Lean by design](/unjam/design/lean/)).
+
+## Modes
+
+| Mode | Command | Processes | Threads |
+|---|---|---|---|
+| Local | `unjam` | 1 | main (ingest and draw), input, sampler |
+| Attach | `unjam --slurm[=JOBID]` | viewer, srun, one `unjam agent` per node | viewer: main, input, srun stdout reader, srun stderr reader. Agent: sampler, stdin reader, stdout writer |
+| Record | `srun unjam record -- CMD` | one recorder per node plus the application | recorder: 1 |
+| Replay | `unjam --replay FILE.arrows…` | 1 | main, input |
+
+There is **no async runtime**: std threads and `std::sync::mpsc` are sufficient for a few file descriptors per process (decision D3).
+
+## Attach
+
+<Figure caption="The viewer starts one srun step with --overlap inside the job. srun starts one agent per node. Agents write tab-separated lines on stdout; the viewer broadcasts control lines on srun's stdin.">
+  <Architecture />
+</Figure>
+
+1. The viewer resolves the job with `squeue` (and `scontrol show hostnames` for `--nodelist`).
+2. It starts srun in its own process group, so a Ctrl-C in the terminal does not reach srun. It removes every `SLURM_*` and `SRUN_*` variable (except `SLURM_CONF`) from srun's environment, so an enclosing `salloc` cannot add options.
+3. It writes the default rules to srun's stdin at once. srun buffers them until the agents start.
+4. Each agent sends `H`, `D`, then the structure (`G`, `P`), with a staggered delay per node. Then it sends ticks as the rules require.
+
+The exact srun line, built in one place (`slurm::srun_args`) and pinned by a golden test:
+
+```text
+srun --jobid=<J> --overlap \
+     --nodes=<N> --ntasks=<N> --ntasks-per-node=1 [--nodelist=<LIST>] \
+     --cpu-bind=none --mpi=none \
+     --input=all --quiet \
+     --kill-on-bad-exit=0 --wait=0 \
+     --job-name=unjam --chdir=/ \
+     [--bcast=<DIR>/unjam.<J>.<uid>.<nonce>] \
+     [<--srun-arg values>…] \
+     <AGENT> agent [--keepalive <SECS>] [--unlink-self]
+```
+
+| Flag | Why |
+|---|---|
+| `--overlap` | The step shares all resources with the job's steps. It never waits and never takes resources from the job |
+| `--ntasks-per-node=1` | One agent per node, so `SLURM_PROCID` is the node index |
+| `--cpu-bind=none`, `--mpi=none` | Do not pin the agent onto an application core; do not start a PMIx server |
+| `--kill-on-bad-exit=0`, `--wait=0` | One failed agent does not stop the others |
+| `--chdir=/` | The viewer's directory may not exist on the compute nodes |
+| **not** `-u`, `--pty` | Both turn off slurmstepd's line buffering, which the wire protocol relies on |
+| **not** `--label` | Each line carries its own node index (D6) |
+
+Slurm allows `--jobid` steps only for the job owner, an operator or root. That is exactly the authorization unjam needs, so unjam has no permission model of its own.
+
+## Lifecycle and teardown
+
+```text
+viewer ──spawn──▶ srun ──slurmstepd──▶ unjam agent (SLURM_PROCID = i)
+viewer ──stdin──▶ srun ──broadcast──▶ every agent         (control)
+agent writer ──stdout──▶ slurmstepd (line-buffered) ──▶ srun ──▶ viewer reader
+agent stderr ──▶ srun stderr ──▶ viewer stderr reader ──▶ log
+```
+
+- **Liveness.** The viewer sends `K` every 30 s. An agent exits on stdin EOF, on `EPIPE`, or after 120 s without input. An orphaned agent therefore always ends.
+- **One agent dies.** The others keep running. The node turns stale in the view.
+- **Quit** (`q`, end of `--batch`, SIGTERM, SIGHUP):
+  1. Close srun's stdin. srun forwards EOF; the agents exit 0.
+  2. Wait up to 3 s.
+  3. `scancel --quiet <J>.<S>` (the step id comes from the agents' `H` lines).
+  4. Wait 3 s more, then SIGKILL srun.
+  5. Restore the terminal.
+- **The job ends.** Slurm ends every step. The viewer shows `job ended` and keeps the last data.
+
+## Local mode
+
+The local backend runs `agent::run` on a thread, the same function a remote agent runs. Only the channels differ: an `mpsc` channel instead of stdin, and a `sync_channel` of line buffers instead of stdout. The viewer therefore has **one ingest path, text lines**, for local and remote data (D15). The UI thread never samples, so a slow tick on a large host delays data, never keys.
+
+## Record
+
+`srun unjam record -- ./app` makes each node's task 0 a recorder, and every other task the application itself:
+
+- **`SLURM_LOCALID` ≠ 0**: `exec` the application. Same pid, same cgroup, no cost.
+- **`SLURM_LOCALID` = 0** (or outside Slurm):
+  1. Start the application as a child with the same stdio. The recorder never writes to stdout.
+  2. Sample the step's `user` cgroup on this node (all tasks of the step), with processes, at `-i` (default 5 s).
+  3. The sampler feeds a local `State`, and `record::Writer` writes each tick as a complete snapshot. There is no wire encode or decode in the job.
+  4. Stop when the child has exited, every other task cgroup reports `populated 0`, and the own task cgroup holds no new process. This catches daemonized children.
+  5. Write the last batch, then exit with the child's exit code (or 128 + signal).
+- Signals are **not forwarded** (D19). Where Slurm signals the whole step, forwarding would deliver them twice. After a signal, the recorder samples for at most 5 s more, so the journal is complete before Slurm's `KillWait` ends in SIGKILL.
+- If recording cannot start, the recorder prints why and `exec`s the application, so the job runs anyway.
+
+## Replay
+
+`--replay` opens one `.arrows` file per node, indexes its batches, and moves one time cursor over all files. The decoded rows go into the same `State` that live data uses. See [Recording](/unjam/design/recording/).
+
+## Read on
+
+- [Data model](/unjam/design/data-model/): entities, identities, metrics and the `Source` trait.
+- [Collection](/unjam/design/collection/): which files, how often, and what they cost.
+- [Wire protocol](/unjam/design/wire/): lines, limits and backpressure.
+- [Life of a sample](/unjam/internals/life-of-a-sample/): one value from the kernel to the screen.

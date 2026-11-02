@@ -1,0 +1,90 @@
+---
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+
+// Attach mode: the viewer, srun and one agent per node. Data lines flow to the viewer (frost);
+// control lines are broadcast to every agent (orange).
+const nodes = [0, 1, 2];
+const y = (i: number) => 52 + i * 112;
+---
+
+<svg class="uj-d" viewBox="0 0 800 400" role="img" aria-labelledby="arch-t">
+  <title id="arch-t">The viewer starts srun; srun starts one unjam agent per node; agents send text lines back on stdout; the viewer broadcasts control lines on stdin.</title>
+  <defs>
+    <marker id="arch-h" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0 0L8 4L0 8z" /></marker>
+  </defs>
+
+  <rect class="area" x="4" y="14" width="262" height="372" rx="12" />
+  <text x="20" y="38" class="muted sm">login node · your terminal</text>
+  <rect class="box s-frost" x="18" y="50" width="234" height="320" rx="9" />
+  <text x="34" y="78" class="b">unjam (viewer)</text>
+  <text x="34" y="98" class="muted sm">one State, three layouts</text>
+  {
+    [
+      ['main', 'apply lines, draw ≤ 4 Hz'],
+      ['input', 'keys, never blocked'],
+      ['stdout reader', 'whole-line chunks'],
+      ['stderr reader', 'srun messages → log'],
+    ].map(([n, d], k) => (
+      <g transform={`translate(32 ${114 + k * 62})`}>
+        <rect class="f-panel2" width="206" height="50" rx="6" />
+        <text x="12" y="21" class="mono b">{n}</text>
+        <text x="12" y="40" class="muted sm">{d}</text>
+      </g>
+    ))
+  }
+
+  <rect class="box" x="318" y="164" width="150" height="76" rx="9" />
+  <text x="393" y="192" text-anchor="middle" class="mono b">srun</text>
+  <text x="393" y="212" text-anchor="middle" class="muted sm">--jobid=J --overlap</text>
+  <text x="393" y="228" text-anchor="middle" class="muted sm">--input=all</text>
+
+  <path class="edge s-frost" d="M318 186 H256" marker-end="url(#arch-h)" />
+  <path class="edge s-orange" d="M256 218 H316" marker-end="url(#arch-h)" />
+  <text x="287" y="176" text-anchor="middle" class="sm f-frost">stdout</text>
+  <text x="287" y="238" text-anchor="middle" class="sm f-orange">stdin</text>
+
+  <rect class="area" x="510" y="14" width="286" height="372" rx="12" />
+  <text x="526" y="38" class="muted sm">compute nodes · inside job J</text>
+  {
+    nodes.map((i) => (
+      <g transform={`translate(524 ${y(i)})`}>
+        <rect class="box" width="258" height="96" rx="9" />
+        <text x="14" y="25" class="mono b">unjam agent</text>
+        <text x="246" y="25" text-anchor="end" class="muted sm">{`node ${i}`}</text>
+        <rect x="14" y="40" width="74" height="42" rx="6" class="f-panel2" />
+        <text x="51" y="66" text-anchor="middle" class="sm">sampler</text>
+        <rect x="102" y="40" width="66" height="42" rx="6" class="f-panel2" />
+        <text x="135" y="66" text-anchor="middle" class="sm">writer</text>
+        <rect x="182" y="40" width="62" height="42" rx="6" class="f-panel2" />
+        <text x="213" y="66" text-anchor="middle" class="sm">stdin</text>
+        <path class="edge" d="M88 61 H100" marker-end="url(#arch-h)" />
+      </g>
+    ))
+  }
+  {
+    nodes.map((i) => (
+      <>
+        <path class="edge s-frost" d={`M524 ${y(i) + 52} C494 ${y(i) + 52} 496 188 470 188`} />
+        <path class="edge s-orange" d={`M470 216 C496 216 494 ${y(i) + 80} 522 ${y(i) + 80}`} marker-end="url(#arch-h)" />
+      </>
+    ))
+  }
+
+  <g class="motion">
+    {
+      nodes.map((i) => (
+        <>
+          {[0, 1].map((k) => (
+            <rect width="16" height="8" rx="2" class="f-frost" x="-8" y="-4">
+              <animateMotion dur="2.4s" begin={`${i * 0.3 + k * 1.2}s`} repeatCount="indefinite" rotate="auto" path={`M524 ${y(i) + 52} C494 ${y(i) + 52} 496 188 470 188 M318 186 H258`} />
+            </rect>
+          ))}
+          <circle r="4.5" class="f-orange">
+            <animateMotion dur="4.8s" begin="0.6s" repeatCount="indefinite" path={`M258 218 H318 M470 216 C496 216 494 ${y(i) + 80} 522 ${y(i) + 80}`} />
+          </circle>
+        </>
+      ))
+    }
+  </g>
+</svg>

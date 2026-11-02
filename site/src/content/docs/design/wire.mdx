@@ -1,0 +1,83 @@
+---
+title: Wire protocol
+description: Why the agents speak tab-separated text, the transport facts the format relies on, and how the sampler never blocks on output.
+---
+
+import Figure from '../../../components/Figure.astro';
+import Backpressure from '../../../components/diagrams/Backpressure.astro';
+
+Agents send **self-describing, tab-separated text lines** on stdout. srun carries them to the viewer. The format is in [Wire lines](/unjam/reference/wire/); this page explains why it looks like that.
+
+## Why text
+
+Decision D5 compared fixed positional columns, a binary varint codec with escapes, base64-armoured binary, and TSV with self-describing `D` lines. Text won:
+
+- **No codec dependency** (no serde, bincode, postcard or base64), and about 120 lines less than a binary codec.
+- **Readable by eye**: `unjam agent` output is debuggable with `less`.
+- **Version-tolerant**: columns are matched by the names in `D` lines, so agents and viewers of different versions work together. New metrics never change the grammar.
+- Bandwidth is bounded by the byte budget, not by the encoding, so a compact binary form buys little.
+
+Values are **absolute** on every tick, never deltas (D8). A dropped tick then costs only time resolution: the next tick's rate covers both intervals and is still correct.
+
+## The transport facts it relies on
+
+Checked in the Slurm 25.11 source:
+
+- `SLURM_IO_MAX_MSG_LEN` is 1024 (`src/common/io_hdr.h`).
+- With buffered stdio (no `-u`), slurmstepd reads **whole lines** with `cbuf_read_line(…, 1024, …)`. Longer lines are cut (`src/slurmd/slurmstepd/io.c`).
+- srun writes each message completely before the next.
+
+From this, three rules:
+
+1. **Each line is at most 1000 bytes**, newline included: 24 bytes of margin under the limit (D7). `wire::write` enforces it.
+2. **Each line starts with its node index** (D6). Lines from many nodes can mix freely, and demultiplexing does not depend on srun's `--label` format.
+3. **Values that do not fit split** over more `g`/`p` lines with a larger `first` offset. A future source with many metrics needs no grammar change.
+
+Strings are cleaned (bytes below 0x20 become `?`, invalid UTF-8 is replaced) and paths and command lines are cut at a character boundary to fit. That is safe because paths are only labels.
+
+## Never block the sampler
+
+A slow viewer, a full pipe or a congested srun must never delay sampling, and never use unbounded memory on a compute node. The agent's output path:
+
+<Figure caption="The sampler hands each tick to a writer thread with try_send on a queue of four buffers. When the queue is full or the byte budget is spent, the tick's values are dropped and its structure lines wait in pending, which goes out first with the next tick.">
+  <Backpressure />
+</Figure>
+
+- **Writer thread.** The sampler fills a buffer per tick and calls `try_send` on a `sync_channel(4)`. The writer thread sleeps the stagger delay, writes the buffer with `write_all`, and returns it on a second channel for reuse. In steady state nothing is allocated.
+- **Structure is never dropped.** `H D G X P x W` and `T` go into `pending`; values go into `vals`. When there is no free buffer or no budget, only `vals` is dropped; `pending` goes out first with the next tick. `T` reports the dropped ticks.
+- **Token bucket.** Each agent has a byte budget (set by `B`, default 4 MiB/s divided over the nodes), refilled per millisecond and capped at two seconds' worth. A tick's values are sent only if the tokens cover them.
+- **Bounded memory.** At most four buffers in flight. `pending` grows only with structural churn and is capped at **1 MiB**. Past the cap, the agent sends a `W` line and applies `R * . <longest interval> c` to itself: processes off everywhere, which stops a fork storm from growing the backlog. The user's next rule change, or <kbd>0</kbd>, replaces it.
+
+```rust
+let vals = !self.vals.is_empty() && self.tokens >= self.vals.len() as u64;
+// … take a spare buffer, put pending first, then the values if allowed …
+match self.tx.try_send((buf, delay)) {
+    Ok(()) => { self.pending.clear(); self.tokens -= len; }
+    Err(TrySendError::Full((b, _))) => { self.spare.push(b); self.dropped += u32::from(vals); }
+    Err(TrySendError::Disconnected(_)) => return Err(io::ErrorKind::BrokenPipe.into()),
+}
+```
+
+## Errors
+
+| Situation | What happens |
+|---|---|
+| A malformed line, or a value count that does not fit the node's `D` table | The node's error counter grows, and the viewer sends `S <node>` (at most every 10 s per node) |
+| A node sends no `T` for 3 × its longest interval | The node is shown stale |
+| An agent exits | srun's stderr says so; the node turns stale; the others keep running |
+| srun exits | Every node is marked ended; the data stays |
+| The agent's write fails (`EPIPE`) | The agent exits 0 |
+| A node speaks another `proto` | All its lines are ignored, with one log line |
+
+A resync (`S`) sends `H`, `D` and all `G` and `P` again. The next `T` then removes every entity the viewer held that the agent did not announce again, which repairs a lost `X` or `x`.
+
+## Bandwidth
+
+| Case | Into the viewer |
+|---|---|
+| 4 nodes, 100 processes and 70 cgroups each, 1 Hz | about 85 KB/s |
+| 1,000 nodes, large-job defaults | about 0.5 MB/s |
+| 100,000 processes at 1 Hz, all at `p` | about 10 MB/s raw, capped by the 4 MiB/s budget (drops reported) |
+| Measured: 3 nodes × 500 processes at 10 Hz (IT 5) | 590 KB/s, 15,000 lines/s, 0 errors |
+
+srun's own throughput at 1,000 tasks is not yet measured on a production cluster; the 1,000-agent case is covered by the mux unit test.

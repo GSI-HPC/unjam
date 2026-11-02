@@ -1,0 +1,103 @@
+---
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+
+// The agent's output path: the sampler never blocks. When the queue to the writer is full, the
+// values of a tick are dropped and its structure lines are kept for the next tick.
+const T = 9; // loop, seconds
+const k = (t: number) => (t / T).toFixed(4);
+// Visible (opacity 1) during [a, b] of every loop.
+const on = (a: number, b: number) => ({ values: '0;1;0', keyTimes: `0;${k(a)};${k(b)}`, calcMode: 'discrete' });
+// Moves along a path during [a, b], holding the ends.
+const move = (a: number, b: number) => ({ keyPoints: '0;0;1;1', keyTimes: `0;${k(a)};${k(b)};1`, calcMode: 'linear' });
+const slot = (i: number) => 236 + i * 46;
+const qy = 92;
+const arrive = [0.3, 1.3, 2.3, 3.3];
+// Slots light when a tick lands and go dark when the writer has sent it.
+const lit: [number, number][][] = [[[0.9, 5.6], [7.6, 8.8]], [[1.9, 8.8]], [[2.9, 8.8]], [[3.9, 8.8]]];
+---
+
+<svg class="uj-d bp" viewBox="0 0 800 330" role="img" aria-labelledby="bp-t">
+  <title id="bp-t">The sampler hands each tick to a queue of four buffers. A writer thread empties the queue into stdout. When the queue is full, the tick's values are dropped and its structure lines wait in a pending buffer, which goes out first with the next tick.</title>
+  <defs>
+    <marker id="bp-h" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path class="head" d="M0 0L8 4L0 8z" /></marker>
+  </defs>
+
+  <rect class="box" x="16" y="70" width="150" height="74" rx="9" />
+  <text x="91" y="100" text-anchor="middle" class="b">sampler</text>
+  <text x="91" y="122" text-anchor="middle" class="sm muted">ticks on time</text>
+
+  <rect class="box" x="224" y="70" width="196" height="74" rx="9" />
+  {[0, 1, 2, 3].map((i) => <rect x={slot(i)} y={qy - 10} width="38" height="40" rx="5" class="f-panel2" />)}
+  <text x="322" y="60" text-anchor="middle" class="sm muted">sync_channel(4)</text>
+
+  <rect class="box" x="478" y="70" width="130" height="74" rx="9" />
+  <text x="543" y="100" text-anchor="middle" class="b">writer</text>
+  <text x="543" y="122" text-anchor="middle" class="sm muted">write_all, may block</text>
+
+  <rect class="box" x="664" y="70" width="120" height="74" rx="9" />
+  <text x="724" y="100" text-anchor="middle" class="mono b">stdout</text>
+  <text x="724" y="122" text-anchor="middle" class="sm muted">→ srun → viewer</text>
+
+  <path class="edge" d="M166 107 H222" marker-end="url(#bp-h)" />
+  <path class="edge" d="M420 107 H476" marker-end="url(#bp-h)" />
+  <path class="edge" d="M608 107 H662" marker-end="url(#bp-h)" />
+
+  <rect class="box s-orange" x="224" y="214" width="196" height="64" rx="9" />
+  <text x="322" y="240" text-anchor="middle" class="b">pending</text>
+  <text x="322" y="262" text-anchor="middle" class="sm muted">structure: H D G X P x W</text>
+  <text x="91" y="250" text-anchor="middle" class="sm muted">values of a tick</text>
+  <text x="91" y="268" text-anchor="middle" class="sm muted">that does not fit</text>
+  <rect class="area s-red" x="36" y="214" width="110" height="64" rx="9" />
+
+  <text x="478" y="200" class="sm">Never dropped: structure.</text>
+  <text x="478" y="222" class="sm">Dropped when late: values.</text>
+  <text x="478" y="244" class="sm muted">Values are absolute, so a lost</text>
+  <text x="478" y="264" class="sm muted">tick only lowers time resolution.</text>
+  <text x="478" y="300" class="sm muted">Token bucket: B bytes/s per agent, 2 s burst</text>
+
+  <g class="motion">
+    {
+      lit.map((spans, i) =>
+        spans.map(([a, b]) => (
+          <rect x={slot(i) + 3} y={qy - 7} width="32" height="34" rx="4" class="f-frost" opacity="0">
+            <animate attributeName="opacity" dur={`${T}s`} repeatCount="indefinite" {...on(a, b)} />
+          </rect>
+        )),
+      )
+    }
+    {
+      arrive.map((t, i) => (
+        <rect x="-12" y="-9" width="24" height="18" rx="3" class="f-frost" opacity="0">
+          <animate attributeName="opacity" dur={`${T}s`} repeatCount="indefinite" {...on(t, t + 0.6)} />
+          <animateMotion dur={`${T}s`} repeatCount="indefinite" path={`M150 107 H${slot(i) + 19}`} {...move(t, t + 0.6)} />
+        </rect>
+      ))
+    }
+    <!-- tick 5: queue full -->
+    <rect x="-12" y="-9" width="24" height="18" rx="3" class="f-frost" opacity="0">
+      <animate attributeName="opacity" dur={`${T}s`} repeatCount="indefinite" {...on(4.3, 5.6)} />
+      <animateMotion dur={`${T}s`} repeatCount="indefinite" path="M150 107 H200 C200 160 92 180 92 246" {...move(4.3, 5.6)} />
+    </rect>
+    <rect x="-8" y="-6" width="16" height="12" rx="3" class="f-orange" opacity="0">
+      <animate attributeName="opacity" dur={`${T}s`} repeatCount="indefinite" {...on(4.3, 7.2)} />
+      <animateMotion dur={`${T}s`} repeatCount="indefinite" path="M150 107 H200 C200 170 260 190 300 246 C300 160 300 150 254 104" keyPoints="0;0;0.62;0.62;1;1" keyTimes={`0;${k(4.3)};${k(5.3)};${k(6.6)};${k(7.2)};1`} calcMode="linear" />
+    </rect>
+    <text x="322" y="168" text-anchor="middle" class="sm b f-red" opacity="0">queue full: drop values, keep structure
+      <animate attributeName="opacity" dur={`${T}s`} repeatCount="indefinite" {...on(4.5, 6.4)} />
+    </text>
+    <text x="91" y="232" text-anchor="middle" class="sm b f-red" opacity="0">dropped_ticks + 1
+      <animate attributeName="opacity" dur={`${T}s`} repeatCount="indefinite" {...on(5.4, 8.6)} />
+    </text>
+    <!-- the writer sends the oldest buffer -->
+    <rect x="-12" y="-9" width="24" height="18" rx="3" class="f-frost" opacity="0">
+      <animate attributeName="opacity" dur={`${T}s`} repeatCount="indefinite" {...on(5.6, 6.6)} />
+      <animateMotion dur={`${T}s`} repeatCount="indefinite" path={`M${slot(0) + 19} 107 H700`} {...move(5.6, 6.6)} />
+    </rect>
+    <!-- tick 6: pending first, then its values -->
+    <rect x="-12" y="-9" width="24" height="18" rx="3" class="f-frost" opacity="0">
+      <animate attributeName="opacity" dur={`${T}s`} repeatCount="indefinite" {...on(6.9, 7.6)} />
+      <animateMotion dur={`${T}s`} repeatCount="indefinite" path={`M150 107 H${slot(0) + 19}`} {...move(6.9, 7.6)} />
+    </rect>
+  </g>
+</svg>

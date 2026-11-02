@@ -1,0 +1,30 @@
+---
+title: Themes
+description: The seven compiled-in colour themes of unjam and how to choose one.
+---
+
+import Terminal from '../../../components/Terminal.astro';
+
+unjam has seven themes, compiled into the binary: **nord** (Nord Frost, the default), **night**, **mocha**, **gruvbox**, **solar** (a light theme), **amber** (one hue, an ASCII ramp like an old phosphor terminal) and **mono** (no colour).
+
+<Terminal rec="host" caption="t cycles through the themes in a live view." />
+
+## Choose one
+
+1. `--theme NAME`
+2. else the `UNJAM_THEME` environment variable
+3. else `nord`
+
+`NO_COLOR` (any value) forces `mono`, and <kbd>t</kbd> then stays on mono. In the view, <kbd>t</kbd> cycles the themes; the help pane (<kbd>?</kbd>) names the current one.
+
+```sh
+export UNJAM_THEME=gruvbox
+unjam --theme solar        # for a light terminal
+NO_COLOR=1 unjam           # for screen readers, logs, and colour-blind safe output
+```
+
+Every theme also shows load by **height**, not only by colour: the history bars and the heat strip use `▁▂▃▄▅▆▇█`, so `mono` and printed output keep the information.
+
+## Add a theme
+
+A theme is one entry in the `THEMES` table of `src/theme.rs`: a name, seven colours for the surfaces and text, four heat colours (idle, low, high, saturated) and the glyph set. The renderer reads styles only from these slots, so a new theme needs no other change. See [Contributing](/unjam/internals/contributing/).

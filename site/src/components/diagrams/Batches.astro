@@ -1,0 +1,90 @@
+---
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+
+// A journal: a schema message, then self-contained batches cut every 10 s (or 8,192 rows).
+// A crash loses at most the open batch; every complete batch stays readable.
+const bx = (i: number) => 130 + i * 150;
+const rows = [0, 1, 2, 3, 4, 5];
+const T = 10;
+---
+
+<svg class="uj-d bt" viewBox="0 0 800 290" role="img" aria-labelledby="bt-t">
+  <title id="bt-t">The recorder writes a schema message, then one batch every 10 seconds. The first row of each entity in a batch carries its path and command line, so each batch decodes on its own. A SIGKILL loses only the open batch.</title>
+  <rect x="24" y="60" width="92" height="120" rx="8" class="box s-purple" />
+  <text x="70" y="114" text-anchor="middle" class="b">schema</text>
+  <text x="70" y="134" text-anchor="middle" class="sm muted">columns,</text>
+  <text x="70" y="150" text-anchor="middle" class="sm muted">units</text>
+  {
+    [0, 1, 2, 3].map((i) => (
+      <g class={`bt-b b${i}`} transform={`translate(${bx(i)} 60)`}>
+        <rect width="138" height="120" rx="8" class={i === 3 ? 'box bt-open' : 'box'} />
+        {rows.map((r) => (
+          <rect x="10" y={12 + r * 17} width="118" height="12" rx="2" class={r < 3 ? 'f-yellow' : 'f-panel2'} opacity={r < 3 ? 0.85 : 1} />
+        ))}
+        <text x="69" y="-12" text-anchor="middle" class="mono sm muted">{`${i * 10}–${i * 10 + 10} s`}</text>
+        {i < 3 && <text x="69" y="142" text-anchor="middle" class="sm f-green bt-ok">✓ flushed</text>}
+      </g>
+    ))
+  }
+  <g class="bt-crash">
+    <path d="M640 34 l-14 30 h12 l-10 26" fill="none" stroke="var(--uj-red)" stroke-width="3" stroke-linejoin="round" />
+    <text x="652" y="56" class="b f-red">SIGKILL</text>
+    <rect x={bx(3) - 4} y="56" width="146" height="128" rx="10" fill="var(--uj-red)" opacity="0.18" />
+    <text x={bx(3) + 69} y="202" text-anchor="middle" class="sm b f-red">open batch lost (≤ 10 s)</text>
+  </g>
+  <g class="bt-ok-all">
+    <path d={`M24 222 v10 h${bx(2) + 138 - 24} v-10`} fill="none" stroke="var(--uj-green)" stroke-width="2" />
+    <text x={(24 + bx(2) + 138) / 2} y="254" text-anchor="middle" class="b f-green">readable prefix: replay and pyarrow read every complete batch</text>
+  </g>
+  <g transform="translate(24 280)">
+    <rect y="-10" width="16" height="11" rx="2" class="f-yellow" opacity="0.85" />
+    <text x="22" y="0" class="sm">keyframe row: first row of an entity in a batch (path, comm, cmdline)</text>
+  </g>
+  <g class="motion">
+    <rect x="0" y="54" width="3" height="132" class="f-frost bt-cursor" />
+  </g>
+</svg>
+
+<style define:vars={{ T: `${T}s` }}>
+  .bt .bt-cursor { animation: bt-move var(--T) linear infinite; }
+  .bt .b0, .bt .b1, .bt .b2, .bt .b3 { animation: var(--T) infinite; }
+  .bt .b0 { animation-name: bt-in0; }
+  .bt .b1 { animation-name: bt-in1; }
+  .bt .b2 { animation-name: bt-in2; }
+  .bt .b3 { animation-name: bt-in3; }
+  .bt .bt-crash, .bt .bt-ok-all { animation: bt-crash var(--T) infinite; opacity: 0; }
+  @keyframes bt-move {
+    0% { transform: translateX(130px); }
+    56% { transform: translateX(690px); opacity: 1; }
+    60%, 100% { transform: translateX(690px); opacity: 0; }
+  }
+  @keyframes bt-in0 {
+    0%, 0% { opacity: 0.15; }
+    3%, 95% { opacity: 1; }
+    100% { opacity: 0.15; }
+  }
+  @keyframes bt-in1 {
+    0%, 15% { opacity: 0.15; }
+    18%, 95% { opacity: 1; }
+    100% { opacity: 0.15; }
+  }
+  @keyframes bt-in2 {
+    0%, 30% { opacity: 0.15; }
+    33%, 95% { opacity: 1; }
+    100% { opacity: 0.15; }
+  }
+  @keyframes bt-in3 {
+    0%, 45% { opacity: 0.15; }
+    48%, 95% { opacity: 1; }
+    100% { opacity: 0.15; }
+  }
+  @keyframes bt-crash {
+    0%, 56% { opacity: 0; }
+    60%, 95% { opacity: 1; }
+    100% { opacity: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .bt .b0, .bt .b1, .bt .b2, .bt .b3, .bt .bt-crash, .bt .bt-ok-all { opacity: 1; }
+  }
+</style>

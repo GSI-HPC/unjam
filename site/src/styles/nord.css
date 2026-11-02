@@ -1,0 +1,240 @@
+/*
+SPDX-License-Identifier: LGPL-3.0-or-later
+SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+*/
+
+/* Nord Frost: the palette of the TUI's default theme (src/theme.rs). Starlight reads the
+   --sl-* tokens; the diagrams and the terminal player read the --uj-* tokens. */
+
+:root {
+  --sl-content-width: 50rem;
+}
+
+:root,
+:root[data-theme='dark'] {
+  --sl-color-accent-low: #2e3f55;
+  --sl-color-accent: #5e81ac;
+  --sl-color-accent-high: #88c0d0;
+  --sl-color-white: #eceff4;
+  --sl-color-gray-1: #e5e9f0;
+  --sl-color-gray-2: #d8dee9;
+  --sl-color-gray-3: #a3adc0;
+  --sl-color-gray-4: #6b7a94;
+  --sl-color-gray-5: #434c5e;
+  --sl-color-gray-6: #3b4252;
+  --sl-color-black: #2e3440;
+  --sl-font: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --sl-font-mono: 'JetBrains Mono', ui-monospace, 'DejaVu Sans Mono', monospace;
+
+  /* Callouts: aurora colours, not the Starlight defaults. */
+  --sl-color-blue-low: #2a3a4f;
+  --sl-color-blue: #81a1c1;
+  --sl-color-blue-high: #b8cde0;
+  --sl-color-purple-low: #3d3447;
+  --sl-color-purple: #b48ead;
+  --sl-color-purple-high: #dcc6d8;
+  --sl-color-orange-low: #4a3a2c;
+  --sl-color-orange: #d08770;
+  --sl-color-orange-high: #ebcb8b;
+  --sl-color-red-low: #4a2f35;
+  --sl-color-red: #bf616a;
+  --sl-color-red-high: #e8b4b9;
+  --sl-color-green-low: #34402f;
+  --sl-color-green: #a3be8c;
+  --sl-color-green-high: #d2e2c4;
+
+  --uj-panel: #3b4252;
+  --uj-panel-2: #434c5e;
+  --uj-line: #4c566a;
+  --uj-text: #eceff4;
+  --uj-muted: #a3adc0;
+  --uj-frost: #88c0d0;
+  --uj-frost-2: #81a1c1;
+  --uj-blue: #5e81ac;
+  --uj-teal: #8fbcbb;
+  --uj-green: #a3be8c;
+  --uj-yellow: #ebcb8b;
+  --uj-orange: #d08770;
+  --uj-red: #bf616a;
+  --uj-purple: #b48ead;
+  --uj-term-bg: #2e3440;
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #d6e4f0;
+  --sl-color-accent: #5e81ac;
+  --sl-color-accent-high: #3b5b82;
+  --sl-color-white: #1f242d;
+  --sl-color-gray-1: #2e3440;
+  --sl-color-gray-2: #3b4252;
+  --sl-color-gray-3: #4c566a;
+  --sl-color-gray-4: #7b88a1;
+  --sl-color-gray-5: #c7cfdc;
+  --sl-color-gray-6: #e5e9f0;
+  --sl-color-gray-7: #eef1f6;
+  --sl-color-black: #fafbfc;
+
+  --sl-color-blue-low: #dde8f3;
+  --sl-color-blue: #4c6f9a;
+  --sl-color-blue-high: #2f4a6b;
+  --sl-color-purple-low: #efe5ee;
+  --sl-color-purple: #8d6487;
+  --sl-color-purple-high: #5c3d58;
+  --sl-color-orange-low: #f7e8dc;
+  --sl-color-orange: #b0644b;
+  --sl-color-orange-high: #6f3d2c;
+  --sl-color-red-low: #f6e0e2;
+  --sl-color-red: #a4434d;
+  --sl-color-red-high: #6b2730;
+  --sl-color-green-low: #e5eedc;
+  --sl-color-green: #5e7f45;
+  --sl-color-green-high: #3a5129;
+
+  --uj-panel: #eceff4;
+  --uj-panel-2: #e0e5ee;
+  --uj-line: #a3adc0;
+  --uj-text: #2e3440;
+  --uj-muted: #5c6880;
+  --uj-frost: #3f7f91;
+  --uj-frost-2: #4c6f9a;
+  --uj-blue: #5e81ac;
+  --uj-teal: #4f8a88;
+  --uj-green: #5e7f45;
+  --uj-yellow: #a37a1c;
+  --uj-orange: #b0644b;
+  --uj-red: #a4434d;
+  --uj-purple: #8d6487;
+  --uj-term-bg: #2e3440;
+}
+
+/* Site title in frost, like the TUI's accent. */
+.site-title {
+  color: var(--sl-color-accent-high);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+/* Headings: a little tighter than the default. */
+.sl-markdown-content :is(h1, h2, h3) {
+  letter-spacing: -0.015em;
+}
+
+/* Keyboard keys, as in the prototype. */
+kbd {
+  display: inline-block;
+  min-width: 1.6em;
+  padding: 0 0.35em;
+  border: 1px solid var(--sl-color-gray-5);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--sl-color-gray-6);
+  font: 0.85em/1.5 var(--sl-font-mono);
+  text-align: center;
+  color: var(--sl-color-white);
+}
+
+/* Figures: a diagram with a short caption. */
+.uj-figure {
+  margin: 1.5rem 0;
+}
+.uj-figure > figcaption {
+  margin-top: 0.5rem;
+  font-size: var(--sl-text-sm);
+  color: var(--sl-color-gray-3);
+}
+.uj-figure svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* Splash page */
+.hero .tagline {
+  max-width: 34rem;
+}
+
+/* Diagrams (src/components/diagrams): inline SVG that follows the light and dark theme. Motion
+   only runs when the reader allows it. */
+.uj-d {
+  overflow: visible;
+}
+.uj-d text {
+  font-family: var(--sl-font);
+  font-size: 15px;
+  fill: var(--uj-text);
+}
+.uj-d .mono,
+.uj-d text.mono {
+  font-family: var(--sl-font-mono);
+  font-size: 14px;
+}
+.uj-d .sm {
+  font-size: 12.5px;
+}
+.uj-d .b {
+  font-weight: 600;
+}
+.uj-d .muted {
+  fill: var(--uj-muted);
+}
+.uj-d .box {
+  fill: var(--uj-panel);
+  stroke: var(--uj-line);
+  stroke-width: 1.2;
+}
+.uj-d .area {
+  fill: none;
+  stroke: var(--uj-line);
+  stroke-width: 1.2;
+  stroke-dasharray: 4 4;
+}
+.uj-d .edge {
+  fill: none;
+  stroke: var(--uj-muted);
+  stroke-width: 1.5;
+}
+.uj-d .head {
+  fill: var(--uj-muted);
+}
+.uj-d .f-frost { fill: var(--uj-frost); }
+.uj-d .f-blue { fill: var(--uj-blue); }
+.uj-d .f-green { fill: var(--uj-green); }
+.uj-d .f-yellow { fill: var(--uj-yellow); }
+.uj-d .f-orange { fill: var(--uj-orange); }
+.uj-d .f-red { fill: var(--uj-red); }
+.uj-d .f-purple { fill: var(--uj-purple); }
+.uj-d .f-panel2 { fill: var(--uj-panel-2); }
+.uj-d .f-teal { fill: var(--uj-teal); }
+.uj-d .s-frost { stroke: var(--uj-frost); }
+.uj-d .s-green { stroke: var(--uj-green); }
+.uj-d .s-yellow { stroke: var(--uj-yellow); }
+.uj-d .s-orange { stroke: var(--uj-orange); }
+.uj-d .s-red { stroke: var(--uj-red); }
+.uj-d .s-purple { stroke: var(--uj-purple); }
+.uj-d .on-acc {
+  fill: #2e3440;
+}
+@media (prefers-reduced-motion: reduce) {
+  .uj-d .motion {
+    display: none;
+  }
+  .uj-d * {
+    animation: none !important;
+  }
+}
+.uj-figure .legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  margin-top: 0.4rem;
+  font-size: var(--sl-text-xs);
+  color: var(--sl-color-gray-3);
+}
+.uj-figure .legend i {
+  display: inline-block;
+  width: 0.7rem;
+  height: 0.7rem;
+  margin-right: 0.3rem;
+  border-radius: 2px;
+  vertical-align: -0.05rem;
+}

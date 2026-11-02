@@ -1,0 +1,145 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+
+# The GitHub Pages site: the docs at /, the dnf repository at /rpm/. Each deploy builds the
+# whole site again, so the repository holds the RPMs of every published (not pre-) release.
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  # A release event runs on its tag, and the github-pages environment deploys from main only.
+  redispatch:
+    name: Deploy from main
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - run: gh workflow run pages.yml --repo "$GITHUB_REPOSITORY" --ref main
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  docs:
+    name: Docs
+    if: github.event_name != 'release'
+    runs-on: ubuntu-latest
+    env:
+      MISE_TASK_RUN_AUTO_INSTALL: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d  # v5.2.4
+        with:
+          install_args: node
+      - name: Build the docs site
+        run: mise run docs
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: site-docs
+          path: site/dist
+          retention-days: 1
+
+  repo:
+    name: RPM repository
+    if: github.event_name != 'release'
+    runs-on: ubuntu-latest
+    environment: rpm-signing
+    outputs:
+      rpms: ${{ steps.download.outputs.rpms }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download the RPMs of all releases and check their attestations
+        id: download
+        run: |
+          mkdir rpms
+          gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases \
+            --limit 1000 --json tagName -q '.[].tagName' |
+          while read -r tag; do
+            gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' |
+              grep -q '\.rpm$' || continue
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern '*.rpm' --dir rpms
+          done
+          for f in rpms/*.rpm; do
+            [ -e "$f" ] || continue
+            gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" > /dev/null
+          done
+          echo "rpms=$(find rpms -name '*.rpm' | wc -l)" >> "$GITHUB_OUTPUT"
+      - name: Build the repository
+        if: steps.download.outputs.rpms != '0'
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w -e RPM_SIGNING_KEY quay.io/rockylinux/rockylinux:10 sh -euc '
+            dnf -y -q install createrepo_c gnupg2
+            scripts/rpm.sh repo site/rpm rpms/*.rpm'
+        env:
+          RPM_SIGNING_KEY: ${{ secrets.RPM_SIGNING_KEY }}
+      - run: install -Dm 0644 pkg/rpm/index.html site/rpm/index.html
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: site-rpm
+          path: site/rpm
+          retention-days: 1
+
+  deploy:
+    name: Deploy
+    needs: [docs, repo]
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: site-docs
+          path: site
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: site-rpm
+          path: site/rpm
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
+        with:
+          path: site
+      - uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346  # v5.0.1
+        id: deployment
+
+  # What a user does: install unjam-release from its stable URL, then unjam.
+  verify:
+    name: dnf install (${{ matrix.dist }})
+    needs: [repo, deploy]
+    if: needs.repo.outputs.rpms != '0'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { dist: el9, image: "quay.io/rockylinux/rockylinux:9" }
+          - { dist: el10, image: "quay.io/rockylinux/rockylinux:10" }
+          - { dist: fedora, image: "quay.io/fedora/fedora:latest" }
+    steps:
+      - run: |
+          docker run --rm -e "URL=${URL}rpm/unjam-release-$DIST.noarch.rpm" "$IMAGE" sh -euc '
+            dnf -y install "$URL"
+            dnf -y install unjam
+            unjam --version'
+        env:
+          URL: ${{ needs.deploy.outputs.url }}
+          DIST: ${{ matrix.dist }}
+          IMAGE: ${{ matrix.image }}

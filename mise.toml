@@ -12,6 +12,7 @@ rust = "1.93.1"  # components come from rust-toolchain.toml
 "cargo:cargo-deny" = "0.20.2"    # declares rust_version 1.88 ≤ pinned 1.93.1
 "pipx:reuse" = "6.2.0"
 "pipx:uv" = "0.9.5"  # IT 6/7: pyarrow reads the journals and runs the Parquet recipe
+node = "22.23.4"  # the docs site (site/); Astro needs >= 22.22
 # sind (integration tests) is not a mise tool: the github backend needs the GitHub API to
 # resolve releases, and every `mise run` would fail where that is unreachable. Install sind
 # v0.15.0 yourself (CONTRIBUTING.md); CI takes it from sind-action.
@@ -55,3 +56,6 @@ check = { depends = ["fmt", "lint", "test", "reuse", "deny", "size", "unsafe-dep
 "it:down" = { run = "sind delete cluster unjam" }
 it = { run = "tests/sind/it.sh" }  # up, test, and down even on failure
 release = { run = "cargo release" }
+# The docs site (site/): build into site/dist, or serve it with live reload.
+docs = { dir = "site", run = ["npm ci", "npm run build"] }
+"docs:dev" = { dir = "site", run = ["npm ci", "npm run dev"] }

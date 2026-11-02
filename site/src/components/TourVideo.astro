@@ -1,0 +1,42 @@
+---
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+
+// The tour video slot of the landing page. It shows public/media/tour.{webm,mp4} with the
+// optional poster tour-poster.jpg and captions tour.vtt; without a video file it renders
+// nothing, so the page never shows an empty player.
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+
+// The build runs in site/ (npm sets the working directory to the package root); the component's
+// own URL points into the build output, not the source tree.
+const has = (f: string) => existsSync(join(process.cwd(), 'public/media', f));
+const base = import.meta.env.BASE_URL.replace(/\/?$/, '/');
+const src = (f: string) => `${base}media/${f}`;
+const sources = [['tour.webm', 'video/webm'], ['tour.mp4', 'video/mp4']].filter(([f]) => has(f));
+---
+
+{
+  sources.length > 0 && (
+    <section class="tour not-content">
+      <video controls preload="metadata" playsinline poster={has('tour-poster.jpg') ? src('tour-poster.jpg') : undefined}>
+        {sources.map(([f, t]) => <source src={src(f)} type={t} />)}
+        {has('tour.vtt') && <track kind="captions" src={src('tour.vtt')} srclang="en" label="English" default />}
+      </video>
+    </section>
+  )
+}
+
+<style>
+  .tour {
+    margin: 2rem 0;
+  }
+  video {
+    display: block;
+    width: 100%;
+    border: 1px solid var(--uj-line);
+    border-radius: 10px;
+    background: var(--uj-term-bg);
+    box-shadow: 0 12px 40px -18px rgb(0 0 0 / 0.6);
+  }
+</style>

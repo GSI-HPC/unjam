@@ -1,0 +1,56 @@
+---
+title: Quick start
+description: Watch a host, attach to a Slurm job and record a job step in a few minutes.
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+import Terminal from '../../../components/Terminal.astro';
+
+<Steps>
+
+1. **Watch this host.**
+
+   ```sh
+   unjam
+   ```
+
+   You see the cgroup tree with its processes, sorted by CPU. Press <kbd>↑</kbd> <kbd>↓</kbd> to move, <kbd>←</kbd> <kbd>→</kbd> to fold and open, <kbd>Enter</kbd> for every value of a row, <kbd>?</kbd> for help and <kbd>q</kbd> to quit.
+
+2. **Watch a Slurm job.** On a login node, with a running job of yours:
+
+   ```sh
+   unjam --slurm          # $SLURM_JOB_ID, or your only running job
+   unjam --slurm=4242     # job 4242 (the = is required)
+   ```
+
+   unjam starts one agent per node with `srun --overlap` and shows all nodes in one tree: job → step → node → task → process. The strip under the header has one cell per node; a pale cell is a node that does less than the others.
+
+3. **Record a job step.** In a batch script, wrap the application:
+
+   ```sh
+   srun unjam record -o rec/%j.%s-%n.arrows -- ./app args
+   ```
+
+   Each node writes one Arrow file. The job's exit code stays the application's.
+
+4. **Replay it.**
+
+   ```sh
+   unjam --replay rec/*.arrows
+   ```
+
+   <kbd>space</kbd> plays and pauses, <kbd>,</kbd> <kbd>.</kbd> step one tick, <kbd>g</kbd> <kbd>G</kbd> jump to the start and the end.
+
+</Steps>
+
+<Terminal rec="replay" caption="Replay of four journals written by unjam record, one per node, on one shared timeline." />
+
+<Aside type="note" title="No terminal?">
+Where stdout is not a terminal (`ssh node unjam` without `-t`, cron, a pipe), add `--batch N`: unjam prints N text snapshots and exits. See [Scripts and batch mode](/unjam/guide/batch/).
+</Aside>
+
+## Next
+
+- [Watch a Slurm job](/unjam/guide/slurm/) explains the header, the heat strip and how to find a slow node.
+- [Control the sampling](/unjam/guide/sampling/) shows how to look closer, or cheaper, at part of a large job.
+- [Analyze recordings](/unjam/guide/analysis/) loads a journal into pandas.

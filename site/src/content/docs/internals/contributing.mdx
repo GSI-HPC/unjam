@@ -1,0 +1,70 @@
+---
+title: Contributing
+description: Set up the tools, run the gates, write commits, and work on this documentation site.
+---
+
+## Set up
+
+The Rust toolchain comes from `rust-toolchain.toml` (1.93.1) through [rustup](https://rustup.rs/). Every other tool is pinned in `mise.toml`:
+
+```sh
+git clone https://github.com/GSI-HPC/unjam && cd unjam
+mise install
+```
+
+The integration tests also need [sind](https://github.com/GSI-HPC/sind) v0.15.0 and a rootful Docker daemon on cgroup v2.
+
+## Before you say "done"
+
+```sh
+mise run check   # fmt, clippy, tests (with the budget gates), REUSE, cargo-deny, size, unsafe ledger
+mise run msrv    # Rust 1.88
+mise run it      # integration tests on sind (needs Docker)
+```
+
+`mise tasks` lists every task. CI runs the same ones.
+
+## The rules
+
+- **Correct, small, fast**, in that order. Every item, dependency and `unsafe` block must justify itself. Read [Lean by design](/unjam/design/lean/).
+- Load the skill that matches your change: `lean-code` (any item in `src/`), `lean-deps` (`Cargo.toml`), `hot-path` (agent, source, cgroup, procfs, wire, state, input, draw), `unsafe-policy` (any `unsafe` or FFI). They are in `.claude/skills/` and are plain Markdown, useful with or without an AI assistant.
+- Never print to stdout outside the wire and `--batch` code.
+- Never match Slurm job directories by `job_<id>`; use `cgroup::job_root`.
+- A new per-tick file read needs a row in design §5.3, a hot or cold tier decision, and a measured cost in `docs/perf.md`.
+- A new metric source must not change `wire.rs`, `record.rs`, `state.rs` or `tui.rs`: see [Add a metric source](/unjam/internals/extending/).
+- Every new file has an SPDX header (REUSE). Files that cannot carry one are listed in `REUSE.toml`.
+
+## Commits
+
+[Conventional Commits](https://www.conventionalcommits.org/), for example `feat(state): fold node ranges in the step layout` or `fix(record): keep the keyframe after a cut`. Each commit is one logical, self-contained change.
+
+## Releases
+
+Releases are made with `cargo-release` (pinned in `mise.toml`), which bumps the version, commits, tags and pushes to the `upstream` remote. Add a `## [X.Y.Z] - DATE` section to `CHANGELOG.md` in the same commit; it becomes the release notes. The rest is automatic up to the draft release: see [CI and releases](/unjam/internals/ci/). `CONTRIBUTING.md` has the one-time setup of the RPM signing key.
+
+## The docs site
+
+The site is in `site/`: [Astro](https://astro.build/) with [Starlight](https://starlight.astro.build/), two exact-pinned dependencies, and the Nord theme in `src/styles/nord.css`.
+
+```sh
+mise run docs:dev   # http://localhost:4321/unjam/ with live reload
+mise run docs       # build into site/dist
+```
+
+| Path | Holds |
+|---|---|
+| `src/content/docs/` | The pages (MDX). The sidebar is in `astro.config.mjs` |
+| `src/components/diagrams/` | The diagrams: inline SVG with CSS and SMIL animation, one component each |
+| `src/components/Terminal.astro` | The terminal player and still frames |
+| `src/data/term/*.json` | Real TUI sessions, recorded on a fake 4-node Slurm bench as ANSI frames |
+| `scripts/sync.mjs` | Copies `docs/design.md` and `CHANGELOG.md` into generated pages before each build |
+| `public/media/` | The tour video, when present |
+
+Guidelines for pages:
+
+- Write in short, active sentences; one instruction per step.
+- Every fact must match the code. Check option names against `unjam --help` and error texts against the source.
+- Diagrams use the `--uj-*` colour tokens, so they work in both light and dark mode, and their motion stops with `prefers-reduced-motion`.
+- Internal links start with `/unjam/` and end with `/`.
+
+How to record new terminal sessions is described in `site/README.md`.

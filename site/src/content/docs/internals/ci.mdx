@@ -1,0 +1,59 @@
+---
+title: CI and releases
+description: The GitHub Actions workflows, how a tag becomes attested binaries, signed RPMs, a dnf repository and a crate, and how each install path is tested.
+---
+
+import Figure from '../../../components/Figure.astro';
+import Release from '../../../components/diagrams/Release.astro';
+
+Every CI job runs a `mise run <task>`, so CI does exactly what a contributor runs locally. Every action is pinned by commit SHA, and every tool by version.
+
+## Workflows
+
+| Workflow | Runs on | Does |
+|---|---|---|
+| `ci.yml` | push to `main`, pull requests, weekly | `checks.yml` and `integration.yml` in parallel. The weekly run catches moving sind images |
+| `checks.yml` (reusable) | called | REUSE, fmt, clippy (SARIF to code scanning), build, test (with the budget test), MSRV 1.88, package, cargo-deny, size and the unsafe ledger |
+| `integration.yml` (reusable) | called, or by hand | The sind matrix: Slurm 25.11, 26.05, 26.05 with `CgroupJobIdPaths=yes` (see [Testing](/unjam/internals/testing/#integration-tests-on-sind)) |
+| `publish.yml` | tag `v*` | The release pipeline below |
+| `rpm.yml` | called by `publish.yml`, or by hand | Builds, signs, installs and attests the RPMs |
+| `pages.yml` | push to `main`, a published release, or by hand | Builds this site and the dnf repository, deploys both, then tests `dnf install` |
+| `mise-install.yml` | a published release, or by hand | Tests `mise use github:GSI-HPC/unjam` with attestation checks on amd64 and arm64 |
+
+## From a tag to packages
+
+<Figure caption="A v* tag on main runs the checks and the integration tests, builds static binaries and RPMs with provenance, and makes a draft release. The maintainer publishes the draft; that deploys the docs and the dnf repository and tests both install paths.">
+  <Release />
+</Figure>
+
+1. **verify**: the tag is on `main`, equals the `Cargo.toml` version, and `CHANGELOG.md` has its section.
+2. **checks** and **integration**: the full gates and the sind matrix, on the tagged commit.
+3. **binaries**: `mise run build:musl` on x86_64 and aarch64 runners. Each binary runs `--version` and `--batch 2` (the only run of the arm64 binary), then gets a **build provenance attestation** (`actions/attest-build-provenance`).
+4. **rpms**: `rpm.yml` downloads each binary and **verifies its attestation** before it packages it for Rocky Linux 9, Rocky Linux 10 and the latest Fedora. The packages are signed with the key of the `rpm-signing` environment, installed in a container of their distribution, and attested.
+5. **release**: a **draft** GitHub release with `unjam-linux-amd64`, `unjam-linux-arm64`, the RPMs, `checksums.txt` and the CHANGELOG section as notes.
+6. **publish**: after a reviewer of the `crates-io` environment approves, `cargo publish` with trusted publishing (no stored token).
+
+The maintainer then publishes the draft **by hand**. That starts:
+
+- **`pages.yml`**: it downloads the RPMs of every published release, verifies their attestations, builds the dnf repository with signed metadata at `/rpm/`, builds this site at `/`, deploys both, and runs `dnf install unjam` from the live repository on each distribution.
+- **`mise-install.yml`**: `mise use --global github:GSI-HPC/unjam@<version>` with `MISE_GITHUB_ATTESTATIONS=true`, on amd64 and arm64, then runs the installed binary.
+
+So every install path in [Install](/unjam/start/install/) is tested against the real, published artefacts.
+
+## Supply chain
+
+| Measure | Where |
+|---|---|
+| Actions pinned by full commit SHA, with the version as a comment | every workflow |
+| Tools pinned by version | `mise.toml`, `rust-toolchain.toml`, sind-action `version` |
+| Build provenance attestations | release binaries and RPMs |
+| Attestations verified before use | `rpm.yml` (binaries), `pages.yml` (RPMs), `mise` (binaries) |
+| Signed RPMs and repository metadata | one RSA key; the public half is `pkg/rpm/RPM-GPG-KEY-unjam` |
+| Signing key only for `main` and `v*` tags | the `rpm-signing` environment's branch policy |
+| Trusted publishing to crates.io, behind a reviewer | the `crates-io` environment |
+| Licence and advisory checks, bans on tokio and C-building `-sys` crates | cargo-deny |
+| Least-privilege tokens | `permissions:` per workflow and job |
+
+## This site
+
+The docs live in `site/`, built with Astro and Starlight. `pages.yml` builds them with Node from `mise.toml` (`mise run docs`) and deploys them next to the dnf repository. The design document and the changelog pages are generated from `docs/design.md` and `CHANGELOG.md` at build time, so they cannot drift. See [Contributing](/unjam/internals/contributing/#the-docs-site) for how to work on the site.

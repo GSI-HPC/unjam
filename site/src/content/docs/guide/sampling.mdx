@@ -1,0 +1,67 @@
+---
+title: Control the sampling
+description: Choose what unjam samples and how often, per node and per subtree, with rules, marks and the p, + and - keys.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Terminal from '../../../components/Terminal.astro';
+import Figure from '../../../components/Figure.astro';
+import RuleResolve from '../../../components/diagrams/RuleResolve.astro';
+
+unjam does not sample everything at one fixed rate. **Rules** set, for each part of the cgroup tree, a **level** and an **interval**. The INT and W columns show the result for each row.
+
+| Level (W) | Reads |
+|---|---|
+| `p` | The cgroup's files and its processes |
+| `c` | The cgroup's files only; process rows disappear |
+| `o` | Nothing. The structure stays (rescanned every 10 s) and the row shows no values |
+
+Intervals go from 100 ms to 60 s, in steps of 100 ms. A lower level and a longer interval cost less on the node and on the network.
+
+## With the keys
+
+1. Move to a row, or mark several rows with <kbd>space</kbd> (<kbd>a</kbd> clears the marks). On a process row, these keys act on its cgroup.
+2. <kbd>p</kbd> cycles the level: `p` → `c` → `o` → `p`.
+3. <kbd>+</kbd> halves the interval (samples more often); <kbd>-</kbd> doubles it.
+4. <kbd>0</kbd> resets all rules to the defaults.
+
+A rule from a node row, or from any row below one, applies to **that node only**. A rule from a job or step row in the step layout applies to **every node**.
+
+<Terminal rec="slurm" frame={21} caption="p on node4: its subtree now samples cgroups only (W c), so its process rows are gone. The other nodes keep their processes." />
+
+## Defaults
+
+| Job | Rules |
+|---|---|
+| A host, or a job of up to 16 nodes | Everything with processes, at the interval (1 s locally, 2 s with `--slurm`) |
+| More than 16 nodes | Everything cgroups only, at twice the interval; each step's `user` subtree off |
+
+On a large job, start from the cheap defaults and turn on processes where you look.
+
+## How rules combine
+
+A rule names **tasks** (node indices), a **path pattern**, an **interval** and a **level**. For each cgroup, the **last matching rule wins**, like a firewall. A process follows its cgroup.
+
+- Tasks: `*`, or indices and ranges such as `0-15,32`.
+- Pattern: path segments relative to the job (or host) root; `*` matches one segment; `.` matches everything. A pattern matches a cgroup when it matches the first segments of its path, so it always covers a whole subtree.
+- A rule with the same tasks and pattern as an existing one replaces it.
+
+<Figure caption="Rule resolution for one cgroup on node 3. Three rules match; the last one decides.">
+  <RuleResolve />
+</Figure>
+
+## On the command line
+
+`--rule` replaces the default rules. Its fields are tasks, pattern, interval and level, split by spaces:
+
+```sh
+unjam --rule '* . 2s c'                                 # every cgroup, cgroups only, every 2 s
+unjam --slurm=4242 --rule '* . 2s c' --rule '0 step_0 500ms p'   # node 0's step_0 in detail
+unjam --slurm=4242 --rule '* . 1s p' --rule '* step_extern - o'   # leave out the extern step
+```
+
+The interval takes `ms`, `s` and `m` (digits alone are milliseconds); level `o` needs the interval `-`.
+
+<Aside type="note" title="Why the nodes stay in step">
+Every agent samples at the same wall-clock instants: multiples of the interval, such as every even second for 2 s. Sums across nodes then add values from the same moment. The agents send their lines with small delays, by node index, so srun and the viewer see a ramp instead of a thousand bursts at once. [Rules and timing](/unjam/design/sampling/) shows how.
+</Aside>

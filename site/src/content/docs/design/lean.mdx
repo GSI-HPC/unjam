@@ -1,0 +1,82 @@
+---
+title: Lean by design
+description: The budgets for lines, dependencies, binary size and unsafe code, and the tests and skills that enforce them.
+---
+
+import Figure from '../../../components/Figure.astro';
+import ModuleMap from '../../../components/diagrams/ModuleMap.astro';
+
+unjam's priorities are **correct, small, fast**, in that order. "Small" is not a wish: each limit below is a number in the repository, and a test or CI gate fails when the code goes past it.
+
+## The budgets
+
+| What | Limit | Gate |
+|---|---|---|
+| Lines of code per module | the number in `docs/budget.txt`, +10 % | `tests/budget.rs` |
+| Lines of code, total | **3,705** | `tests/budget.rs` |
+| A "why" doc on every item | every `fn`, `struct`, `enum`, `trait`, `type`, `const`, `static`, `mod` | `tests/budget.rs` |
+| Direct dependencies | 7, each with a row in `docs/deps.md` | `tests/budget.rs`, `lean-deps` skill |
+| Release binary | ≤ 3,639,896 bytes (about 3.5 MB today) | `scripts/size.sh` |
+| Crates in the resolved tree | ≤ 95 | `scripts/size.sh` |
+| `unsafe` in unjam's code | **0 in production**; one ledgered test-only use | lints, `tests/budget.rs` |
+| `unsafe` in dependencies | a reason row per crate | `scripts/unsafe-deps.sh` |
+| MSRV | Rust 1.88 | `mise run msrv` |
+
+A budget can be raised, but only in the change that needs it, with a one-line reason in `docs/budget.txt`.
+
+<Figure caption="The twelve modules and their line budgets, read from docs/budget.txt when this site is built, so the picture always matches the gate.">
+  <ModuleMap />
+</Figure>
+
+## One package, one binary
+
+No library target, no workspace, no cargo features of its own (D2). One build configuration means one test matrix. The modules are flat files in `src/`; see [Modules](/unjam/internals/modules/).
+
+## Seven dependencies
+
+| Crate | Why |
+|---|---|
+| `clap` (derive, no colour, no suggestions) | The CLI. Without `color`, `suggestions` and `wrap_help` there is no anstream, strsim or terminal_size |
+| `ratatui` (crossterm backend only) | Layout, table widgets, buffer diffing and `TestBackend` for draw tests |
+| `arrow-array`, `arrow-schema`, `arrow-ipc` (`lz4`) | The recording format. Not the `arrow` umbrella crate, which pulls in kernels unjam does not use |
+| `lz4_flex` (not imported) | Its `safe-encode` and `safe-decode` features force arrow-ipc's LZ4 codec to its safe implementation |
+| `signal-hook` | SIGTERM, SIGINT and SIGHUP set a flag. Already in the tree through crossterm, so 0 new crates |
+
+Rejected on purpose: tokio (three threads suffice, about 20 crates), serde and bincode (the wire is text), anyhow and thiserror, libc, nix and rustix as direct dependencies, chrono (about 10 lines of date maths), log and tracing (`W` lines and the log ring), parquet (D35), zstd (C code), procfs and sysinfo (they allocate per read and cache no fds). `cargo-deny` bans tokio and C-building `-sys` crates.
+
+## No unsafe in unjam's code
+
+Lints: `unsafe_code = "deny"`, `unsafe_op_in_unsafe_fn = "deny"`, `clippy::undocumented_unsafe_blocks = "deny"`, `clippy::multiple_unsafe_ops_per_block = "deny"`. The places where Rust code usually reaches for `unsafe`, and what unjam does instead:
+
+| Usually | unjam |
+|---|---|
+| `sysconf` for page size and clock tick | `/proc/self/auxv` |
+| `getrlimit` | `/proc/self/limits` |
+| `pread` via libc | `FileExt::read_at` |
+| `setpgid` in `pre_exec` | `Command::process_group(0)` |
+| `env::remove_var` (unsafe in edition 2024) | `Command::env_remove` on the child only |
+| `execvp` | `CommandExt::exec` |
+| `sigaction` | `signal_hook::flag::register` |
+| `kill(2)` on srun | stdin EOF, then `scancel`, then `Child::kill` |
+| `O_NONBLOCK` on stdout | a writer thread with `try_send` |
+| pidfd for pid reuse | a cached `stat` fd returns `ESRCH`, plus the start time |
+| `from_utf8_unchecked`, `get_unchecked` | bounds-checked byte parsers |
+| mmap of recordings | buffered `Read` |
+| arrow's `with_skip_validation` | never called |
+
+The one use is test-only: a counting `GlobalAlloc` in `src/main.rs`, which proves that a steady-state tick allocates nothing. It is entry #1 of `docs/unsafe.md`, and `tests/budget.rs` checks that the code's `allow(unsafe_code)` sites and the ledger match one to one.
+
+**Dependencies with unsafe** are listed in a generated and checked ledger. `scripts/unsafe-deps.sh` lists every crate in the tree, searches its source for `unsafe`, and fails when a crate with hits has no reason row, or a row names a crate that is gone.
+
+## Skills for contributors
+
+The rules are also written as Claude Code skills in `.claude/skills/`, loaded when a change touches their area:
+
+| Skill | Loaded for | Enforces |
+|---|---|---|
+| `lean-code` | any item in `src/` | why-docs, line budgets, no speculative traits or generics, functions ≤ 60 lines, the file allowlist for new sources |
+| `lean-deps` | `Cargo.toml`, `Cargo.lock` | the admission rule for a dependency: std first, features, size and crate cost, MSRV, unsafe rows, licences |
+| `hot-path` | agent, source, cgroup, procfs, wire, state, input and draw code | zero allocation per tick, syscall and fd budgets, render budgets, and how to measure them |
+| `unsafe-policy` | any `unsafe`, FFI or raw syscall | the decision tree: std, a safe API in the tree, drop the feature, and only then own `unsafe` with a ledger entry |
+
+`mise run check` runs every gate: fmt, clippy, tests (with the budget test), REUSE, cargo-deny, size and the unsafe ledger.

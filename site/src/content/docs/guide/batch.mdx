@@ -1,0 +1,59 @@
+---
+title: Scripts and batch mode
+description: Use unjam --batch for text snapshots in scripts, over ssh and in cron, and --rule to choose what they contain.
+---
+
+`--batch N` prints N text snapshots, one per interval, instead of starting the TUI, then exits. It works in every mode: on a host, with `--slurm` and with `--replay`.
+
+```sh
+unjam --batch 1
+unjam --slurm=4242 --batch 3 --rule '* . 1s c'
+unjam --replay rec/*.arrows --at end --batch 1
+ssh node17 unjam --batch 2 --root /sys/fs/cgroup/system.slice
+```
+
+Without `--batch`, a stdout that is not a terminal stops unjam with `stdout is not a terminal; use --batch N (or ssh -t)`.
+
+## Output
+
+```text
+ unjam  vm  8 procs  1s  tree  sort CPU% ▼  14:18:25Z
+ tui 0.0% 4.7M · in 1.3K/s 22 msg/s · out 0 · drop 0 err 0
+NAME                                             PID   CPU%    MEM  IO-R/s  IO-W/s   PIDS   INT W
+▾ /                                                   91.6%      -       -       -    ~16    1s p
+  ▾ user.slice                                        58.6%      -       -       -     ~7    1s p
+    ▾ user-1000.slice                                 58.6%      -       -       -     ~7    1s p
+      ▾ user@1000.service                             58.5%      -       -       -     ~2    1s p
+        ▾ app.slice                                   58.5%      -       -       -     ~2    1s p
+          ▾ build.scope                               58.5%      -       -       -     ~2    1s p
+            ├ python3 /opt/sim/cc1plus.py       2448  33.0%   412M       0       0      1
+            └ python3 /opt/sim/cc1plus.py       2450  25.0%   362M       0       0      1
+  ▾ system.slice                                      32.9%      -       -       -     ~9    1s p
+    ▾ postgresql.service                              25.3%      -       -       -     ~5    1s p
+      └ python3 /opt/sim/postgres.py            2444  25.0%   212M       0   64K/s      5
+nodes=1 stale=0 errors=0 dropped=0 missing=0
+```
+
+- The snapshot shows the same rows and sort as the TUI, in the default layout of the mode.
+- The footer line counts nodes, stale nodes, decode errors, dropped ticks, and `missing`: nodes that never reported.
+- The first snapshot waits until every node has sent a rate: at most 3 s plus two intervals.
+- Control characters in names (ESC and others) are printed as `?`, so a crafted process name cannot drive your terminal.
+- Piping into `head` is fine: unjam exits 0 when the pipe closes.
+
+## Choose the content with rules
+
+`--rule` replaces the default sampling rules (see [Control the sampling](/unjam/guide/sampling/)). That is how a script asks for exactly the subtree it needs:
+
+```sh
+# Node 0 with processes every 500 ms, nodes 1-2 cgroups only every 2 s.
+unjam --slurm=$J --batch 3 --rule '0 step_0 500ms p' --rule '1-2 . 2s c'
+```
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Normal exit |
+| 1 | An error, for example srun failed, the job is not running, or a recording failed |
+| 2 | Usage error, or `--slurm` without a value matched no single running job (the jobs are listed) |
+| app's | `unjam record` exits with the application's exit code, or 128 + signal |

@@ -1,0 +1,43 @@
+---
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+
+// The modules and their line budgets, read from docs/budget.txt at build time, so the picture
+// always matches the gate that tests/budget.rs enforces.
+import { readFileSync } from 'node:fs';
+
+const text = readFileSync(new URL('../../../../docs/budget.txt', import.meta.url), 'utf8');
+const mods = [...text.matchAll(/^(\w+)\.rs\s+(\d+)/gm)].map((m) => ({ n: `${m[1]}.rs`, loc: Number(m[2]) }));
+const total = Number(text.match(/^total\s+(\d+)/m)?.[1] ?? 0);
+const role: Record<string, [string, string]> = {
+  'main.rs': ['f-purple', 'CLI, dispatch, exit codes'],
+  'model.rs': ['f-purple', 'Metric, Event, rules, timing'],
+  'source.rs': ['f-frost', 'Source trait, fd cache'],
+  'cgroup.rs': ['f-frost', 'cgroup v2 source, job root'],
+  'procfs.rs': ['f-frost', '/proc source, constants'],
+  'agent.rs': ['f-frost', 'Sampler, writer, budget'],
+  'wire.rs': ['f-yellow', 'text codec, line cap'],
+  'slurm.rs': ['f-yellow', 'squeue, srun, teardown'],
+  'record.rs': ['f-orange', 'journal writer, replay'],
+  'state.rs': ['f-green', 'State, rates, rows'],
+  'tui.rs': ['f-green', 'events, keys, draw'],
+  'theme.rs': ['f-green', 'Theme slots, THEMES'],
+};
+const max = Math.max(...mods.map((m) => m.loc));
+const bar = 360;
+---
+
+<svg class="uj-d" viewBox={`0 0 800 ${40 + mods.length * 30}`} role="img" aria-labelledby="mm-t">
+  <title id="mm-t">{`The twelve modules of src/ and their line budgets from docs/budget.txt; total cap ${total} lines.`}</title>
+  <text x="20" y="22" class="sm muted">{`src/ module · code-line budget (docs/budget.txt) · total cap ${total.toLocaleString('en')}`}</text>
+  {
+    mods.map((m, i) => (
+      <g transform={`translate(20 ${36 + i * 30})`}>
+        <text x="0" y="17" class="mono sm b">{m.n}</text>
+        <rect x="100" y="4" width={(m.loc / max) * bar} height="18" rx="4" class={role[m.n]?.[0] ?? 'f-frost'} opacity="0.8" />
+        <text x={108 + (m.loc / max) * bar} y="18" class="mono sm">{m.loc}</text>
+        <text x="520" y="17" class="sm muted">{role[m.n]?.[1] ?? ''}</text>
+      </g>
+    ))
+  }
+</svg>

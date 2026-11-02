@@ -1,0 +1,28 @@
+---
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+
+// A diagram with its caption and an optional colour legend: [[colour var, label], …].
+interface Props {
+  caption?: string;
+  legend?: [string, string][];
+}
+const { caption, legend } = Astro.props;
+---
+
+<figure class="uj-figure not-content">
+  <slot />
+  {
+    legend && (
+      <div class="legend">
+        {legend.map(([c, l]) => (
+          <span>
+            <i style={`background:var(${c})`} />
+            {l}
+          </span>
+        ))}
+      </div>
+    )
+  }
+  {caption && <figcaption>{caption}</figcaption>}
+</figure>

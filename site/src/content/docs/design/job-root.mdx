@@ -1,0 +1,67 @@
+---
+title: Finding the job
+description: How an agent finds its Slurm job's cgroup by structure, without matching job directory names.
+---
+
+import Figure from '../../../components/Figure.astro';
+import JobRoot from '../../../components/diagrams/JobRoot.astro';
+
+An agent must show **only its job**: the job's cgroups and processes, never another job on the same node. The obvious way is to look for `job_<SLURM_JOB_ID>`. unjam never does that (decision D4), because Slurm 26.05 names job directories by **SLUID** by default, not by job id.
+
+## The Slurm cgroup layout
+
+```text
+/sys/fs/cgroup/system.slice/[<node>_]slurmstepd.scope/
+├── system/                        slurmstepd waiting area
+└── job_<id>/        (25.11; 26.05 with CgroupJobIdPaths=yes)
+    <SLUID>/         (26.05 default)
+    ├── step_extern/{slurm, user/task_*}
+    ├── step_batch/…
+    └── step_<n>/
+        ├── slurm/                 the step's slurmstepd
+        └── user/
+            ├── task_0/ … task_k/
+            └── task_special/
+```
+
+## Strip, do not search
+
+The agent itself runs as a task of an `--overlap` step **inside** the job. So its own cgroup already names the job:
+
+<Figure caption="cgroup::job_root reads /proc/self/cgroup, removes step_*/user/task_* from the end, and takes what is left as the job root, whatever the job directory is called. The agent's own step is left out of the view.">
+  <JobRoot />
+</Figure>
+
+1. Read `/proc/self/cgroup`: `0::<prefix>/<J>/step_<S>/user/task_<T>`.
+2. Check that the last three segments are `step_*`, `user` and `task_*`. If not, exit: "not inside a Slurm step (or the step runs in a cgroup namespace rooted below the job)".
+3. The job root is `/sys/fs/cgroup/<prefix>/<J>`. The agent's own step, `<J>/step_<S>`, is excluded from the walk. That directory must exist; if not, exit: "own step not found (cgroup namespace)".
+4. `unjam record` uses the same parse but takes `…/step_<S>/user` as its root: all tasks of its own step on this node.
+
+The parse is a few lines in `cgroup.rs`:
+
+```rust
+fn step_paths(self_cgroup: &str) -> Result<(&str, &str), String> {
+    let path = v2_path(self_cgroup)?.trim_matches('/');
+    let mut it = path.rsplitn(4, '/');
+    match (it.next(), it.next(), it.next(), it.next()) {
+        (Some(task), Some("user"), Some(step), job)
+            if task.starts_with("task_") && step.starts_with("step_") => { /* job, step */ }
+        _ => Err("not inside a Slurm step …".to_owned()),
+    }
+}
+```
+
+## Why the own-step check matters
+
+In a cgroup **namespace** rooted at or above the job, with a host view of `/sys/fs/cgroup`, the path in `/proc/self/cgroup` is relative to the namespace. Joined to the mount, it would point somewhere else, and the "job root" could silently become the whole mount: every job on the node. The check that the own step exists under the mount catches this. unjam refuses rather than shows too much.
+
+If a site runs steps in a namespace rooted **at the task**, `/proc/self/cgroup` reads `0::/`, step 2 fails, and the error says so.
+
+## Tested on both naming schemes
+
+- Unit tests run `job_root` and `record_root` on fixture trees captured from Slurm 25.11 (`job_42`), 26.05 (SLUID), a `node1_slurmstepd.scope` variant and a `0::/` namespace root (which must fail).
+- Integration test IT 2 runs on three sind clusters: 25.11, 26.05, and 26.05 with `CgroupJobIdPaths=yes`. It starts **decoy jobs of the same user and of another user on the same nodes** and checks that no path, pid or command line of a decoy appears. On 26.05 default it also checks that the job directory is **not** `job_*`, which proves the SLUID path.
+
+## Local mode on a compute node
+
+Local mode has no job lookup. To look at one job on a node without Slurm attach, point `--root` at its directory: see [For site administrators](/unjam/guide/site/).

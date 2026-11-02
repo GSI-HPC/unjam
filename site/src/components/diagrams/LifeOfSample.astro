@@ -1,0 +1,73 @@
+---
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+
+// One value from a cgroup file to a cell on the screen, through the functions that move it.
+const top = [
+  ['Files::read', 'pread at 0'],
+  ['Cgroup::sample', 'parse cpu.stat'],
+  ['Event::CgVals', 'borrowed slice'],
+  ['wire::write', 'g line, ≤ 1000 B'],
+  ['Out', 'queue, budget'],
+  ['writer', 'stdout'],
+];
+const bottom = [
+  ['tui::draw', 'visible rows'],
+  ['state::rows', 'layout, sort'],
+  ['State::apply', 'v, pv, t, pt'],
+  ['wire::parse', 'Event again'],
+  ['split_node', 'node prefix'],
+  ['reader', '64 KiB chunks'],
+];
+const w = 120, g = 6, x0 = 14;
+const cx = (i: number) => x0 + i * (w + g) + w / 2;
+const yt = 46, yb = 216, h = 58;
+const T = 9;
+// Token path: along the top row, down the right side (srun), back along the bottom row.
+const path = `M${cx(0)} ${yt + h / 2} H${cx(5)} V${yb + h / 2} H${cx(0)}`;
+const total = (cx(5) - cx(0)) * 2 + (yb - yt);
+const atTop = (i: number) => ((cx(i) - cx(0)) / total) * T * 0.9;
+const atBottom = (i: number) => ((cx(5) - cx(0) + (yb - yt) + (cx(5) - cx(i))) / total) * T * 0.9;
+---
+
+<svg class="uj-d ls" viewBox="0 0 800 310" role="img" aria-labelledby="ls-t">
+  <title id="ls-t">A value is read with pread, parsed by the cgroup source, carried as a borrowed Event, encoded as a g line and queued for the writer thread. srun carries the line to the viewer, whose reader thread passes whole lines to the main thread: split_node, wire::parse, State::apply, state::rows and tui::draw.</title>
+  <text x={x0} y="28" class="sm muted">agent (compute node)</text>
+  <text x={x0} y="300" class="sm muted">viewer (login node)</text>
+  <path d={path} fill="none" stroke="var(--uj-line)" stroke-width="2" stroke-dasharray="5 5" />
+  <rect x={cx(5) - 46} y="138" width="92" height="34" rx="7" class="box" />
+  <text x={cx(5)} y="160" text-anchor="middle" class="mono sm">srun</text>
+  {
+    top.map(([n, d], i) => (
+      <g transform={`translate(${x0 + i * (w + g)} ${yt})`}>
+        <rect width={w} height={h} rx="8" class="box ls-st" style={`animation-delay:${atTop(i)}s`} />
+        <text x={w / 2} y="25" text-anchor="middle" class="mono b" style="font-size:12.5px">{n}</text>
+        <text x={w / 2} y="44" text-anchor="middle" class="sm muted">{d}</text>
+      </g>
+    ))
+  }
+  {
+    bottom.map(([n, d], i) => (
+      <g transform={`translate(${x0 + i * (w + g)} ${yb})`}>
+        <rect width={w} height={h} rx="8" class="box ls-st" style={`animation-delay:${atBottom(i)}s`} />
+        <text x={w / 2} y="25" text-anchor="middle" class="mono b" style="font-size:12.5px">{n}</text>
+        <text x={w / 2} y="44" text-anchor="middle" class="sm muted">{d}</text>
+      </g>
+    ))
+  }
+  <g class="motion">
+    <circle r="8" class="f-yellow">
+      <animateMotion dur={`${T}s`} repeatCount="indefinite" path={path} keyPoints="0;1;1" keyTimes="0;0.9;1" calcMode="linear" />
+    </circle>
+  </g>
+</svg>
+
+<style define:vars={{ T: `${T}s` }}>
+  .ls .ls-st {
+    animation: ls-light var(--T) linear infinite;
+  }
+  @keyframes ls-light {
+    0% { stroke: var(--uj-yellow); stroke-width: 2.5; }
+    12% { stroke: var(--uj-line); stroke-width: 1.2; }
+  }
+</style>

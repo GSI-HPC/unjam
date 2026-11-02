@@ -1,0 +1,69 @@
+---
+title: Decisions
+description: The design decisions that shape unjam, with the alternatives considered and why they lost.
+---
+
+unjam's design went through three judge panels and two review rounds before the code was written. The full log (D1 to D43) is in the [design document](/unjam/reference/design-document/#16-decision-log-adr-style). These are the decisions that shape the program most.
+
+## Structure
+
+| # | Decision | Instead of | Because |
+|---|---|---|---|
+| D2 | One package, one binary; no library, workspace or features | lib + bin; a `record` feature | One build configuration is one test matrix |
+| D3 | std threads and `mpsc` | tokio | A few fds per process. tokio adds about 20 crates and buys nothing here |
+| D15 | The sampler always runs on its own thread; one text ingest path | Local sampling on the UI thread | Key latency stays bounded on large hosts, and local mode tests the remote code path |
+| D43 | One viewer command with source flags (`--slurm`, `--replay`) | `attach` and `replay` subcommands | Subcommands would repeat the viewer flags and leave no room for a job picker |
+
+## Collection and Slurm
+
+| # | Decision | Instead of | Because |
+|---|---|---|---|
+| D4 | Find the job root by stripping `step_*/user/task_*`; never match `job_<id>` | Search for `job_<id>` | Slurm 26.05 names job directories by SLUID |
+| D11 | Bounded fd cache with a hot tier and no eviction; startup self-check | No cache; LRU; raising `RLIMIT_NOFILE` | One syscall instead of three per read, exact `ESRCH` exit detection, about 5 MiB of bounded memcg charge, no libc |
+| D12 | No cost class per metric | Gate costly files behind an extra level | `cpu.stat` and `io.stat` already flush rstat every tick; gating one file saved little and cost an enum, a level, a wire field and popup logic |
+| D13 | Pressure (PSI) in round one | Defer | Pressure is the core "jam" signal: three cheap files per cgroup |
+| D42 | No site requirement for `EnableExtraControllers` | Ask sites to set it | Sites cannot always change `cgroup.conf`. IO columns hide, PIDS falls back to summed threads |
+
+## Wire
+
+| # | Decision | Instead of | Because |
+|---|---|---|---|
+| D5 | Text TSV with self-describing `D` lines and value offsets | Positional columns; binary varint; base64 | No codec dependency, readable by eye, version-tolerant, about 120 lines less |
+| D6 | Each line carries its own node index | srun `--label` | Independent of srun's label format; same code locally |
+| D7 | 1000-byte line cap | 1023 | 24 bytes of margin under Slurm's 1024; no off-by-one exposure |
+| D8 | Absolute values every tick | Deltas | A dropped tick costs only resolution; the receiver is simpler |
+| D9 | The sampler never blocks: writer thread, `try_send`, keep structure and drop values, token bucket | Blocking stdout; `O_NONBLOCK` via rustix | Bounded memory with std only |
+| D10 | Phase-aligned sampling with staggered sends | Free-running ticks | Sums across nodes compare the same instant, without 1,000 bursts at once |
+
+## Sampling and the viewer
+
+| # | Decision | Instead of | Because |
+|---|---|---|---|
+| D21 | Last matching rule wins; `o` takes interval `-` | Most specific match; interval 0 = off | Predictable and cheap; removes a contradiction with the interval clamp |
+| D22 | No metric masks and no column chooser | Per-column masks | Rule intervals bound cost; Detail shows every metric; all-NA columns hide themselves |
+| D38 | A dedicated input thread and a separate key queue | Polling keys in the main loop | A draw can block on a slow ssh terminal; keys still arrive, and <kbd>q</kbd> acts at once |
+| D39 | Three layouts as level orders over one `rows` walk; sort orders siblings only | A fixed pivot | Each layout answers a different question, for about 50 lines |
+| D40 | The viewer shows its own and the agents' cost | Agent CPU only | The tool must show what it costs on a 1,000-node job |
+
+## Recording
+
+| # | Decision | Instead of | Because |
+|---|---|---|---|
+| D16 | Arrow IPC journal with 10 s / 8,192-row keyframed batches | Parquet in the job; 65,536-row batches | Crash-safe with about 2–3 MB in the job; one replay path |
+| D17 | Wide schema generated from the descriptors | Fixed columns; narrow key-value table | No code change per source; analyst-friendly; compresses well |
+| D19 | `record` forwards no signals; finishes at most 5 s after one | Forward TERM, USR1 | Where Slurm signals the whole step, forwarding doubles signals |
+| D28 | LZ4 (safe `lz4_flex`), not zstd | zstd | Pure Rust, clean static musl builds, no FFI |
+| D35 | No Parquet writer in the binary | `unjam convert` | Saves about 3 MB, about 30 crates and 110 lines; pyarrow converts in one line |
+
+## Safety and size
+
+| # | Decision | Instead of | Because |
+|---|---|---|---|
+| D24 | `unsafe_code = "deny"`, not `forbid` | `forbid` | `forbid` would also block the test-only counting allocator |
+| D25 | Why-docs enforced on items by a test | Clippy's doc lint on every field | The rule is about items; the lint forces boilerplate |
+| D26 | Budgets as a Rust test and self-tested scripts; a generated unsafe ledger | Inline shell; hand-written ledger | Deterministic and tested; a review found the hand-written ledger incomplete |
+| D36 | Built-in `--bcast` with `--unlink-self`; static musl release binaries with provenance | `--srun-arg=--bcast` | Sites without a shared filesystem work by default, and no copy stays behind |
+
+## Open questions
+
+The design also lists questions that are still open, for example whether the recorder should `fsync` each batch, whether 16 nodes is the right threshold for turning processes off, and how to support sites that run steps in a cgroup namespace. They are in §15 of the [design document](/unjam/reference/design-document/#15-risks-and-open-questions).

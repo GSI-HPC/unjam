@@ -1,0 +1,69 @@
+---
+title: For site administrators
+description: What unjam needs from a Linux host and a Slurm site, what is optional, and how to install it on a cluster.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+unjam has **no site requirement** beyond cgroup v2 and a recent Slurm. It runs as the user, starts no daemon and changes no configuration. This page lists what it relies on and what you can turn on to get more out of it.
+
+## Required
+
+| What | Why |
+|---|---|
+| **cgroup v2** at `/sys/fs/cgroup` (or `--root` pointing at a cgroup2 mount) | The tree is the cgroup v2 hierarchy. Pure v1 hosts are refused at start |
+| **Slurm 25.11 or later** with `proctrack/cgroup` and `task/cgroup` on the cgroup/v2 plugin | Each job, step and task must have its own cgroup |
+| Users may start an **overlap step** in their own job | `unjam --slurm` runs `srun --jobid=J --overlap` with one task per node |
+
+The job's cgroup is found by its **structure**, not its name, so both `job_<id>` directories (25.11, and 26.05 with `CgroupJobIdPaths=yes`) and the SLUID directories of 26.05 work.
+
+## Optional: the IO and PIDS columns in jobs
+
+Slurm enables the `io` and `pids` controllers in job cgroups only when `cgroup.conf` asks for them:
+
+```ini
+# cgroup.conf
+EnableExtraControllers=io,pids
+```
+
+| Without it | With it |
+|---|---|
+| Cgroup rows show no IO values; the IO-R/s and IO-W/s columns hide when every visible row is empty. Process rows still show IO from `/proc/<pid>/io` | Cgroup rows show IO bytes per second, summed over disks |
+| PIDS shows `~` and the summed thread count of the sampled processes | PIDS shows `pids.current` |
+
+Nothing else depends on it.
+
+## Overlap steps and site policy
+
+The agent step uses `--overlap`: it shares the job's CPUs, memory and GRES and takes nothing away. Slurm allows it for the job owner, operators and root. Check that these allow **one extra overlap step per viewer**:
+
+- `job_submit` and `cli_filter` plugins that reject or rewrite steps,
+- SPANK plugins that act on every step,
+- `MaxStepCount`.
+
+Users can pass further srun options with `--srun-arg=ARG`. The full command is printed by `unjam --slurm=J --print-srun`:
+
+```text
+srun --jobid=4242 --overlap --nodes=4 --ntasks=4 --ntasks-per-node=1 --cpu-bind=none --mpi=none
+     --input=all --quiet --kill-on-bad-exit=0 --wait=0 --job-name=unjam --chdir=/
+     /usr/bin/unjam agent
+```
+
+The step is named `unjam` in `squeue -s` and `sacct`.
+
+## Cost on the nodes
+
+- Each agent reports its own CPU and memory; the viewer shows the busiest one in its header.
+- The agent keeps file descriptors open to read each file with one `pread`. The cache is capped at `min(soft NOFILE − 64, 1024)` descriptors. Each one holds a kernel buffer of about 4 KiB that is charged to the job's memory cgroup, so the cap bounds that at about 5 MiB.
+- Output is limited by a byte budget (default 4 MiB/s for the whole job), and jobs of more than 16 nodes start without process sampling.
+- A measured run with 1,500 processes sampled every 100 ms (far above the defaults) used 10 % of one core and 1.8 MiB per agent; see `docs/perf.md` in the repository.
+
+## Install on a cluster
+
+- **RPMs** for EL 9, EL 10 and Fedora: install `unjam-release` and `unjam` on login and compute nodes, for example through your configuration management. The binary is then at `/usr/bin/unjam` on every node, which is what `unjam --slurm` expects.
+- **Shared software tree**: copy the static binary once; it needs no libraries.
+- **Neither**: users add `--bcast`, which copies the binary into the job for the session. Where `/tmp` is mounted `noexec`, they pass `--bcast=/var/tmp` (any directory that allows executables).
+
+<Aside type="caution" title="cgroup namespaces">
+If your site runs job steps in a cgroup namespace rooted below the job (`namespace/linux`, some container plugins), the agent cannot see the job and stops with "not inside a Slurm step (or the step runs in a cgroup namespace rooted below the job)". Local mode with `--root` on the node still works.
+</Aside>

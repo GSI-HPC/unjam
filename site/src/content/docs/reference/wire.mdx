@@ -1,0 +1,53 @@
+---
+title: Wire lines
+description: The text protocol between unjam agents and the viewer, and the control lines back to the agents.
+---
+
+Agents write **tab-separated text lines** to stdout; srun carries them to the viewer. Every line is at most **1000 bytes** including the newline (Slurm cuts lines at 1024) and starts with the agent's node index, so lines from many nodes can be mixed freely. The design is explained in [Wire protocol](/unjam/design/wire/).
+
+```text
+0	H	1	0.2.0	node1	4242.3	4	1793627942
+0	D	c	0	cg_cpu_usage_usec	us	counter
+0	G	81723	0	.
+0	G	81731	81723	step_0
+0	P	2459	88123	81755	2401	python3	python3 train.py --epochs 90
+0	T	1793628001000	2310	1520	0	4915200
+0	g	81723	0	1734650113	1703221001	31429112	-	-	…
+0	p	2459	0	506140000	5200000	431030272	…
+```
+
+## Agent → viewer
+
+Fields after `<node>\t`:
+
+| Line | Fields | Meaning |
+|---|---|---|
+| `H` | proto, version, host, step, ntasks, btime | Hello: wire grammar version (1), unjam version, host name, `<job>.<step>` or `-`, task count, boot time |
+| `D` | ent (`c` or `p`), idx, name, unit, `counter` or `gauge` | Describes value column `idx` of cgroups or processes |
+| `T` | unix_ms, self_cpu_us, out_bytes, dropped_ticks, self_rss_bytes | A tick: its time and the agent's own cost |
+| `G` | id, parent_id (0 for the root), rel_path | A cgroup (id = directory inode) |
+| `g` | id, first, v… | Cgroup values from column `first` on, in `D` order |
+| `X` | id | The cgroup is gone |
+| `P` | pid, start, cg_id, ppid, comm, cmdline | A process (start = clock ticks since boot) |
+| `p` | pid, first, v… | Process values |
+| `x` | pid | The process is gone |
+| `W` | text | A warning for the log |
+
+- `-` is a missing value.
+- Strings are cleaned: bytes below 0x20 become `?`; invalid UTF-8 is replaced. Paths and command lines are cut to fit the line.
+- If an entity's values do not fit one line, they continue on further `g`/`p` lines with a larger `first`.
+- Readers ignore extra trailing fields on `H`, `D` and `T`, so fields can be added without a new `proto`. Different unjam versions with the same `proto` work together, because columns are matched by `D` names.
+
+## Viewer → agents (control)
+
+Sent on srun's stdin, which srun copies to every agent. `tasks` is `*` or ranges such as `0-15,32`; an agent ignores lines whose set does not include its index.
+
+| Line | Meaning |
+|---|---|
+| `R	tasks	pattern	interval_ms\|-	o\|c\|p` | Add a rule, or replace the rule with the same tasks and pattern |
+| `C	tasks` | Clear all rules |
+| `S	tasks` | Resync: send `H`, `D` and all `G` and `P` again |
+| `B	tasks	bytes_per_s` | This agent's output budget |
+| `K` | Keepalive (every 30 s). An agent exits after 120 s without input |
+
+A malformed control line makes one `W` line and changes nothing.

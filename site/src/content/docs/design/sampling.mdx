@@ -1,0 +1,88 @@
+---
+title: Sampling
+description: Rules, levels and intervals, phase-aligned timers, the control protocol and the defaults the viewer chooses.
+---
+
+import Figure from '../../../components/Figure.astro';
+import RuleResolve from '../../../components/diagrams/RuleResolve.astro';
+import PhaseAlign from '../../../components/diagrams/PhaseAlign.astro';
+
+unjam samples **selectively**: different parts of the tree, on different nodes, at different levels and intervals. One small rule model, shared by the agent and the viewer, does all of this.
+
+## Rules
+
+```rust
+pub enum What { Off, Cg, Procs }      // wire: o | c | p
+pub struct Rule { pub tasks: TaskSet, pub pattern: Box<str>, pub interval_ms: u32, pub what: What }
+```
+
+- **Tasks** is `*` or ranges such as `0-15,32`, matched against the node index.
+- **Pattern** is `/`-separated segments, relative to the agent's root. Each segment is a literal or `*`. A pattern matches a cgroup when it matches the **first k segments** of its path, so a pattern always covers a whole subtree. `.` matches everything.
+- **Level.** `p` reads the cgroup files and the processes, `c` only the cgroup files, `o` nothing. `o` keeps the structure (rescanned every 10 s) and sends no values.
+- **Interval** is rounded to 100 ms and kept between 100 ms and 60 s. An `o` rule has interval `-`. The parser refuses `-` with `c` or `p`, and a number with `o` (D21).
+
+### The last match wins
+
+<Figure caption="model::effective walks the rules from the end and stops at the first match, like a firewall. A process follows the rule of its cgroup.">
+  <RuleResolve />
+</Figure>
+
+```rust
+pub fn effective(rules: &[Rule], task: u32, path: &str) -> (u32, What) {
+    rules.iter().rev()
+        .find(|r| r.tasks.contains(task) && pattern_match(&r.pattern, path))
+        .map_or((0, What::Off), |r| (r.interval_ms, r.what))
+}
+```
+
+With no match, a cgroup is `Off`. The agent and the viewer call the **same function**, so the INT and W columns always show what the agent does.
+
+An `R` line with the task set and pattern of an existing rule **replaces** it in place (`model::upsert`), so the list stays short however often a key is pressed. The viewer keeps the full list and sends it again after a resync.
+
+## Phase-aligned timers
+
+<Figure caption="Every node samples at the same wall-clock multiple of the interval. Each agent's writer then waits its own small delay before it sends, so srun and the viewer see a ramp, not a burst.">
+  <PhaseAlign />
+</Figure>
+
+```rust
+pub fn next_due(now_ms: u64, interval_ms: u32) -> u64 {
+    let i = u64::from(interval_ms.max(1));
+    (now_ms / i + 1) * i
+}
+```
+
+- Deadlines are **wall-clock multiples** of the interval. All nodes sample at the same instant, so sums across nodes compare values from the same moment. This assumes NTP; the help pane shows the clock skew per node.
+- `+ 1` (not a ceiling) makes a tick that fires exactly on a multiple schedule the **next** multiple, not itself. A unit test pins this case.
+- The agent keeps one timer per distinct interval (usually one to three) and sleeps in `recv_timeout` on its control channel until the earliest one. Missed deadlines are skipped, never caught up in a burst.
+- If the wall clock steps back, deadlines more than one interval ahead are moved to the new time, so sampling does not pause. The keepalive uses the monotonic clock, so a forward step does not end the agent.
+- **Stagger.** Sampling stays aligned, but the writer delays each send by `procid × min(interval / 2, 250 ms) / ntasks`. The same spread applies to the first snapshot and to resyncs.
+
+## Control lines
+
+The viewer sends control lines on srun's stdin; srun copies them to every agent. Locally they go over an `mpsc` channel.
+
+```text
+R  tasks  pattern  interval_ms|-  o|c|p     add or replace a rule
+C  tasks                                     clear all rules
+S  tasks                                     resync: send H, D, all G and P again
+B  tasks  bytes_per_s                        output budget of this agent
+K                                            keepalive (every 30 s)
+```
+
+An agent ignores a line whose task set does not include it. A malformed line makes one `W` line and changes nothing. `--rule TEXT` is parsed as `R\t` + TEXT by the same parser.
+
+## Defaults
+
+The viewer chooses the first rules from the job size (`tui::default_rules`):
+
+| Job | Rules | Budget per agent |
+|---|---|---|
+| Local, or up to 16 nodes | `R * . <interval> p` | 4 MiB/s ÷ N |
+| More than 16 nodes | `R * . <2 × interval> c`, `R * */user - o` | max(4 KiB/s, 4 MiB/s ÷ N) |
+
+For a large job this samples about seven cgroups per node (the root, the steps, their `slurm/`) every 2 to 4 s. At 1,000 nodes that is about 0.5 MB/s into the viewer. The kernel's hierarchical accounting means a step cgroup already includes its tasks, so the totals are still correct. To look closer, the user marks nodes or subtrees and presses <kbd>p</kbd>.
+
+## The cost knob
+
+There is no other knob. Each rule's level and interval bound the files read per second; the byte budget bounds the output; the large-job defaults bound both at scale. See [Collection](/unjam/design/collection/) for the cost of each file and [Wire protocol](/unjam/design/wire/) for the budget.
