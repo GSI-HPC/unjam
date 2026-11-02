@@ -21,7 +21,7 @@ use ratatui::layout::HorizontalAlignment::{Left, Right};
 use ratatui::layout::{Constraint, Layout as Split, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row as TRow, Table, Wrap};
+use ratatui::widgets::{Block, Cell, Clear, Padding, Paragraph, Row as TRow, Table, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::agent::{OFF_WALK_MS, now_ms};
@@ -81,7 +81,7 @@ const REPLAY: [(&str, &str); 8] = [
     ("v", "layout"),
     ("/", "filter"),
 ];
-/// Help pane keys and legend, live; each line fits the 62 columns of the pane at 80x24.
+/// Help pane keys and legend, live; each line fits the 60 columns of the pane at 80x24.
 const HELP: [&str; 10] = [
     "↑↓ j k  PgUp PgDn  g G  move         Enter  detail",
     "← → h l  fold (← on a leaf: parent)  ␣  mark    a  clear",
@@ -96,7 +96,7 @@ const HELP: [&str; 10] = [
 ];
 /// Help pane keys in replay.
 const HELP_REPLAY: [&str; 3] = [
-    "␣  play/pause    , .  one tick    < >  60 s    g G  start/end",
+    "␣  play/pause   , .  one tick   < >  60 s   g G  start/end",
     "↑↓ j k PgUp PgDn  move    ← →  fold    Enter  detail",
     "/  filter    v  layout    s S  sort    t  theme    q  quit",
 ];
@@ -858,6 +858,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if let Some((lines, title)) = lines {
         f.render_widget(Clear, pop);
         let block = Block::bordered().title(title).style(t.base).border_style(t.tree);
+        // The padding also indents the wrapped part of a long command line.
+        let block = block.padding(Padding::horizontal(1));
         let text = Paragraph::new(lines.join("\n")).wrap(Wrap { trim: false });
         f.render_widget(text.block(block), pop);
     }
@@ -994,19 +996,24 @@ fn table(f: &mut Frame, app: &App, t: &Theme, vis: &[Row], area: Rect) {
 /// announced, raw and as the table shows it; a cross-node row lists its sums.
 fn detail(app: &App, r: &Row) -> Vec<String> {
     let n = &app.st.nodes[r.node as usize];
+    // The host goes on the first line, not after a wrapped command line.
+    let host = &n.host;
     let found = match r.key {
-        Key::Cg(_, id) => n.cgs.get(&id).map(|c| (0, &c.vals, format!("cgroup /{}", c.path))),
-        Key::Proc(_, pid) => {
-            n.procs.get(&pid).map(|p| (1, &p.vals, format!("pid {pid} {}\n {}", p.comm, p.cmd)))
+        Key::Cg(_, id) => {
+            n.cgs.get(&id).map(|c| (0, &c.vals, format!("cgroup /{}  ({host})", c.path)))
         }
+        Key::Proc(_, pid) => n
+            .procs
+            .get(&pid)
+            .map(|p| (1, &p.vals, format!("pid {pid} {}  ({host})\n{}", p.comm, p.cmd))),
         _ => None,
     };
     let Some((ent, vals, what)) = found else {
-        let sums = COLS.iter().zip(r.v).map(|((c, u, _), v)| format!(" {c:<26} {}", fmt(u, v)));
-        let head = [format!(" {}: sums over its nodes", r.name), String::new()];
+        let sums = COLS.iter().zip(r.v).map(|((c, u, _), v)| format!("{c:<26} {}", fmt(u, v)));
+        let head = [format!("{}: sums over its nodes", r.name), String::new()];
         return head.into_iter().chain(sums).collect();
     };
-    let mut out = vec![format!(" {what}  ({})", n.host), String::new()];
+    let mut out = vec![what, String::new()];
     for (c, (name, unit, kind)) in app.st.cols.0[ent].iter().enumerate() {
         let (raw, shown) =
             (vals.v.get(c).copied().unwrap_or(NA), vals.get(c, *kind).unwrap_or(f64::NAN));
@@ -1018,21 +1025,21 @@ fn detail(app: &App, r: &Row) -> Vec<String> {
             (u, _) => (u, fmt(u, shown) + per),
         };
         out.push(match raw {
-            NA => format!(" {name:<26} NA (not announced or absent)"),
-            _ => format!(" {name:<26} {raw:>16} {unit:<3} {shown}"),
+            NA => format!("{name:<26} NA (not announced or absent)"),
+            _ => format!("{name:<26} {raw:>16} {unit:<3} {shown}"),
         });
     }
     out
 }
 
-/// Help pane: the keys of the mode and a legend, the per-node self-monitoring table (62
+/// Help pane: the keys of the mode and a legend, the per-node self-monitoring table (60
 /// columns, the pane's width at 80x24) and the log tail.
 fn help(app: &App) -> Vec<String> {
     let keys = if app.replay.is_some() { &HELP_REPLAY[..] } else { &HELP[..] };
-    let mut out: Vec<String> = keys.iter().map(|l| format!(" {l}")).collect();
+    let mut out: Vec<String> = keys.iter().map(|&l| l.into()).collect();
     let row = |v: [&str; 8]| {
         format!(
-            " {:<12} {:>6} {:>6} {:>8} {:>6} {:>4} {:>4} {:>6}",
+            "{:<12} {:>6} {:>6} {:>8} {:>6} {:>4} {:>4} {:>6}",
             v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]
         )
     };
@@ -1049,7 +1056,7 @@ fn help(app: &App) -> Vec<String> {
         out.push(row([&n.host, &cpu, &rss, &out_s, &msg, &drop, &err, &skew]) + stale);
     }
     out.push(String::new());
-    out.extend(app.log.iter().take(20).map(|l| format!(" {l}")));
+    out.extend(app.log.iter().take(20).cloned());
     out
 }
 
@@ -1206,11 +1213,11 @@ mod tests {
         let rows = state::rows(&app.st, &app.view, usize::MAX);
         let sshd = rows.iter().find(|r| r.key == Key::Proc(0, 10)).unwrap();
         let text = detail(&app, sshd).join("\n");
-        assert!(text.starts_with(" pid 10 sshd\n sshd: /usr/sbin/sshd -D  (n1)"), "{text}");
-        assert!(text.contains(" p_state                                  82     R"), "{text}");
-        assert!(text.contains(" p_threads                                 3     3"), "{text}");
+        assert!(text.starts_with("pid 10 sshd  (n1)\nsshd: /usr/sbin/sshd -D\n\n"), "{text}");
+        assert!(text.contains("\np_state                                  82     R"), "{text}");
+        assert!(text.contains("\np_threads                                 3     3"), "{text}");
         let job = detail(&app, &rows[0]).join("\n");
-        assert!(job.starts_with(" job 42: sums over its nodes\n\n CPU%  "), "{job}");
+        assert!(job.starts_with("job 42: sums over its nodes\n\nCPU%  "), "{job}");
     }
 
     #[test]
