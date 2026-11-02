@@ -1,0 +1,92 @@
+---
+title: Install
+description: Install unjam from the signed dnf repository, with mise, as a static binary, or from source, and check its build provenance.
+---
+
+import { Tabs, TabItem, Steps, Aside } from '@astrojs/starlight/components';
+
+Every release builds **one static binary per architecture** (x86_64 and aarch64, linked against musl). All install methods below deliver that same binary, so it runs on any Linux compute node, whatever its glibc. GitHub signs a **build provenance attestation** for each binary, which proves that the file came from this repository's release workflow.
+
+## Rocky Linux, RHEL and Fedora (dnf)
+
+Packages exist for Rocky Linux 9 and 10 (and other Enterprise Linux 9 and 10) and the latest Fedora, on x86_64 and aarch64. The repository is at [gsi-hpc.github.io/unjam/rpm/](https://gsi-hpc.github.io/unjam/rpm/).
+
+<Steps>
+
+1. Install the repository package for your distribution. It adds `/etc/yum.repos.d/unjam.repo` and the signing key.
+
+   <Tabs syncKey="dist">
+     <TabItem label="EL 9">
+       ```sh
+       sudo dnf install https://gsi-hpc.github.io/unjam/rpm/unjam-release-el9.noarch.rpm
+       ```
+     </TabItem>
+     <TabItem label="EL 10">
+       ```sh
+       sudo dnf install https://gsi-hpc.github.io/unjam/rpm/unjam-release-el10.noarch.rpm
+       ```
+     </TabItem>
+     <TabItem label="Fedora">
+       ```sh
+       sudo dnf install https://gsi-hpc.github.io/unjam/rpm/unjam-release-fedora.noarch.rpm
+       ```
+     </TabItem>
+   </Tabs>
+
+2. Install unjam. dnf checks the signature of the package and of the repository metadata. When dnf asks you to import the key, compare its fingerprint: `1EC9 AAF8 6238 CE0B 2FC2  78F8 D014 7913 E1E0 5035`.
+
+   ```sh
+   sudo dnf install unjam
+   ```
+
+3. Updates come with `dnf upgrade` like any other package.
+
+</Steps>
+
+The package holds the release binary without changes, so its attestation stays valid:
+
+```sh
+gh attestation verify /usr/bin/unjam -R GSI-HPC/unjam
+```
+
+## mise
+
+[mise](https://mise.jdx.dev/) installs from the release assets and checks the attestation before it installs.
+
+```sh
+mise use -g github:GSI-HPC/unjam          # latest release
+mise use -g github:GSI-HPC/unjam@0.2.0    # a fixed version
+```
+
+## Static binary
+
+Download the asset for your architecture (`unjam-linux-amd64` or `unjam-linux-arm64`) from the [releases page](https://github.com/GSI-HPC/unjam/releases) and check it with the [GitHub CLI](https://cli.github.com/):
+
+```sh
+gh release download v0.2.0 -R GSI-HPC/unjam -p 'unjam-linux-amd64' -p checksums.txt
+sha256sum --ignore-missing -c checksums.txt
+gh attestation verify unjam-linux-amd64 -R GSI-HPC/unjam
+install -m 0755 unjam-linux-amd64 ~/.local/bin/unjam
+```
+
+## From source
+
+unjam is a single Rust crate with a minimum supported Rust version of 1.88.
+
+```sh
+cargo install --locked unjam
+```
+
+A source build links against your libc. For compute nodes with another glibc, prefer the static release binary.
+
+## On a cluster
+
+`unjam --slurm` starts the agent on the compute nodes. By default the agent is the same file as the viewer (`std::env::current_exe()`), so the binary must be at the same path on every node:
+
+- With the **RPM** on every node, the path is `/usr/bin/unjam` everywhere. Nothing else is needed.
+- On a **shared filesystem** (home, software tree), install it once there.
+- With **neither**, add `--bcast`: srun copies the binary to each node for the duration of the session, and the agent removes the copy at start. See [Watch a Slurm job](/unjam/guide/slurm/#no-shared-filesystem).
+
+<Aside type="tip">
+Check the result with `unjam --version`. Then go to the [Quick start](/unjam/start/quick-start/).
+</Aside>

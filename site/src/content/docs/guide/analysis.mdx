@@ -1,0 +1,87 @@
+---
+title: Analyze recordings
+description: Read unjam's Arrow IPC journals with pyarrow and pandas, compute rates, and convert them to Parquet.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+A journal is a standard **Arrow IPC stream** (`.arrows`) with LZ4-compressed batches. Every tool that reads Arrow streams can read it; the examples below use pyarrow and pandas. The columns are described in the [recording format](/unjam/reference/recording-format/).
+
+## Load a journal
+
+```python
+import pyarrow as pa
+
+table = pa.ipc.open_stream("4242.0-node1.arrows").read_all()
+print(table.schema.metadata[b"unjam.host"], table.num_rows)
+print(table.schema.field("cg_cpu_usage_usec").metadata)   # {b'unjam.unit': b'us', b'unjam.kind': b'counter', ...}
+```
+
+Each row is one cgroup (`kind == 1`) or one process (`kind == 2`) at one tick (`ts`). Each tick is a complete snapshot of the recorded step.
+
+## Fill in names on every row
+
+`path`, `comm`, `cmdline`, `ppid` and `start` are only set on the first row of each cgroup or process in a batch (that keeps files small). Forward-fill them per entity:
+
+```python
+import pandas as pd, pyarrow as pa
+
+df = pa.ipc.open_stream("X.arrows").read_all().to_pandas(types_mapper=pd.ArrowDtype)
+# An entity is a cgroup (kind 1, by cg) or a process (kind 2, by pid); a reused pid starts
+# over with a new first row.
+entity = df["pid"].astype("uint64[pyarrow]").where(df["kind"] == 2, df["cg"])
+keyframe = ["start", "ppid", "path", "comm", "cmdline"]
+df[keyframe] = df.groupby([df["kind"], entity])[keyframe].ffill()
+```
+
+## Rates from counters
+
+Counters (unit `us` or `B`, kind `counter`) only grow. Divide differences by the time step to get a rate; a CPU time in microseconds per second of wall time, divided by 10⁴, is a CPU percentage of one core:
+
+```python
+cg = df[df["kind"] == 1].sort_values(["cg", "ts"])
+dt = cg.groupby("cg")["ts"].diff().dt.total_seconds()
+cg["cpu_pct"] = cg.groupby("cg")["cg_cpu_usage_usec"].diff() / dt / 1e4
+cg["read_Bps"] = cg.groupby("cg")["cg_io_read_bytes"].diff() / dt
+print(cg.groupby("path")["cpu_pct"].describe())
+```
+
+## All nodes at once
+
+One file per node; the host is in the schema metadata. Add it as a column and concatenate:
+
+```python
+import glob
+
+frames = []
+for f in glob.glob("rec/4242.0-*.arrows"):
+    t = pa.ipc.open_stream(f).read_all()
+    frames.append(t.to_pandas().assign(host=t.schema.metadata[b"unjam.host"].decode()))
+df = pd.concat(frames)
+```
+
+All agents sample at the same wall-clock instants, so ticks from different nodes line up within a few milliseconds.
+
+## Convert to Parquet
+
+unjam has no Parquet writer of its own; one line of pyarrow converts a journal (this exact command runs in the integration tests):
+
+```sh
+uv run --with pyarrow==21.0.0 python -c "import sys,pyarrow as pa,pyarrow.parquet as pq; \
+  pq.write_table(pa.ipc.open_stream(sys.argv[1]).read_all(), sys.argv[2], compression='lz4')" X.arrows X.parquet
+```
+
+<Aside type="note" title="A file from a killed job">
+A journal cut by SIGKILL has no end-of-stream marker. `pa.ipc.open_stream(...).read_all()` then raises an error at the cut. Read batch by batch to keep the complete part:
+
+```python
+with pa.ipc.open_stream("cut.arrows") as r:
+    schema, batches = r.schema, []
+    try:
+        for b in r:
+            batches.append(b)
+    except (pa.ArrowInvalid, OSError):   # the cut message
+        pass
+table = pa.Table.from_batches(batches, schema=schema)
+```
+</Aside>

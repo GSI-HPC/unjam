@@ -1,0 +1,71 @@
+---
+title: Recording format
+description: The columns, metadata and batch rules of unjam's .arrows journals.
+---
+
+A recording is an **Arrow IPC stream** (`.arrows`, media type `application/vnd.apache.arrow.stream`) with LZ4_FRAME body compression. There is one file per node. `unjam record` and the viewer's <kbd>r</kbd> write the same format; replay and pyarrow read both. Why this format: [Recording](/unjam/design/recording/).
+
+## Columns
+
+| Column | Arrow type | Null | Meaning |
+|---|---|---|---|
+| `ts` | `timestamp[ms, UTC]` | no | Tick time (phase-aligned wall clock) |
+| `kind` | `uint8` | no | 1 = cgroup row, 2 = process row |
+| `cg` | `uint64` | no | Cgroup id (directory inode). On a process row: the process's cgroup |
+| `pid` | `uint32` | yes | Process rows only |
+| `start` | `uint64` | yes | Process start, clock ticks since boot. Keyframe column |
+| `ppid` | `uint32` | yes | Parent pid. Keyframe column |
+| `path` | `utf8` | yes | Cgroup path relative to `unjam.root`. Keyframe column |
+| `comm`, `cmdline` | `utf8` | yes | Process name and command line. Keyframe columns |
+| one per metric | `uint64` | yes | Named as in [Metrics](/unjam/reference/metrics/). NA is null |
+
+Each metric column has field metadata:
+
+| Key | Values |
+|---|---|
+| `unjam.unit` | `us`, `B`, `1`, `char` |
+| `unjam.kind` | `counter` or `gauge` |
+| `unjam.source` | `cgroup` (`cg_` columns) or `proc` (`p_` columns) |
+
+`p_state` holds the state letter as its ASCII code: `chr(82)` is `R`.
+
+## Schema metadata
+
+| Key | Example | Meaning |
+|---|---|---|
+| `unjam.schema` | `1` | Version of the fixed columns |
+| `unjam.version` | `0.2.0` | The unjam that wrote the file |
+| `unjam.source` | `record` or `tui` | `unjam record`, or a live viewer (<kbd>r</kbd>, `--record`) |
+| `unjam.host` | `node1` | Host name |
+| `unjam.job`, `unjam.step` | `4242`, `4242.1` | Slurm job and step; `na` and `-` outside Slurm |
+| `unjam.root` | `/sys/fs/cgroup/…/job_4242/step_1/user` | The sampled cgroup (`record` journals only) |
+| `unjam.interval_ms` | `1000` | Sampling interval |
+| `unjam.btime` | `1793627942` | Boot time (Unix seconds, or `na`); with `start` it gives a process's start time |
+
+## Rows and batches
+
+- **Snapshots.** In a `record` journal, each tick is a complete snapshot of the scope. An entity that is missing from a tick has gone; no "gone" rows are written. A `tui` journal holds what the viewer received, at the rule intervals that were active.
+- **Batches** are cut every **10 s or 8,192 rows**, whichever comes first, then written and flushed.
+- **Keyframe rule.** The first row of each entity in a batch carries `path`, `comm`, `cmdline`, `ppid` and `start`; later rows leave them null. So every batch decodes on its own. To have them on every row, forward-fill per entity: `cg` for cgroup rows, `pid` for process rows. See [Analyze recordings](/unjam/guide/analysis/).
+- **Crash safety.** SIGKILL, OOM or a node crash loses at most the open batch. Readers get every complete batch; replay then says `truncated at byte N`.
+- **Files** are created new with mode 0600 and never overwritten.
+
+## Evolution
+
+- New metrics add columns; nothing is renamed.
+- `unjam.schema` changes only when a fixed column is added, and only at the end.
+- Column order can change between versions. **Select columns by name**, ignore unknown ones, and treat missing ones as null. Older recordings then stay readable.
+
+## Read it elsewhere
+
+```sh
+# pyarrow
+python -c "import pyarrow as pa; print(pa.ipc.open_stream('node1.arrows').read_all())"
+
+# Parquet, one line
+uv run --with pyarrow python -c "import sys,pyarrow as pa,pyarrow.parquet as pq; \
+  pq.write_table(pa.ipc.open_stream(sys.argv[1]).read_all(), sys.argv[2], compression='lz4')" \
+  node1.arrows node1.parquet
+```
+
+pyarrow reading `.arrows` and the Parquet conversion are tested in CI. Other readers (polars, DuckDB) are expected to work but are not tested.

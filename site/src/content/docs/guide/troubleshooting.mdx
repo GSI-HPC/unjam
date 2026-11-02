@@ -1,0 +1,52 @@
+---
+title: Troubleshooting
+description: The messages unjam prints when something is wrong, what they mean and what to do.
+---
+
+## At start
+
+| Message | Meaning and fix |
+|---|---|
+| `cgroup v2 only: no cgroup2 hierarchy at /sys/fs/cgroup (use --root to point at a cgroup2 mount)` | The host runs cgroup v1. On a hybrid host, use `--root` with the cgroup2 mount, for example `/sys/fs/cgroup/unified` |
+| `stdout is not a terminal; use --batch N (or ssh -t)` | You ran unjam into a pipe, a file, cron, or `ssh host unjam`. Use `ssh -t` or `--batch N` |
+| `the subcommand '4242' cannot be used with '--slurm[=<JOBID>]'` plus `hint: --slurm and --bcast take a value only with '='` | Write `--slurm=4242`, not `--slurm 4242` |
+| `unjam needs at least 80x8 (now W×H)` | Make the terminal larger |
+| `UNJAM_THEME: unknown theme "x" (themes: nord, night, …)` | Fix the variable or use `--theme` |
+
+## With --slurm
+
+| Message | Meaning and fix |
+|---|---|
+| `squeue not found in PATH (--slurm needs the Slurm commands)` | Run on a node with the Slurm client commands |
+| `job N not found (finished, or not visible to you)` | The job ended, or `PrivateData` hides it from you |
+| `job N is PENDING, not RUNNING` | Wait until it runs |
+| `unjam: no running jobs of yours; pick one with --slurm=JOBID` | `--slurm` without a value found no single running job; the list (if any) follows |
+| `--bcast: job N belongs to uid U, who could swap the copy; use --agent PATH …` | You attach to another user's job (as root or operator). Use a binary that is already on the nodes |
+| `no agent reported; srun said: …` | srun or the agents failed. The text is srun's error, for example a site policy that refuses the step |
+| `not inside a Slurm step (or the step runs in a cgroup namespace rooted below the job)` | In srun's output: the agent cannot see the job's cgroup. See [For site administrators](/unjam/guide/site/#install-on-a-cluster) |
+| `…: own step not found (cgroup namespace)` | The agent sees a cgroup namespace with a host-view `/sys/fs/cgroup`; unjam refuses to show the whole node |
+| `Permission denied` from srun with `--bcast` | The copy's directory is `noexec`. Use `--bcast=/var/tmp` or another directory that allows executables |
+
+## In the view
+
+| Symptom | Meaning |
+|---|---|
+| A node reads `nodeX (stale)` and shows no values | Its agent has not reported for three intervals: it exited, or the node is down. The others keep running |
+| `-` in a column | No value: the file is absent (controller off, old kernel) or the row is not sampled (level `o`, or `c` for processes) |
+| `~` in PIDS | The pids controller is off; the number is the sum of threads of the sampled processes |
+| IO columns are missing | No visible row has an IO value, so the columns hide. In jobs, see `EnableExtraControllers` on the [site page](/unjam/guide/site/) |
+| `<path>: permission denied, NA` in the log | A file of another user's process (usually `/proc/<pid>/io`) is not readable. Its value is NA; this is logged once per agent |
+| `node N: proto X, need Y: ignored` | The agent on that node is another unjam version with a different wire grammar. Use the same version everywhere |
+| `drop` above 0 in the header | Agents dropped value ticks because of the byte budget or a slow stream. Rates stay correct; only time resolution drops. Raise `--budget` or sample less |
+| `output backlog over 1 MiB: rules now R * . N c` | An agent saw a storm of new processes and turned process sampling off to protect the job. <kbd>p</kbd> or <kbd>0</kbd> turns it back on |
+| `err` above 0 | Lines failed to decode. The viewer asks that agent to resend its state (at most every 10 s) |
+
+## Recording and replay
+
+| Message | Meaning |
+|---|---|
+| `unjam: record: <reason>; running unrecorded` | The recording could not start (the file exists, the directory is missing, no cgroup2). The application runs anyway |
+| `rec failed` in the header | No journal could be opened, for example the directory already holds `<host>.arrows`. unjam exits 1 |
+| `not an unjam recording (…)` | The file is not an Arrow stream written by unjam |
+| `truncated at byte N` | The recorder was killed; replay shows every complete batch before the cut |
+| `another job or step than …` | The files given to `--replay` come from different jobs or steps |

@@ -1,0 +1,80 @@
+---
+title: unjam
+description: A top-like terminal UI over the cgroup v2 tree, for Linux hosts and every node of a Slurm job. Record job steps to Arrow and replay them.
+template: splash
+hero:
+  tagline: See where CPU, memory, IO and pressure go, per cgroup and per process, on one host or on every node of a Slurm job at once.
+  actions:
+    - text: Get started
+      link: /unjam/start/quick-start/
+      icon: right-arrow
+    - text: Install
+      link: /unjam/start/install/
+      variant: minimal
+    - text: View on GitHub
+      link: https://github.com/GSI-HPC/unjam
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid, Tabs, TabItem, LinkCard } from '@astrojs/starlight/components';
+import Terminal from '../../components/Terminal.astro';
+import TourVideo from '../../components/TourVideo.astro';
+
+<Terminal rec="slurm" caption="A real session on a four-node test job. The test bench has no memory and io controllers in its cgroups, so MEM and IO on cgroup rows show -." />
+
+<TourVideo />
+
+## Why unjam
+
+A slow job rarely tells you why. Is one node behind? Is a task short of memory, waiting on IO, or throttled? `top` shows one host and no job structure. Cluster dashboards show nodes, not the processes inside your step.
+
+unjam reads the cgroup v2 tree that Slurm and systemd already build, puts the processes into it, and shows all nodes of a job in one live tree. It needs no daemon, no site service and no root.
+
+<CardGrid>
+  <Card title="One tree, many nodes" icon="seti:folder">
+    `unjam --slurm` starts one small agent per node in an overlapping job step. The view groups the job by step, node, task and process, and sums across nodes where that makes sense.
+  </Card>
+  <Card title="Pressure, not only usage" icon="warning">
+    CPU, memory, IO and PIDS for every cgroup and process, plus pressure stall times (PSI) in the detail view and in recordings. A heat strip shows every node at a glance, a history bar every row.
+  </Card>
+  <Card title="Record and replay" icon="document">
+    `srun unjam record -- ./app` writes a crash-safe Arrow stream per node. Replay it in the same TUI, or load it in pandas or pyarrow.
+  </Card>
+  <Card title="Small and careful" icon="approve-check">
+    One static binary of a few megabytes, no `unsafe` in its own code, and a sampler that never blocks. The agent shows its own CPU and memory cost in the header.
+  </Card>
+</CardGrid>
+
+## Install
+
+<Tabs syncKey="install">
+  <TabItem label="Rocky / RHEL / Fedora">
+    ```sh
+    sudo dnf install https://gsi-hpc.github.io/unjam/rpm/unjam-release-el9.noarch.rpm   # or -el10, -fedora
+    sudo dnf install unjam
+    ```
+  </TabItem>
+  <TabItem label="mise">
+    ```sh
+    mise use -g github:GSI-HPC/unjam
+    ```
+  </TabItem>
+  <TabItem label="Static binary">
+    ```sh
+    curl -LO https://github.com/GSI-HPC/unjam/releases/latest/download/unjam-linux-amd64
+    install -m 0755 unjam-linux-amd64 ~/.local/bin/unjam
+    ```
+  </TabItem>
+</Tabs>
+
+All packages hold the same attested release binary. [Install](/unjam/start/install/) shows how to check it.
+
+## Start here
+
+<CardGrid>
+  <LinkCard title="Quick start" description="Three commands: a host, a job, a recording." href="/unjam/start/quick-start/" />
+  <LinkCard title="Watch a Slurm job" description="Attach, read the view, and find the slow node." href="/unjam/guide/slurm/" />
+  <LinkCard title="Architecture" description="How agents, srun and the viewer work together." href="/unjam/design/overview/" />
+  <LinkCard title="Life of a sample" description="Follow one value from a cgroup file to the screen." href="/unjam/internals/life-of-a-sample/" />
+</CardGrid>

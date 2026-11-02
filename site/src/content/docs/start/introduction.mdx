@@ -1,0 +1,46 @@
+---
+title: What is unjam?
+description: unjam is a top-like terminal UI whose tree is the cgroup v2 hierarchy, for one Linux host or every node of a Slurm job.
+---
+
+import Terminal from '../../../components/Terminal.astro';
+import Figure from '../../../components/Figure.astro';
+import EntityTree from '../../../components/diagrams/EntityTree.astro';
+
+**unjam** (Utility for Node/Job Analysis and Monitoring) is a `top`-like terminal UI. Its tree is the **cgroup v2 hierarchy**, filled with the processes of each cgroup. On a host, that tree is what systemd built: slices, services, scopes. In a Slurm job, it is the job, its steps and their tasks, on every node.
+
+<Terminal rec="host" frame={0} caption="unjam on a host: systemd's cgroup tree with the processes in it. Each cgroup row sums everything below it, because the kernel accounts hierarchically." />
+
+## What you can do with it
+
+| Task | Command |
+|---|---|
+| Watch this host | `unjam` |
+| Watch every node of a running Slurm job | `unjam --slurm` or `unjam --slurm=JOBID` |
+| Record a job step to Arrow files, one per node | `srun unjam record -o rec/%j.%s-%n.arrows -- ./app` |
+| Replay recordings on one timeline | `unjam --replay rec/*.arrows` |
+| Print text snapshots for scripts | `unjam --batch 3` |
+
+## Why the cgroup tree
+
+Linux puts every process into a cgroup. Slurm's cgroup/v2 plugin gives each job, step and task its own cgroup; systemd does the same for services and user sessions. The kernel counts CPU time, memory, IO and pressure for each cgroup and **for everything below it**. So a cgroup row is exact and cheap: one file read gives the total of a whole subtree, with no summing of processes.
+
+unjam therefore shows cgroups first and processes second. Rows that matter are visible at once, and you open the subtree you care about.
+
+<Figure caption="The entities unjam shows. Paths are only labels: identity comes from inode numbers and process start times, so a recreated cgroup or a reused pid is never mixed up with the old one.">
+  <EntityTree />
+</Figure>
+
+## What it measures
+
+For each cgroup: CPU time (user, system, throttled), current, peak, anonymous and file memory, OOM kills, IO bytes read and written, the number of tasks, and the pressure stall time of CPU, memory and IO. For each process: CPU time, resident memory, threads, state, the last CPU, page faults and IO bytes. The table shows the most useful five columns; **Enter** shows every value of a row. The [metrics reference](/unjam/reference/metrics/) lists them all.
+
+## What it needs
+
+- Linux with **cgroup v2** (the unified hierarchy). Pure cgroup v1 hosts are refused at start. Hybrid hosts work when a cgroup2 mount exists.
+- For `--slurm`: **Slurm 25.11 or later** with the cgroup/v2 plugin, and the right to start a step in the job (you own it, or you are an operator or root).
+- Nothing else: no daemon, no database, no root, no site configuration. Sites can turn on two extra cgroup controllers to fill the IO and PIDS columns in jobs; see [For site administrators](/unjam/guide/site/).
+
+## What it is not
+
+unjam is a live and forensic tool for one host or one job. It is not a cluster-wide time series database, it keeps no history beyond what you record, and it does not change anything on the nodes: it only reads files below `/sys/fs/cgroup` and `/proc`.

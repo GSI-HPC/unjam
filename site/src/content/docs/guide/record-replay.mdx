@@ -1,0 +1,100 @@
+---
+title: Record and replay
+description: Record a Slurm job step or the live view to Arrow IPC journals, and replay them on one timeline.
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+import Terminal from '../../../components/Terminal.astro';
+import Figure from '../../../components/Figure.astro';
+import Batches from '../../../components/diagrams/Batches.astro';
+
+There are two ways to record, and one way to replay.
+
+| | `unjam record` | <kbd>r</kbd> / `--record DIR` in the viewer |
+|---|---|---|
+| Records | One job step, everything in it, at a fixed interval | What the viewer receives, at the intervals of its rules |
+| Runs | Inside the job, around your application | In your viewer session |
+| Files | One per node, name from `-o` | `DIR/<host>.arrows`, one per node |
+
+## Record a job step
+
+Wrap the application in `unjam record` in your batch script:
+
+```sh
+#!/bin/bash
+#SBATCH -N 4 --ntasks-per-node=8
+srun unjam record -o rec/%j.%s-%n.arrows -- ./app args
+```
+
+<Steps>
+
+1. On each node, the first task (`SLURM_LOCALID=0`) starts the application as a child and samples the **whole step on that node** (all its tasks), with processes, every 5 s.
+2. All other tasks simply become the application (`exec`), with no extra process and no cost.
+3. The recorder keeps sampling until the application and everything it left in the step are gone, then writes the last batch and exits with the **application's exit code**.
+
+</Steps>
+
+| Option | Meaning |
+|---|---|
+| `-o PATTERN` | Output file. `%j` job id, `%s` step id, `%n` host name, `%%` a percent sign. Default `unjam-%j.%s-%n.arrows`. Existing files are never overwritten |
+| `-i DUR` | Interval, default `5s` |
+| `--no-procs` | Cgroups only |
+| `--root DIR` | Record this cgroup directory instead of the own step (also works outside Slurm) |
+
+The files are created with mode 0600, because they hold command lines.
+
+<Aside type="tip" title="The job runs even if recording fails">
+If the recorder cannot start (the file exists, the directory is missing, no cgroup2), it prints `unjam: record: <reason>; running unrecorded` and runs your application anyway.
+</Aside>
+
+### Signals and crashes
+
+The recorder does not forward signals: Slurm already signals every process of the step. After SIGTERM, SIGINT or SIGHUP it keeps recording the shutdown of your application for at most 5 s, finishes the file, and exits with 128 + the signal number.
+
+<Figure caption="A journal is a schema message and a series of batches, cut every 10 s or 8,192 rows. Each batch decodes on its own. A SIGKILL, an OOM kill or a node crash loses at most the open batch.">
+  <Batches />
+</Figure>
+
+Outside Slurm, you can record any command. `systemd-run --user --scope` gives it a cgroup of its own:
+
+```sh
+systemd-run --user --scope unjam record -i 1s -o build.arrows -- make -j16
+```
+
+## Record from the viewer
+
+In a live view, <kbd>r</kbd> starts recording into `unjam-rec-<secs>/` in the current directory; <kbd>r</kbd> again stops. With `--slurm`, `--record DIR` starts at once. The header shows `● rec`, or `rec failed` if no file could be opened. At exit, unjam reports the recording on stderr and exits 1 if it failed.
+
+These files hold what the viewer had: the nodes, subtrees and intervals of its rules at that time.
+
+## Replay
+
+```sh
+unjam --replay rec/*.arrows
+```
+
+Give one file per node; they share one timeline. The header shows the cursor time and the recorded interval; line 2 shows the position (`tick 6/40` and the time range).
+
+<Terminal rec="replay" frame={9} />
+
+| Key | Action |
+|---|---|
+| <kbd>space</kbd> | Play and pause |
+| <kbd>,</kbd> <kbd>.</kbd> | One tick back, forward |
+| <kbd>&lt;</kbd> <kbd>&gt;</kbd> | 60 s back, forward |
+| <kbd>g</kbd> <kbd>G</kbd> | Start, end |
+
+Layouts, sort, filter, detail and themes work as in a live view; the sampling keys do nothing.
+
+`--at TIME` starts elsewhere: `start`, `end`, `+DUR` or `-DUR` (from the start or the end), or `HH:MM[:SS]` in UTC. With `--batch N`, replay prints N snapshots from there:
+
+```sh
+unjam --replay rec/*.arrows --at end --batch 1
+unjam --replay rec/*.arrows --at 14:05 --batch 3
+```
+
+At open, replay warns about a truncated file ("truncated at byte N"), a host that appears twice, or files from different jobs or steps.
+
+<Aside type="caution" title="Replay only files you trust">
+A crafted journal can make the Arrow decoder allocate without bound and abort unjam. Treat `.arrows` files like any other input you run a parser on.
+</Aside>

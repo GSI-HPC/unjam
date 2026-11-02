@@ -1,0 +1,74 @@
+---
+title: Command line
+description: Every option of unjam, unjam record and the internal agent.
+---
+
+```text
+unjam [OPTIONS]                       this host
+unjam --slurm[=JOBID] [OPTIONS]       a Slurm job
+unjam --replay FILE.arrows... [OPTIONS]
+unjam record [OPTIONS] -- CMD...      record a job step
+```
+
+`--slurm` and `--replay` exclude each other. Durations take `ms`, `s` and `m` (`500ms`, `2s`, `1m`); digits alone are milliseconds. Intervals are rounded to 100 ms and kept between 100 ms and 60 s.
+
+## Viewer
+
+| Option | Meaning |
+|---|---|
+| `--slurm[=JOBID]` | Attach to a Slurm job. Without a value: `$SLURM_JOB_ID`, else your only running job. **The `=` is required**: `--slurm 4242` is an error |
+| `--replay FILE...` | Replay recordings, one `.arrows` file per node |
+| `--root DIR` | Show this cgroup directory instead of the whole cgroup2 mount (local mode only) |
+| `--interval DUR` | Sampling interval. Default `1s` locally, `2s` with `--slurm` |
+| `--rule RULE` | Sampling rule `TASKS PATH INTERVAL LEVEL`, repeatable; replaces the defaults. Example: `'* . 2s c'`, `'0 step_0 - o'`. See [Control the sampling](/unjam/guide/sampling/) |
+| `--theme NAME` | `nord`, `night`, `mocha`, `gruvbox`, `solar`, `amber` or `mono`. Default from `UNJAM_THEME`, else `nord` |
+| `--batch N` | Print N text snapshots instead of the TUI, then exit |
+| `--at TIME` | With `--replay`: start at `start`, `end`, `+DUR`, `-DUR` or `HH:MM[:SS]` (UTC) |
+| `-h`, `--help` | Help (`-h` short, `--help` long) |
+| `-V`, `--version` | Version |
+
+## Slurm attach (with `--slurm`)
+
+| Option | Meaning |
+|---|---|
+| `--nodelist LIST` | Start agents on these nodes only (Slurm host list syntax) |
+| `--budget SIZE` | Total agent output in bytes per second, with `K`, `M`, `G` suffixes. Default `4M`, split over the nodes |
+| `--agent PATH` | The agent binary on the nodes. Default: this executable's path |
+| `--srun-arg ARG` | One extra srun argument; repeat it for more. Example: `--srun-arg=--partition=debug` |
+| `--bcast[=DIR]` | Copy the agent to `DIR/unjam.<job>.<uid>.<random>` on each node with `srun --bcast`; the agent deletes it at start. Default DIR `/tmp`. DIR must allow executables. The `=` is required |
+| `--record DIR` | Record what the viewer receives from the start, one `.arrows` file per node in DIR |
+| `--print-srun` | Print the srun command line and exit |
+
+## unjam record
+
+```text
+srun unjam record [OPTIONS] -- CMD [ARGS...]
+```
+
+| Option | Meaning |
+|---|---|
+| `-o`, `--output PATTERN` | Output file. `%j` job id, `%s` step id, `%n` host name, `%%` a percent sign; a missing value becomes `na`. Default `unjam-%j.%s-%n.arrows`. Never overwrites |
+| `-i`, `--interval DUR` | Sampling interval, default `5s` |
+| `--no-procs` | Sample cgroups only |
+| `--root DIR` | Sample this cgroup instead of the own step's tasks (in Slurm) or the own cgroup (outside) |
+
+Exit code: the application's, or 128 + signal number after SIGTERM, SIGINT or SIGHUP.
+
+## Environment
+
+| Variable | Effect |
+|---|---|
+| `UNJAM_THEME` | Default theme |
+| `NO_COLOR` | Any value forces the `mono` theme |
+| `SLURM_JOB_ID` | Job for `--slurm` without a value |
+| `SLURM_CONF` | Passed to srun. All other `SLURM_*` and `SRUN_*` variables are removed from srun's environment, so options from an enclosing `salloc` cannot change the agent step |
+
+## unjam agent (internal)
+
+srun starts `unjam agent` on each node. It is hidden from `--help` and not meant to be run by hand.
+
+| Option | Meaning |
+|---|---|
+| `--root DIR` | Sample this cgroup instead of the Slurm job |
+| `--keepalive SECS` | Exit after this many seconds without control input (default 120) |
+| `--unlink-self` | Delete the own executable at start (the `--bcast` copy) |

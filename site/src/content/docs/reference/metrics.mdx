@@ -1,0 +1,63 @@
+---
+title: Metrics and columns
+description: Every metric unjam collects, its source file, unit and kind, and how the table columns use them.
+---
+
+Every metric has a **name**, a **unit** and a **kind**. A `counter` only grows and is shown as a rate; a `gauge` is shown as it is. The agents announce each metric with its unit and kind, so names are the identity on the wire, in the viewer and as Arrow column names. Names are never renamed; new ones are only added.
+
+Missing values (`NA`) appear as `-` in the table, `NA` in the detail view, `-` on the wire and null in recordings.
+
+## Cgroup metrics (`cg_`)
+
+| Name | Source | Unit | Kind |
+|---|---|---|---|
+| `cg_cpu_usage_usec` | `cpu.stat` usage_usec | us | counter |
+| `cg_cpu_user_usec` | `cpu.stat` user_usec | us | counter |
+| `cg_cpu_system_usec` | `cpu.stat` system_usec | us | counter |
+| `cg_cpu_throttled_usec` | `cpu.stat` throttled_usec (cpu controller only) | us | counter |
+| `cg_mem_current_bytes` | `memory.current` | B | gauge |
+| `cg_mem_peak_bytes` | `memory.peak` (Linux 5.19 and later) | B | gauge |
+| `cg_oom_kill` | `memory.events` oom_kill | 1 | counter |
+| `cg_mem_anon_bytes` | `memory.stat` anon | B | gauge |
+| `cg_mem_file_bytes` | `memory.stat` file | B | gauge |
+| `cg_io_read_bytes` | `io.stat` rbytes, summed over disks | B | counter |
+| `cg_io_write_bytes` | `io.stat` wbytes, summed over disks | B | counter |
+| `cg_pids_current` | `pids.current` | 1 | gauge |
+| `cg_psi_cpu_some_usec` | `cpu.pressure` some total | us | counter |
+| `cg_psi_mem_some_usec` | `memory.pressure` some total | us | counter |
+| `cg_psi_io_some_usec` | `io.pressure` some total | us | counter |
+
+The IO sums leave out disks below a device-mapper or md device (LVM, dm-crypt, RAID): the kernel charges such IO again on the lower disk, which would count it twice. In Slurm job cgroups, the io and pids files exist only with `EnableExtraControllers=io,pids`.
+
+A **pressure** counter is the total time in which at least one task of the cgroup waited for that resource. As a rate it reads like a share: 250 ms per second means tasks stalled a quarter of the time.
+
+## Process metrics (`p_`)
+
+| Name | Source | Unit | Kind |
+|---|---|---|---|
+| `p_cpu_user_usec` | `/proc/<pid>/stat` field 14 | us | counter |
+| `p_cpu_system_usec` | `/proc/<pid>/stat` field 15 | us | counter |
+| `p_rss_bytes` | `/proc/<pid>/stat` field 24 × page size | B | gauge |
+| `p_threads` | `/proc/<pid>/stat` field 20 | 1 | gauge |
+| `p_state` | `/proc/<pid>/stat` field 3 (as ASCII) | char | gauge |
+| `p_last_cpu` | `/proc/<pid>/stat` field 39 | 1 | gauge |
+| `p_minflt` | `/proc/<pid>/stat` field 10 | 1 | counter |
+| `p_majflt` | `/proc/<pid>/stat` field 12 | 1 | counter |
+| `p_io_read_bytes` | `/proc/<pid>/io` read_bytes | B | counter |
+| `p_io_write_bytes` | `/proc/<pid>/io` write_bytes | B | counter |
+
+`/proc/<pid>/io` is readable only for your own processes (or with ptrace rights); for others the value is NA. Process CPU times have the resolution of the kernel tick (usually 10 ms), so process CPU% is noisy at short intervals; cgroup CPU is exact to the microsecond.
+
+## Table columns
+
+| Column | Cgroup row | Process row |
+|---|---|---|
+| CPU% | rate of `cg_cpu_usage_usec`, per core | rate of `p_cpu_user_usec` + `p_cpu_system_usec` |
+| MEM | `cg_mem_current_bytes` | `p_rss_bytes` |
+| IO-R/s | rate of `cg_io_read_bytes` | rate of `p_io_read_bytes` |
+| IO-W/s | rate of `cg_io_write_bytes` | rate of `p_io_write_bytes` |
+| PIDS | `cg_pids_current`, else `~` + summed `p_threads` below | `p_threads` |
+
+A rate is the difference of two samples over their time difference. A counter that goes backwards gives NA, never a negative rate. On job and step rows, values of all nodes are summed; a `char` column shows `*` when the nodes differ.
+
+Metrics without a column are in the detail view (<kbd>Enter</kbd>) and in recordings.

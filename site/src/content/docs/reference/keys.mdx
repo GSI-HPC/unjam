@@ -1,0 +1,47 @@
+---
+title: Keys
+description: Every key of the unjam viewer, live and in replay.
+---
+
+## Live view
+
+| Key | Action |
+|---|---|
+| <kbd>↑</kbd> <kbd>↓</kbd> <kbd>k</kbd> <kbd>j</kbd> | Move one row |
+| <kbd>PgUp</kbd> <kbd>PgDn</kbd> | Move one screen |
+| <kbd>Home</kbd> <kbd>End</kbd> <kbd>g</kbd> <kbd>G</kbd> | First, last row |
+| <kbd>←</kbd> <kbd>→</kbd> <kbd>h</kbd> <kbd>l</kbd> | Fold, open (also a folded node range). <kbd>←</kbd> on a leaf or folded row: go to the parent |
+| <kbd>Enter</kbd> | Detail: every value of the row |
+| <kbd>space</kbd> | Mark or unmark the row (a node or cgroup; on a process row, its cgroup) |
+| <kbd>a</kbd> | Clear all marks |
+| <kbd>p</kbd> | Level of the marked rows, or the cursor row: `p` → `c` → `o` → `p` |
+| <kbd>+</kbd> <kbd>-</kbd> | Halve, double the interval of the marked rows, or the cursor row |
+| <kbd>0</kbd> | Reset the rules to the defaults |
+| <kbd>z</kbd> | Pause and resume |
+| <kbd>v</kbd> | Next layout: step → node → flat (locally: tree ↔ flat) |
+| <kbd>s</kbd> <kbd>S</kbd> | Next sort column, reverse the sort |
+| <kbd>/</kbd> | Edit the filter; <kbd>Enter</kbd> keeps it, <kbd>Esc</kbd> clears it |
+| <kbd>r</kbd> | Start or stop recording to `unjam-rec-<secs>/<host>.arrows` |
+| <kbd>t</kbd> | Next theme |
+| <kbd>?</kbd> | Help, per-node table and log |
+| <kbd>q</kbd> <kbd>Ctrl</kbd>+<kbd>C</kbd> | Quit |
+
+## Replay
+
+| Key | Action |
+|---|---|
+| <kbd>space</kbd> | Play, pause |
+| <kbd>,</kbd> <kbd>.</kbd> | One tick back, forward |
+| <kbd>&lt;</kbd> <kbd>&gt;</kbd> | 60 s back, forward |
+| <kbd>g</kbd> <kbd>G</kbd> | Start, end |
+
+Moving (with <kbd>Home</kbd> <kbd>End</kbd> for the first and last row), folding, <kbd>Enter</kbd>, <kbd>v</kbd>, <kbd>s</kbd>, <kbd>/</kbd>, <kbd>t</kbd>, <kbd>?</kbd> and <kbd>q</kbd> work as in a live view. <kbd>p</kbd>, <kbd>+</kbd>, <kbd>-</kbd>, <kbd>0</kbd>, <kbd>r</kbd> and <kbd>z</kbd> do nothing.
+
+## Columns legend
+
+| Column | Meaning |
+|---|---|
+| INT | The interval of the row's rule |
+| W | The level of the row's rule: `p` processes, `c` cgroups, `o` off |
+| PIDS `~N` | No pids controller: the sum of threads of the sampled processes |
+| `-` | No value |

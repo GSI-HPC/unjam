@@ -1,0 +1,63 @@
+---
+title: Watch a host
+description: Run unjam on one Linux host, read its header and table, and limit the view to one subtree.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Terminal from '../../../components/Terminal.astro';
+
+```sh
+unjam
+```
+
+Without options, unjam samples the whole cgroup2 mount at `/sys/fs/cgroup` every second, with processes.
+
+<Terminal rec="host" frame={0} />
+
+## The header
+
+| Line | Shows |
+|---|---|
+| 1 | The source (`unjam` and the host name), the process count, the interval, the layout, the sort column and the clock (UTC). `● rec` while recording, `[paused]` after <kbd>z</kbd>. |
+| 2 | unjam's own cost: `tui` is the CPU and resident memory of the whole unjam process; `in` and `out` are bytes and lines per second between sampler and viewer; `drop` and `err` count lost ticks and decode errors. |
+| 3 | The host: CPU as a share of all CPUs (a row's CPU% is per core, so 200% is two full cores), and memory in use against the total from `/proc/meminfo`. |
+
+## The table
+
+| Column | Cgroup row | Process row |
+|---|---|---|
+| NAME | Directory name; <kbd>▾</kbd> open, <kbd>▸</kbd> folded | The command line (cut with `…`) |
+| PID | | Process id |
+| CPU history | The last 16 CPU samples as bars, coloured by load | Same |
+| CPU% | `cpu.stat` usage of the whole subtree, per core | user + system time from `/proc/<pid>/stat` |
+| MEM | `memory.current` | Resident set size |
+| IO-R/s, IO-W/s | `io.stat` bytes, summed over disks | `/proc/<pid>/io` bytes |
+| PIDS | `pids.current`, or `~` and the summed threads of the sampled processes | Threads |
+| INT, W | The interval and level of the [sampling rule](/unjam/guide/sampling/) | |
+
+`-` means no value: the file does not exist (the controller is off, the kernel is old) or the row is not sampled. A column that is `-` on every visible row is hidden for that screen.
+
+## One subtree only
+
+`--root` limits the view to a cgroup directory. It is cheaper on a big host and keeps the screen calm:
+
+```sh
+unjam --root /sys/fs/cgroup/system.slice
+unjam --root /sys/fs/cgroup/user.slice/user-$(id -u).slice
+```
+
+## A Slurm job from inside the node
+
+On a compute node you can also look at one job locally, without `--slurm`. Find the job's cgroup from one of its processes, then show that directory:
+
+```sh
+pid=$(scontrol listpids 4242 | awk 'NR == 2 { print $1 }')
+cat /proc/$pid/cgroup             # 0::/system.slice/slurmstepd.scope/job_4242/step_0/user/task_0
+unjam --root /sys/fs/cgroup/system.slice/slurmstepd.scope/job_4242
+```
+
+On Slurm 26.05 the job directory has a SLUID name instead of `job_4242`; take it from the same `/proc/<pid>/cgroup` line.
+
+<Aside type="caution" title="cgroup v1">
+On a pure cgroup v1 host, unjam stops with `cgroup v2 only: no cgroup2 hierarchy at /sys/fs/cgroup`. On a hybrid host, point `--root` at the cgroup2 mount (often `/sys/fs/cgroup/unified`).
+</Aside>
