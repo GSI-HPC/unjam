@@ -1,0 +1,252 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+
+# RPM packages of the static release binaries for Rocky Linux 9, Rocky Linux 10 and the latest
+# Fedora (scripts/rpm.sh). Three ways in:
+#   publish.yml calls it for a tag: this run's unjam-linux-* artifacts, the release key.
+#   workflow_dispatch adds RPMs to a published release: its attested binaries, the release key.
+#   pull_request tests the packaging: the newest release's binaries, a throwaway key, and a
+#   dnf install from a local copy of the repository on each distribution.
+name: RPM
+
+on:
+  pull_request:
+    paths:
+      - pkg/rpm/**
+      - scripts/rpm.sh
+      - .github/workflows/rpm.yml
+      - .github/workflows/pages.yml
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag; the binaries are the unjam-linux-* artifacts of this run
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release to add RPMs to (for example v0.2.0)
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    name: Setup
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.mode.outputs.tag }}
+      test: ${{ steps.mode.outputs.test }}
+    steps:
+      - name: Choose the tag and the key
+        id: mode
+        run: |
+          case "$EVENT" in
+            pull_request) tag=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName) test=true ;;
+            *) tag=$TAG test=false ;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "test=$test" >> "$GITHUB_OUTPUT"
+        env:
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+      - name: Make a throwaway signing key
+        if: steps.mode.outputs.test == 'true'
+        run: |
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -m 700 "$GNUPGHOME"
+          gpg --batch --passphrase '' --quick-gen-key 'unjam CI test key' rsa4096 sign never
+          mkdir key
+          gpg --batch --armor --export > key/test.pub
+          gpg --batch --armor --export-secret-keys > key/test.sec
+      - if: steps.mode.outputs.test == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: rpm-test-key
+          path: key
+          retention-days: 1
+
+  build:
+    name: Build (${{ matrix.dist }}, ${{ matrix.arch }})
+    needs: setup
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        dist: [el9, el10, fedora]
+        arch: [amd64, arm64]
+        include:
+          - { dist: el9, image: "quay.io/rockylinux/rockylinux:9" }
+          - { dist: el10, image: "quay.io/rockylinux/rockylinux:10" }
+          - { dist: fedora, image: "quay.io/fedora/fedora:latest" }
+          - { arch: amd64, runner: ubuntu-latest }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    env:
+      TAG: ${{ needs.setup.outputs.tag }}
+      BIN: unjam-linux-${{ matrix.arch }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - if: github.event_name == 'push'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: ${{ env.BIN }}
+      - name: Download the release binary and check its attestation
+        if: github.event_name != 'push'
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$BIN"
+          gh attestation verify "$BIN" --repo "$GITHUB_REPOSITORY"
+      - if: needs.setup.outputs.test == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: rpm-test-key
+          path: ${{ runner.temp }}/key
+      # unjam-release is noarch: build it once per distribution.
+      - name: Build and install the packages
+        run: |
+          [ "$TEST" = true ] && pub=/key/test.pub || pub=pkg/rpm/RPM-GPG-KEY-unjam
+          docker run --rm -v "$PWD:/w" -v "$RUNNER_TEMP/key:/key" -w /w \
+            -e "RPM_PUBLIC_KEY=$pub" -e "TAG=$TAG" -e "BIN=$BIN" -e "RELEASE=$RELEASE" \
+            "$IMAGE" sh -euc '
+              dnf -y -q install rpm-build
+              scripts/rpm.sh build "${TAG#v}" "$BIN" out
+              [ "$RELEASE" = true ] && scripts/rpm.sh release "${TAG#v}" out
+              rpm -i --nosignature out/*.rpm
+              unjam --version | grep -Fx "unjam ${TAG#v}"
+              cmp /usr/bin/unjam "$BIN"
+              ls -l out'
+        env:
+          IMAGE: ${{ matrix.image }}
+          TEST: ${{ needs.setup.outputs.test }}
+          RELEASE: ${{ matrix.arch == 'amd64' }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: rpm-unsigned-${{ matrix.dist }}-${{ matrix.arch }}
+          path: out/*.rpm
+          if-no-files-found: error
+          retention-days: 1
+
+  # Sign all packages with one rpmsign (EL 10): its v4 signatures verify on EL 9, EL 10 and
+  # Fedora. The release key is a secret of the rpm-signing environment, never of a PR run.
+  sign:
+    name: Sign
+    needs: [setup, build]
+    runs-on: ubuntu-latest
+    environment: ${{ needs.setup.outputs.test != 'true' && 'rpm-signing' || '' }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          pattern: rpm-unsigned-*
+          path: rpms
+          merge-multiple: true
+      - if: needs.setup.outputs.test == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: rpm-test-key
+          path: ${{ runner.temp }}/key
+      - name: Sign and verify
+        run: |
+          if [ "$TEST" = true ]; then
+            pub=/key/test.pub
+            RPM_SIGNING_KEY=$(cat "$RUNNER_TEMP/key/test.sec")
+            export RPM_SIGNING_KEY
+          else
+            pub=pkg/rpm/RPM-GPG-KEY-unjam
+          fi
+          docker run --rm -v "$PWD:/w" -v "$RUNNER_TEMP/key:/key" -w /w \
+            -e "RPM_PUBLIC_KEY=$pub" -e RPM_SIGNING_KEY quay.io/rockylinux/rockylinux:10 sh -euc '
+              dnf -y -q install rpm-sign gnupg2
+              scripts/rpm.sh sign rpms/*.rpm'
+        env:
+          TEST: ${{ needs.setup.outputs.test }}
+          RPM_SIGNING_KEY: ${{ needs.setup.outputs.test != 'true' && secrets.RPM_SIGNING_KEY || '' }}
+      - if: needs.setup.outputs.test != 'true'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-path: rpms/*.rpm
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: rpms
+          path: rpms/*.rpm
+          if-no-files-found: error
+
+  # The user's path on each distribution: install unjam-release, then `dnf install unjam` with
+  # signature checks on the packages and the repository metadata.
+  e2e:
+    name: dnf install (${{ matrix.dist }}, ${{ matrix.arch }})
+    needs: [setup, sign]
+    if: needs.setup.outputs.test == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        dist: [el9, el10, fedora]
+        arch: [amd64, arm64]
+        include:
+          - { dist: el9, image: "quay.io/rockylinux/rockylinux:9" }
+          - { dist: el10, image: "quay.io/rockylinux/rockylinux:10" }
+          - { dist: fedora, image: "quay.io/fedora/fedora:latest" }
+          - { arch: amd64, runner: ubuntu-latest }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: rpms
+          path: rpms
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: rpm-test-key
+          path: ${{ runner.temp }}/key
+      - name: Build the repository
+        run: |
+          RPM_SIGNING_KEY=$(cat "$RUNNER_TEMP/key/test.sec")
+          export RPM_SIGNING_KEY
+          docker run --rm -v "$PWD:/w" -v "$RUNNER_TEMP/key:/key" -w /w \
+            -e RPM_PUBLIC_KEY=/key/test.pub -e RPM_SIGNING_KEY quay.io/rockylinux/rockylinux:10 sh -euc '
+              dnf -y -q install createrepo_c gnupg2
+              scripts/rpm.sh repo site/rpm rpms/*.rpm'
+      - name: Install from the repository
+        run: |
+          python3 -m http.server 8080 --directory site --bind 127.0.0.1 &
+          docker run --rm --network host -v "$PWD/site:/site:ro" -e "DIST=$DIST" "$IMAGE" sh -euc '
+            dnf -y install "/site/rpm/unjam-release-$DIST.noarch.rpm"
+            sed -i "s|https://gsi-hpc.github.io/unjam|http://127.0.0.1:8080|" /etc/yum.repos.d/unjam.repo
+            dnf -y install unjam
+            unjam --version
+            rpm -q --qf "%{NEVRA} %{RSAHEADER:pgpsig}\n" unjam unjam-release'
+        env:
+          DIST: ${{ matrix.dist }}
+          IMAGE: ${{ matrix.image }}
+
+  # A manual run for a published release: attach the RPMs and rebuild the repository.
+  upload:
+    name: Upload to the release
+    needs: [setup, sign]
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    env:
+      TAG: ${{ needs.setup.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: rpms
+          path: rpms
+      - name: Attach the RPMs and their checksums
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern checksums.txt
+          (cd rpms && sha256sum -- *.rpm) >> checksums.txt
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" rpms/*.rpm
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber checksums.txt
+      - run: gh workflow run pages.yml --repo "$GITHUB_REPOSITORY" --ref main
