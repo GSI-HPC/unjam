@@ -36,23 +36,19 @@ jobs:
     name: Docs
     if: github.event_name != 'release'
     runs-on: ubuntu-latest
+    env:
+      MISE_TASK_RUN_AUTO_INSTALL: "false"
     steps:
-      # Placeholder until the docs site exists: a root page that points to the repository.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d  # v5.2.4
+        with:
+          install_args: node
       - name: Build the docs site
-        run: |
-          mkdir site
-          cat > site/index.html <<EOF
-          <!doctype html>
-          <meta charset="utf-8">
-          <title>unjam</title>
-          <meta http-equiv="refresh" content="0; url=https://github.com/$GITHUB_REPOSITORY">
-          <p><a href="https://github.com/$GITHUB_REPOSITORY">unjam on GitHub</a> ·
-          <a href="rpm/">RPM packages</a></p>
-          EOF
+        run: mise run docs
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: site-docs
-          path: site
+          path: site/dist
           retention-days: 1
 
   repo:
