@@ -16,12 +16,12 @@ cgroup.rs   164  # UX review: a missing --root says "does not exist"
 procfs.rs   145  # Ident for P lines, the host, btime, auxv and limits readers, usage()
 agent.rs    481  # stored P identity for S resyncs, pid reuse, moves and execs, T in the writer path
 wire.rs     211  # measured; it was already 211 against 200, within the 10 % tolerance
-slurm.rs    199  # UX review: job name in the header, clear squeue and --bcast errors
+slurm.rs    220  # MPI structure: the squeue --steps thread for task counts (D44)
 record.rs   602  # UX review: replay warnings and interval, strict --at, rec failed, stale-node skip
-state.rs    521  # TUI polish: no last-child guide on a set cut at the window
-tui.rs      880  # TUI polish: header and footer cut whole fields, styled key hints, right-aligned headings
+state.rs    645  # MPI structure: step task sets, the step row text, map cells (D44)
+tui.rs     1004  # MPI structure: the map pane on m (D44)
 theme.rs     65  # UX review: UNJAM_THEME named in its error
-total      3735  # TUI polish (+30, tui and state); was 3705 after the v0.2 UX review (owner)
+total      4004  # MPI tasks (+269, D44); was 3735 after the TUI polish
 
 # Release binary (bytes) and resolved normal dependencies (crates, root excluded) on
 # x86_64-unknown-linux-gnu. Re-baselined from measurement (+5 %) by the change that needs it.

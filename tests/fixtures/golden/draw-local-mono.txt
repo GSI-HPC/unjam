@@ -11,4 +11,4 @@
 
 
 
- ? help q quit ↑↓ move ←→ fold ␣ mark p level +/- rate v layout s sort / filter r record t theme
+ ? help q quit ↑↓ move ←→ fold m map ␣ mark p level +/- rate v layout s sort / filter r record

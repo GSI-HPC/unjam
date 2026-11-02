@@ -118,7 +118,8 @@ pub fn rate(kind: Kind, v: u64, pv: u64, dt_ms: u64) -> Option<f64> {
     }
 }
 
-/// A cgroup: tree links, its processes (sorted pids), values and the derived thread sum.
+/// A cgroup: tree links, its processes (sorted pids), values, the derived thread sum, and for
+/// a `task_<N>` cgroup its step's key and task id.
 #[derive(Debug, Default, PartialEq)]
 pub struct Cg {
     pub parent: u64,
@@ -127,6 +128,7 @@ pub struct Cg {
     pub procs: Vec<u32>,
     pub vals: Vals,
     pub threads: u64,
+    pub task: Option<(u64, u32)>,
 }
 
 /// A process with its `P` fields and values.
@@ -138,6 +140,54 @@ pub struct Proc {
     pub comm: Box<str>,
     pub cmd: Box<str>,
     pub vals: Vals,
+}
+
+/// Task ids at most this large have presence bits: bounds the sets that a crafted
+/// line could grow (4M ids, 512 KiB).
+const IDS: u32 = 1 << 22;
+
+/// One bit per id: sets of tasks.
+#[derive(Debug, Default, PartialEq)]
+pub struct Bits(Vec<u64>);
+
+impl Bits {
+    /// Sets or clears bit `i`; ids from `IDS` on are not kept.
+    fn set(&mut self, i: u32, on: bool) {
+        let (w, b) = ((i / 64) as usize, 1u64 << (i % 64));
+        if i < IDS && (on || w < self.0.len()) {
+            self.0.resize(self.0.len().max(w + 1), 0);
+            self.0[w] = if on { self.0[w] | b } else { self.0[w] & !b };
+        }
+    }
+
+    /// Whether id `i` is in the set.
+    pub fn has(&self, i: u32) -> bool {
+        self.0.get((i / 64) as usize).is_some_and(|w| w & (1 << (i % 64)) != 0)
+    }
+
+    /// The number of ids in the set.
+    pub fn count(&self) -> u32 {
+        self.0.iter().map(|w| w.count_ones()).sum()
+    }
+
+    /// One past the highest id set.
+    #[allow(clippy::cast_possible_truncation, reason = "at most IDS")]
+    pub fn end(&self) -> u32 {
+        let top = self.0.iter().rposition(|&w| w != 0);
+        top.map_or(0, |w| w as u32 * 64 + 64 - self.0[w].leading_zeros())
+    }
+}
+
+/// A Slurm step's tasks (D44): its name in the step layout, the count `squeue` expects and its
+/// job step name, and which task ids
+/// the TUI has seen and which exist now; seen and not live is gone.
+#[derive(Debug, Default, PartialEq)]
+pub struct Step {
+    pub key: Box<str>,
+    pub expect: Option<u32>,
+    pub name: Box<str>,
+    pub seen: Bits,
+    pub live: Bits,
 }
 
 /// One agent's view: identity, column map from its `D` table, entities and liveness stats.
@@ -169,11 +219,12 @@ pub struct Node {
     stale: (HashSet<u64>, HashSet<u32>),
 }
 
-/// The TUI data store filled by every feed.
+/// The TUI data store filled by every feed, with the steps' task sets.
 #[derive(Debug, PartialEq)]
 pub struct State {
     pub cols: Columns,
     pub nodes: Vec<Node>,
+    pub steps: HashMap<u64, Step>,
 }
 
 impl State {
@@ -185,7 +236,7 @@ impl State {
                 cols.intern(ent, n, "", Kind::Gauge);
             }
         }
-        Self { cols, nodes: Vec::new() }
+        Self { cols, nodes: Vec::new(), steps: HashMap::new() }
     }
 
     /// The single mutation path. `Err` means the line does not fit what the node announced
@@ -211,15 +262,28 @@ impl State {
                 n.tick([ts_ms, self_cpu_us, out_bytes], self_rss, now);
                 n.dropped = dropped;
                 let stale = std::mem::take(&mut n.stale);
-                stale.0.into_iter().for_each(|id| n.cg_gone(id));
+                stale.0.into_iter().for_each(|id| mark(&mut self.steps, n.cg_gone(id), false));
                 stale.1.into_iter().for_each(|pid| n.unlink(pid));
             }
-            Event::Cg { id, parent, path } => n.cg(id, parent, path),
+            Event::Cg { id, parent, path } => {
+                n.cg(id, parent, path);
+                let task = n.task(id).map(|(s, i)| {
+                    let step = self.steps.entry(hash(s)).or_default();
+                    if step.key.is_empty() {
+                        step.key = s.into();
+                    }
+                    (hash(s), i)
+                });
+                if let Some(c) = n.cgs.get_mut(&id).filter(|c| c.task != task) {
+                    mark(&mut self.steps, std::mem::replace(&mut c.task, task), false);
+                    mark(&mut self.steps, task, true);
+                }
+            }
             Event::CgVals { id, first, v } => {
                 let c = n.cgs.get_mut(&id).ok_or(())?;
                 c.vals.line(&n.cmap[0], n.prev[0], first, v, |x| x.get(0, Kind::Counter))?;
             }
-            Event::CgGone(id) => n.cg_gone(id),
+            Event::CgGone(id) => mark(&mut self.steps, n.cg_gone(id), false),
             Event::Proc { .. } => n.proc(ev),
             Event::ProcVals { pid, first, v } => {
                 n.procs.get_mut(&pid).ok_or(())?.vals.line(&n.cmap[1], n.prev[0], first, v, cpu)?;
@@ -246,6 +310,14 @@ impl State {
             }
         }
     }
+}
+
+/// A task cgroup `t` (step key, task id) appeared (`on`) or went: sets its live and seen bits.
+fn mark(steps: &mut HashMap<u64, Step>, t: Option<(u64, u32)>, on: bool) {
+    let Some((h, id)) = t else { return };
+    let s = steps.entry(h).or_default();
+    s.live.set(id, on);
+    s.seen.set(id, on || s.seen.has(id));
 }
 
 /// Column id of `p_threads`.
@@ -299,10 +371,28 @@ impl Node {
         self.stale.0.remove(&id);
     }
 
-    /// Removes a cgroup and its link from its parent (`X`, or not re-announced by a resync).
-    fn cg_gone(&mut self, id: u64) {
-        let parent = self.cgs.remove(&id).map_or(0, |c| c.parent);
-        self.cgs.entry(parent).and_modify(|p| p.kids.retain(|&k| k != id));
+    /// Removes a cgroup and its link from its parent (`X`, or not re-announced by a resync);
+    /// returns its task, if it was one.
+    fn cg_gone(&mut self, id: u64) -> Option<(u64, u32)> {
+        let c = self.cgs.remove(&id)?;
+        self.cgs.entry(c.parent).and_modify(|p| p.kids.retain(|&k| k != id));
+        c.task
+    }
+
+    /// The step and task id of a `task_<N>` cgroup: its step is the root kid above it, named
+    /// as the step layout names it (D44).
+    fn task(&self, id: u64) -> Option<(&str, u32)> {
+        let n = seg(&self.cgs.get(&id)?.path).strip_prefix("task_")?;
+        let n = n.parse().ok().filter(|_| n.bytes().all(|b| b.is_ascii_digit()))?;
+        let mut at = id;
+        for _ in 0..64 {
+            let c = self.cgs.get(&at)?;
+            if c.parent == self.root {
+                return Some((step_name(self, c), n));
+            }
+            at = c.parent;
+        }
+        None
     }
 
     /// Adds a process or moves it to its new cgroup; a re-announced process keeps its values.
@@ -510,7 +600,9 @@ impl<'a> Walk<'a, '_> {
                         None => steps.push((name, vec![m])),
                     }
                 }
-                out.extend(steps.iter().map(|(s, m)| agg(Key::Step(hash(s)), Cow::Borrowed(s), m)));
+                out.extend(
+                    steps.iter().map(|(s, m)| agg(Key::Step(hash(s)), label(self.st, s), m)),
+                );
             }
             Key::Step(h) => out.extend(self.members(Some(h)).map(|m| m.1)),
             Key::Cg(_, id) => {
@@ -539,12 +631,8 @@ impl<'a> Walk<'a, '_> {
         let all = per_node.flat_map(|(i, n, root)| {
             root.kids.iter().filter_map(move |k| Some((i, n, *k, n.cgs.get(k)?)))
         });
-        let name = |n: &'a Node, c: &'a Cg| match seg(&c.path) {
-            s if s.starts_with("task_") && !n.step.is_empty() => &*n.step,
-            s => s,
-        };
-        all.filter(move |(_, n, _, c)| step.is_none_or(|h| hash(name(n, c)) == h))
-            .map(move |(i, n, k, c)| (name(n, c), self.cg(i, k, c, Some(&n.host))))
+        all.filter(move |(_, n, _, c)| step.is_none_or(|h| hash(step_name(n, c)) == h))
+            .map(move |(i, n, k, c)| (step_name(n, c), self.cg(i, k, c, Some(&n.host))))
     }
 
     /// Flat layout: every process, plus leaf cgroups whose processes are not sampled (with no
@@ -621,6 +709,81 @@ fn agg<'a>(key: Key, name: Cow<'a, str>, m: &[Row<'a>]) -> Row<'a> {
         r.approx |= x.approx;
     }
     r
+}
+
+/// A step row's name with its tasks against the count `squeue` expects (`?` when guessed from
+/// the highest id seen) and the absent ones, `step_0 su3 · 4093/4096 tasks ✕3` (D44).
+fn label<'a>(st: &State, s: &'a str) -> Cow<'a, str> {
+    let Some(t) = st.steps.get(&hash(s)).filter(|t| t.seen.count() > 0) else { return s.into() };
+    let (live, all) = (t.live.count(), t.expect.unwrap_or_else(|| t.seen.end()));
+    let q = if t.expect.is_some() { "" } else { "?" };
+    let own = s.strip_prefix("step_").is_none_or(|id| *t.name != *id) && !t.name.is_empty();
+    let name = if own { format!(" {}", t.name) } else { String::new() };
+    let gone = all.saturating_sub(live);
+    let x = if gone > 0 { format!(" ✕{gone}") } else { String::new() };
+    format!("{s}{name} · {live}/{all}{q} tasks{x}").into()
+}
+
+/// What the map pane shows (D44): a step's tasks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Of {
+    Step(u64),
+}
+
+impl State {
+    /// Takes a step's task count and name from `squeue` (`4821937.0` is `step_0`).
+    pub fn expect(&mut self, id: &str, tasks: u32, name: &str) {
+        let Some((_, step)) = id.split_once('.') else { return };
+        let s = self.steps.entry(hash(&format!("step_{step}"))).or_default();
+        (s.expect, s.name) = (Some(tasks), name.into());
+    }
+
+    /// The map pane's target for a row: the step above it, if that step has tasks.
+    pub fn of(&self, r: &Row) -> Option<Of> {
+        let n = self.nodes.get(r.node as usize)?;
+        let cg = match r.key {
+            Key::Step(h) | Key::Folded(h) => {
+                return self.steps.contains_key(&h).then_some(Of::Step(h));
+            }
+            Key::Job => return None,
+            Key::Proc(_, pid) => n.procs.get(&pid)?.cg,
+            Key::Cg(_, id) => id,
+        };
+        let mut up = std::iter::successors(Some(cg), |c| Some(n.cgs.get(c)?.parent)).take(64);
+        let top = up.find(|c| n.cgs.get(c).is_some_and(|c| c.parent == n.root))?;
+        let h = hash(step_name(n, n.cgs.get(&top)?));
+        self.steps.contains_key(&h).then_some(Of::Step(h))
+    }
+
+    /// The map pane's cells, sorted by node and id: node, task id, CPU % and memory bytes (NaN
+    /// where a stale node or level `o` gives none). The ids are the present ones.
+    pub fn cells(&self, v: &View, of: Of) -> Vec<(u32, u32, [f64; 2])> {
+        let mut out = Vec::new();
+        for (i, n) in (0..).zip(&self.nodes) {
+            let dead = v.stale.get(i as usize) == Some(&true);
+            match of {
+                Of::Step(h) => out.extend(n.cgs.values().filter_map(|c| {
+                    let (_, id) = c.task.filter(|t| t.0 == h)?;
+                    let off = dead
+                        || !v.rules.is_empty() && effective(&v.rules, i, &c.path).1 == What::Off;
+                    let (cpu, mem) = (c.vals.get(0, Kind::Counter), c.vals.get(1, Kind::Gauge));
+                    let val = |x: Option<f64>| x.filter(|_| !off).unwrap_or(f64::NAN);
+                    Some((i, id, [val(cpu.map(|c| c / 1e4)), val(mem)]))
+                })),
+            }
+        }
+        out.sort_unstable_by_key(|c| (c.0, c.1));
+        out
+    }
+}
+
+/// The step a job-level cgroup `c` stands for: its name, or below a step root (`unjam record`
+/// journals, whose root kids are tasks) the node's step, `4242.1`.
+fn step_name<'a>(n: &'a Node, c: &'a Cg) -> &'a str {
+    match seg(&c.path) {
+        s if s.starts_with("task_") && !n.step.is_empty() => &n.step,
+        s => s,
+    }
 }
 
 /// The last path segment: what the NAME column shows for a cgroup.
@@ -786,6 +949,31 @@ mod tests {
     }
 
     #[test]
+    fn step_tasks_go_missing_or_gone() {
+        let mut st = State::new();
+        feed(&mut st, 0, DESC);
+        let g = ["G 1 0 ", "G 2 1 step_0", "G 3 2 step_0/user", "G 4 3 step_0/user/task_0"];
+        let more = ["G 5 3 step_0/user/task_1", "G 6 3 step_0/user/task_special", "G 7 1 x"];
+        feed(&mut st, 0, &[&g[..], &more[..]].concat());
+        let step = |st: &State| rows(st, &view(Layout::Step), 2)[1].name.to_string();
+        assert_eq!(step(&st), "step_0 · 2/2? tasks", "no squeue: the highest id plus 1");
+        st.expect("42.0", 4, "su3");
+        st.expect("42.batch", 1, "batch");
+        assert_eq!(step(&st), "step_0 su3 · 2/4 tasks ✕2");
+        feed(&mut st, 0, &["X 5"]);
+        assert_eq!(step(&st), "step_0 su3 · 1/4 tasks ✕3");
+        let s = &st.steps[&hash("step_0")];
+        assert_eq!(
+            (s.seen.has(1), s.live.has(1), s.seen.has(2), &*s.key),
+            (true, false, false, "step_0")
+        );
+        assert_eq!(st.of(&rows(&st, &view(Layout::Step), 2)[1]), Some(Of::Step(hash("step_0"))));
+        let ids: Vec<_> =
+            st.cells(&view(Layout::Step), Of::Step(hash("step_0"))).iter().map(|c| c.1).collect();
+        assert_eq!(ids, [0], "the map has the present tasks");
+    }
+
+    #[test]
     fn layouts_of_an_empty_store() {
         for layout in [Layout::Step, Layout::Node, Layout::Flat] {
             assert!(rows(&State::new(), &view(layout), 100).len() <= 1, "{layout:?}");
@@ -818,7 +1006,7 @@ mod tests {
             dump(&rows(&st, &view(Layout::Step), usize::MAX)),
             "\
 - job 42 270
-  - step_0 240
+  - step_0 · 3/11? tasks ✕8 240
     - n2 160
       - task_0 120
           ./a.out -n 4 100
@@ -844,13 +1032,19 @@ mod tests {
         let mut v = view(Layout::Step);
         v.rules = ["*\t.\t1000\tp", "1\tstep_0\t-\to"].map(|r| Rule::parse(r).unwrap()).into();
         let text = dump(&rows(&st, &v, 4));
-        assert_eq!(text, "- job 42 270\n  - step_0 80\n    - n10 80\n      - task_0 60\n");
+        assert_eq!(
+            text,
+            "- job 42 270\n  - step_0 · 3/11? tasks ✕8 80\n    - n10 80\n      - task_0 60\n"
+        );
         let n2 = rows(&st, &v, usize::MAX).into_iter().find(|r| r.name == "n2").unwrap();
         assert!(n2.v[0].is_nan() && n2.hist == [0; HIST], "n2's step_0 is off");
         v.rules.truncate(1);
         v.stale = vec![false, true];
         let text = dump(&rows(&st, &v, 3));
-        assert_eq!(text, "- job 42 90\n  - step_0 80\n    - n10 80\n", "n2 is stale");
+        assert_eq!(
+            text, "- job 42 90\n  - step_0 · 3/11? tasks ✕8 80\n    - n10 80\n",
+            "n2 is stale"
+        );
     }
 
     #[test]
@@ -890,7 +1084,7 @@ mod tests {
         feed(&mut st, 0, &["G 1 0 ", "G 2 1 task_0"]);
         let rows = rows(&st, &view(Layout::Step), 9);
         let names: Vec<_> = rows.iter().map(|r| r.name.to_string()).collect();
-        assert_eq!(names, ["job 4242", "4242.1", "n1"], "not task_0");
+        assert_eq!(names, ["job 4242", "4242.1 · 1/1? tasks", "n1"], "not task_0");
     }
 
     #[test]
@@ -902,7 +1096,7 @@ mod tests {
             dump(&rows(&st, &v, usize::MAX)),
             "\
 - job 42 270
-  + step_0 240
+  + step_0 · 3/11? tasks ✕8 240
   - step_batch 0
       n2 0
       n10 0
@@ -911,7 +1105,10 @@ mod tests {
         v.toggled.clear();
         (v.desc, v.filter) = (false, "task_".into());
         let names: Vec<_> = rows(&st, &v, usize::MAX).iter().map(|r| r.name.to_string()).collect();
-        assert_eq!(names[..6], ["job 42", "step_0", "n10", "task_10", "task_0", "kworker"]);
+        assert_eq!(
+            names[..6],
+            ["job 42", "step_0 · 3/11? tasks ✕8", "n10", "task_10", "task_0", "kworker"]
+        );
         v.filter = "TASK_0".into();
         let hit = dump(&rows(&st, &v, usize::MAX));
         assert!(hit.contains("task_0 120\n          kworker 20\n          ./a.out"), "{hit}");
@@ -936,7 +1133,7 @@ mod tests {
             dump(&rows),
             "\
 - job 42 1350
-  - step_0 1200
+  - step_0 · 3/11? tasks ✕8 1200
     + n1 400
     + n2 320
     + n3 … n5 (3 folded) 480

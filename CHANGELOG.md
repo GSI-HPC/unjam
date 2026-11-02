@@ -10,6 +10,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- A Slurm step row shows its tasks against the count from `squeue`, `step_0 su3 · 4093/4096 tasks ✕3`; `?` marks a count guessed from the task ids (replay).
+- `m` opens a map of the cursor row's step: one cell per task, grouped by node, with the CPU spread and the missing and gone tasks. It works in replay.
+
 ## [0.3.0] - 2026-11-02
 
 ### Added
