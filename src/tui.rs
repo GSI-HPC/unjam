@@ -805,8 +805,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         [1, 1, 1, 0, 1].map(|h| if h == 0 { Constraint::Fill(1) } else { Constraint::Length(h) });
     let [head, mon, strip, body, foot] = Split::vertical(sizes).areas(area);
     let ([l0, l1], err) = (title(app), app.st.nodes.iter().any(|n| n.errors > 0));
-    f.render_widget(Paragraph::new(l0).style(t.header), head);
-    f.render_widget(Paragraph::new(l1).style(if err { t.crit } else { t.dim }), mon);
+    let w = usize::from(area.width);
+    f.render_widget(Paragraph::new(fit(&l0, "  ", w)).style(t.header), head);
+    let style = if err { t.crit } else { t.dim };
+    f.render_widget(Paragraph::new(fit(&l1, " · ", w)).style(style), mon);
     f.render_widget(Paragraph::new(Line::from(strip_line(app, t, strip.width))), strip);
     let height = usize::from(body.height.saturating_sub(1));
     app.view.window = height.saturating_sub(4).max(4);
@@ -843,6 +845,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         let text = Paragraph::new(lines.join("\n")).wrap(Wrap { trim: false });
         f.render_widget(text.block(block), pop);
     }
+}
+
+/// The longest prefix of `s` that fits `width` cells and ends before a `sep`: a narrow
+/// terminal drops whole header fields from the end instead of cutting the clock or a value.
+fn fit<'a>(s: &'a str, sep: &str, width: usize) -> &'a str {
+    let prefixes = s.match_indices(sep).map(|(i, _)| &s[..i]).chain([s]);
+    prefixes.take_while(|p| p.chars().count() <= width).last().unwrap_or(s)
 }
 
 /// Local mode: host CPU history and memory gauge (nord-host mock); Slurm mode: the node heat
@@ -1163,6 +1172,16 @@ mod tests {
         assert!(text.contains(" p_threads                                 3     3"), "{text}");
         let job = detail(&app, &rows[0]).join("\n");
         assert!(job.starts_with(" job 42: sums over its nodes\n\n CPU%  "), "{job}");
+    }
+
+    #[test]
+    fn header_lines_drop_whole_fields() {
+        assert_eq!(fit("unjam  4/4 nodes  12:00:00Z", "  ", 26), "unjam  4/4 nodes");
+        assert_eq!(fit("unjam  4/4 nodes  12:00:00Z", "  ", 27), "unjam  4/4 nodes  12:00:00Z");
+        assert_eq!(
+            fit("tui 1.0% 5M · drop 0 err 0 · agents", " · ", 30),
+            "tui 1.0% 5M · drop 0 err 0"
+        );
     }
 
     #[test]
