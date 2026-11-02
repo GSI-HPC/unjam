@@ -6,14 +6,14 @@ description: Unit tests on captured fixture trees, golden screens, the 1,000-age
 unjam has three test layers: **unit tests** in each module, run against real files captured from Slurm nodes; **the budget test**, which keeps the code small; and **integration tests** on real Slurm clusters in Docker, made with [sind](https://github.com/GSI-HPC/sind).
 
 ```sh
-mise run test     # unit tests and tests/budget.rs
+mise run test     # unit tests, tests/budget.rs and tests/record.rs
 mise run bench    # benchmarks (release build, report only)
 mise run it       # integration: create a sind cluster, test, delete it
 ```
 
 ## Fixtures
 
-Every reader takes its `/proc` root and cgroup root from `Env`, so tests run against files in `tests/fixtures/`, captured from sind workers:
+Every reader takes its `/proc` root from `Env` and its cgroup directory from `Target`, so tests run against files in `tests/fixtures/`, captured from sind workers:
 
 | Fixture | Holds |
 |---|---|
@@ -21,7 +21,7 @@ Every reader takes its `/proc` root and cgroup root from `Env`, so tests run aga
 | `cgroup/25.11` | A Slurm 25.11 job tree (`job_42`) with `EnableExtraControllers=io,pids` |
 | `cgroup/26.05-sluid` | The same tree with a SLUID job directory |
 | `cgroup/no-controllers` | A job tree as default Slurm leaves it: no `io.stat`, `pids.current`, `memory.peak` or pressure files |
-| `golden/*.txt` | Expected `--batch` output and draw buffers (`mono` theme) |
+| `golden/*.txt` | Expected `--batch` output, draw buffers (`mono` theme) and the style table of every theme |
 
 ## Unit tests
 
@@ -31,13 +31,13 @@ Every reader takes its `/proc` root and cgroup root from `Env`, so tests run aga
 | Slurm layout | `job_root` and `record_root` on 25.11, 26.05-SLUID, `node1_slurmstepd.scope`, and a `0::/` namespace root, which must fail |
 | Rules | `pattern_match`, `effective` and `TaskSet` tables; `Rule::parse` refuses `- p` and `500 o`; `next_due` on an exact multiple returns the **next** multiple |
 | Sampler | Timer grouping; pid reuse gives `x` then `P`; a recreated cgroup gives `X` then `G`; the fd-cache tiers at `cap − cap/8` and `cap`; a failed self-check gives cap 0; the fork-storm rule parses |
-| **Zero allocations** | A counting allocator (the one test-only `unsafe`) proves that 100 steady-state ticks of sample and encode allocate **nothing** |
+| **Zero allocations** | A counting allocator (the one test-only `unsafe`) proves that 100 steady-state rounds of sample and encode (a tick without its discovery walk) allocate **nothing**, and bounds the walk at 2 allocations per directory entry |
 | Writer path | A blocked writer drops values and keeps structure; the budget limits bytes per second; the stagger formula |
 | Wire | Round trip of every line type, the 1000-byte cap, value splitting, string cleaning, extra trailing fields ignored |
-| **Mux** | 1,000 simulated agents. Their output is cut into whole-line chunks of at most 1024 bytes (slurmstepd's behaviour), interleaved randomly into one reader, and decoded into `State`. Every node's state must equal the reference exactly. One corrupt line must cause exactly one resync |
+| **Mux** | 1,000 simulated agents. Their output is cut into whole-line chunks of at most 1024 bytes (slurmstepd's behaviour), interleaved randomly into one reader, and decoded into `State`. Every node's state must equal the reference exactly |
 | srun line | Golden argv for the default, `--nodelist`, `--srun-arg` and the keepalive forward |
 | Record | Schema and field metadata; keyframes on the first row per batch; a cut at 8,192 rows; seeking to the middle equals linear replay; a journal truncated at **200 random offsets** always gives its valid prefix and never panics |
-| State and viewer | Golden rows for the three layouts (fold, sibling sort with NA last, cross-node sums, folded node ranges); history ring wrap; heat strip grouping; the `~` PIDS fallback; hidden all-NA columns; `draw` against ratatui's `TestBackend`; `NO_COLOR` gives `mono`; `--batch` text |
+| State and viewer | Golden rows for the three layouts (fold, sibling sort with NA last, cross-node sums, folded node ranges); history ring wrap; heat strip grouping; the `~` PIDS fallback; hidden all-NA columns; `draw` against ratatui's `TestBackend`; `NO_COLOR` gives `mono`; `--batch` text; corrupt lines ask for one resync per 10 s |
 
 There are **no dev-dependencies**: tests use std, `TestBackend`, fixture trees and a small xorshift generator.
 
@@ -75,4 +75,4 @@ The nodes run the static musl binary, because the node images can have an older 
 | 7 | Record killed | After `scancel --signal=TERM`: a complete journal. After SIGKILL: at least one complete batch, and replay warns "truncated at byte N" once |
 | 8 | `--bcast` | 3 nodes report from a binary that exists only on the submitter; no copy is left on any worker |
 
-Each check prints `ok` or `not ok` and the run continues, so one failure shows every other result too. On failure, CI uploads the cluster's logs.
+Each check prints `ok` or `not ok` and the run continues, so one failure shows every other result too. On failure, CI uploads the test captures and sind's event log.

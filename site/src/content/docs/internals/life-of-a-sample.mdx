@@ -6,15 +6,15 @@ description: Follow one CPU value from a cgroup file on a compute node to a cell
 import Figure from '../../../components/Figure.astro';
 import LifeOfSample from '../../../components/diagrams/LifeOfSample.astro';
 
-This page follows one value, `usage_usec` of a task cgroup on `node3`, from the kernel to the CPU% cell in the viewer. The same path serves every mode; only the transport between the agent and the viewer changes.
+This page follows one value, `usage_usec` of a task cgroup on `node3`, from the kernel to the CPU% cell in the viewer. Local and Slurm modes share this path; only the transport between the agent and the viewer changes. Record and replay take shortcuts, listed at the end.
 
-<Figure caption="Twelve steps, six on the node and six in the viewer. Nothing on the agent side allocates in steady state, and nothing on the viewer side is computed for rows that are not visible.">
+<Figure caption="Twelve steps, six on the node and six in the viewer. Sampling and encoding on the agent side allocate nothing in steady state (only the discovery walk does), and nothing on the viewer side is computed for rows that are not visible.">
   <LifeOfSample />
 </Figure>
 
 ## On the node
 
-**1. The timer fires.** `Sampler::tick(now, emit)` collects the intervals whose deadline has passed and moves each to its next wall-clock multiple with `model::next_due`. If a discovery walk is due, `walk` runs first and emits `G`, `X`, `P` and `x` for what changed.
+**1. The timer fires.** `Sampler::tick(now, emit)` collects the intervals whose deadline has passed and moves each to its next wall-clock multiple with `model::next_due`. If a discovery walk is due, `walk` runs first and emits `X`, `x` and `G` for what changed; a new process gets its `P` when its cgroup is sampled.
 
 ```rust
 for (iv, due) in self.timers.iter_mut().filter(|t| t.1 <= now) {
@@ -49,9 +49,9 @@ for (iv, due) in self.timers.iter_mut().filter(|t| t.1 <= now) {
 
 **8. Split.** The main thread takes the chunk, and for each line `wire::split_node` reads the `2` and counts the line for that node.
 
-**9. Decode.** `wire::parse(line, &mut vals)` gives back `Event::CgVals` with a slice into a reused buffer. A line that does not parse raises the node's error count and asks for a resync.
+**9. Decode.** `wire::parse(line, &mut vals)` gives back `Event::CgVals` with a slice into a reused buffer. A line that does not parse raises the node's error count and asks for a resync (at most once per 10 s per node).
 
-**10. Store.** `State::apply(2, &event, now)` maps each local column index to the global `ColId` (learnt from the agent's `D` lines), moves the old value to `pv` and stores the new one in `v`, with the times. For a CPU counter it also pushes the rate into the 16-entry history ring.
+**10. Store.** `State::apply(2, &event, now)` maps each local column index to the global column id (learnt from the agent's `D` lines), moves the old value to `pv` and stores the new one in `v`, with the times. For a CPU counter it also pushes the rate into the 16-entry history ring.
 
 **11. Build rows.** At most four times per second (or at once after a key), `state::rows(&state, &view, limit)` walks only the open part of the current layout and stops after `limit` rows. The rate is computed here:
 
@@ -61,7 +61,7 @@ Kind::Counter => Some(v.checked_sub(pv)? as f64 * 1000.0 / dt_ms as f64),
 
 A counter that went backwards gives `None`, shown as `-`. On a job or step row, the rates of all nodes are summed.
 
-**12. Draw.** `tui::draw` formats the visible rows only, and ratatui writes only the cells that changed. The value appears as `68.9%`, about 689 ms of CPU per second.
+**12. Draw.** `tui::draw` formats the visible rows only, and ratatui writes only the cells that changed. With `688580733` one second earlier, the rate is 689,000 µs/s, and the value appears as `68.9%`, about 689 ms of CPU per second.
 
 ## Time on the path
 
@@ -70,10 +70,10 @@ A counter that went backwards gives `None`, shown as `-`. On a job or step row, 
 | 1–5 | agent | about 3 µs per cgroup, 1 µs per process (release build, fixtures) |
 | 6 | writer | the stagger delay, at most 250 ms |
 | 7–10 | viewer | about 55 ns per value; at most 10 ms per loop before keys are checked again |
-| 11–12 | viewer | at most 4 Hz; about 1 ms per frame for 100,000 processes in flat |
+| 11–12 | viewer | at most 4 Hz; a budget of 1 ms sort per frame for 100,000 processes in flat (not yet measured) |
 
 ## Other modes
 
-- **Local:** steps 1–6 run on the sampler thread, and step 6 writes into a channel instead of stdout. Steps 7–8 are skipped.
+- **Local:** steps 1–6 run in the viewer process (a sampler thread and its writer thread), and step 6 writes into a channel instead of stdout. Step 7 is skipped.
 - **Record:** steps 1–4 feed a local `State` directly; `record::Writer` writes rows from it. No encoding.
 - **Replay:** `record::Reader` decodes a batch and calls `State::apply` per row; steps 11–12 are the same.
