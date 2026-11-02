@@ -10,18 +10,18 @@
 # every file in src/ must have a line. A budget is raised only in the PR that needs it, with a
 # one-line reason here.
 main.rs     155  # UX review: --rule with spaces and units, the '=' hint, the terminal check
-model.rs    173  # shared metric() descriptor; interval_ms() rounds every interval alike
+model.rs    174  # Event::Mpi (D45)
 source.rs   139  # Slot::Missing (retried once per 10 s), polling self-check, one permission-denied W
 cgroup.rs   164  # UX review: a missing --root says "does not exist"
-procfs.rs   145  # Ident for P lines, the host, btime, auxv and limits readers, usage()
-agent.rs    481  # stored P identity for S resyncs, pid reuse, moves and execs, T in the writer path
-wire.rs     211  # measured; it was already 211 against 200, within the 10 % tolerance
+procfs.rs   179  # MPI ranks: the one-time environ read and its allowlist scan (D45)
+agent.rs    498  # MPI ranks: environ read for processes in a step, M after P and on S (D45)
+wire.rs     226  # proto 2: the M line, and a line with an unknown tag is ignored (D45)
 slurm.rs    220  # MPI structure: the squeue --steps thread for task counts (D44)
-record.rs   602  # UX review: replay warnings and interval, strict --at, rec failed, stale-node skip
-state.rs    645  # MPI structure: step task sets, the step row text, map cells (D44)
-tui.rs     1004  # MPI structure: the map pane on m (D44)
+record.rs   623  # schema 2: mpi_ns, mpi_rank, mpi_size; metrics found by prefix (D45)
+state.rs    720  # MPI ranks: worlds, RANK span, sort and filter, world map cells (D45)
+tui.rs     1024  # MPI ranks: RANK column, rank in Detail, world map (D45)
 theme.rs     65  # UX review: UNJAM_THEME named in its error
-total      4004  # MPI tasks (+269, D44); was 3735 after the TUI polish
+total      4187  # MPI ranks (+183, D45); was 4004 after the MPI tasks (D44)
 
 # Release binary (bytes) and resolved normal dependencies (crates, root excluded) on
 # x86_64-unknown-linux-gnu. Re-baselined from measurement (+5 %) by the change that needs it.

@@ -140,6 +140,64 @@ pub fn ident(root: &Path, io: &mut Files, stat_slot: &mut Slot, pid: u32) -> Opt
     Some(Ident { start, ppid: parent, comm, cmd: cmd.unwrap_or_default().into() })
 }
 
+// budget: data
+/// Environment keys that name a process's MPI rank, world and size (D45); only these values
+/// leave the agent. Order: rank keys in priority order, then their worlds and sizes.
+const MPI_KEYS: [&str; 9] = [
+    "PMIX_RANK",
+    "PMI_RANK",
+    "OMPI_COMM_WORLD_RANK",
+    "PMIX_NAMESPACE",
+    "OMPI_COMM_WORLD_SIZE",
+    "PMI_SIZE",
+    "SLURM_STEP_NUM_TASKS",
+    "SLURM_JOB_ID",
+    "SLURM_STEP_ID",
+];
+// budget: end
+
+/// A process's MPI identity from its environment at exec: what an `M` line carries.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Mpi {
+    pub rank: u32,
+    pub size: u64,
+    pub world: Box<str>,
+}
+
+/// Reads `<pid>/environ` once, uncached, and keeps only the `MPI_KEYS` values (D45).
+pub fn mpi_of(root: &Path, io: &mut Files, pid: u32) -> Option<Mpi> {
+    let mut once = Slot::Empty;
+    let m = io.read(&mut once, false, root, &format!("{pid}/environ")).ok().and_then(mpi);
+    io.release(std::slice::from_mut(&mut once));
+    m
+}
+
+/// The rank (`PMIX_RANK`, else `PMI_RANK`, else `OMPI_COMM_WORLD_RANK`; never `SLURM_PROCID`,
+/// which mpirun's ranks inherit from their daemon), the world (`PMIX_NAMESPACE`, else the
+/// Slurm step) and the size, or `None` without a rank.
+pub fn mpi(env: &[u8]) -> Option<Mpi> {
+    let mut v = [None; MPI_KEYS.len()];
+    for e in env.split(|&b| b == 0) {
+        let Some(eq) = e.iter().position(|&b| b == b'=') else { continue };
+        if let Some(i) = MPI_KEYS.iter().position(|m| m.as_bytes() == &e[..eq]) {
+            v[i] = v[i].or(Some(&e[eq + 1..]));
+        }
+    }
+    let n = |i: usize| v[i].filter(|x| x.iter().all(u8::is_ascii_digit)).and_then(num);
+    let rank = u32::try_from(n(0).or(n(1)).or(n(2))?).ok()?;
+    let text = |i: usize| v[i].map(String::from_utf8_lossy);
+    let pmix = n(0).is_some();
+    let slurm = (text(7), text(8));
+    let world = match (text(3).filter(|_| pmix), slurm) {
+        (Some(ns), _) => ns.into(),
+        (None, (Some(j), Some(s))) => format!("slurm.{j}.{s}"),
+        _ => "-".into(),
+    };
+    let step = pmix && world.starts_with("slurm.pmix.");
+    let size = n(4).or(n(5)).or(n(6).filter(|_| step)).unwrap_or(NA);
+    Some(Mpi { rank, size, world: world.into() })
+}
+
 /// `cmdline` for display: NUL separators become spaces, invalid UTF-8 is replaced.
 pub fn cmdline(buf: &[u8]) -> String {
     let s: Vec<u8> = buf.iter().map(|&b| if b == 0 { b' ' } else { b }).collect();
@@ -201,6 +259,25 @@ mod tests {
 
     fn read(rel: &str) -> Vec<u8> {
         fs::read(root().join(rel)).unwrap()
+    }
+
+    #[test]
+    fn mpi_takes_only_the_rank_keys() {
+        let env = |kv: &[&str]| kv.join("\0").into_bytes();
+        let m = |rank, size, world: &str| Some(Mpi { rank, size, world: world.into() });
+        let pmix = ["PMIX_RANK=3", "PMIX_NAMESPACE=slurm.pmix.42.0", "SLURM_STEP_NUM_TASKS=8"];
+        assert_eq!(mpi(&env(&pmix)), m(3, 8, "slurm.pmix.42.0"), "Slurm pmix: size from Slurm");
+        let two = ["PMI_RANK=5", "PMI_SIZE=6", "SLURM_JOB_ID=42", "SLURM_STEP_ID=1"];
+        assert_eq!(mpi(&env(&two)), m(5, 6, "slurm.42.1"), "PMI-2: the step is the world");
+        let prte = ["PMIX_RANK=9", "PMIX_NAMESPACE=prterun-n1-7@1", "SLURM_STEP_NUM_TASKS=1"];
+        assert_eq!(mpi(&env(&prte)), m(9, NA, "prterun-n1-7@1"), "the daemon step's count");
+        let ompi = ["SLURM_PROCID=1", "OMPI_COMM_WORLD_RANK=4", "OMPI_COMM_WORLD_SIZE=8"];
+        assert_eq!(mpi(&env(&ompi)), m(4, 8, "-"), "never SLURM_PROCID");
+        assert_eq!(mpi(&env(&["SLURM_PROCID=0", "PMI_RANKX=1", "PMIX_RANK=1a"])), None);
+        assert_eq!(mpi(&env(&["PMIX_RANK=1a", "PMI_RANK=2"])), m(2, NA, "-"), "non-digit");
+        let mut io = Files::new(4);
+        assert_eq!(mpi_of(&root(), &mut io, 102), m(1, 2, "slurm.pmix.42.0"), "no trailing NUL");
+        assert_eq!((mpi_of(&root(), &mut io, 999), io.open), (None, 0), "absent, no fd kept");
     }
 
     #[test]

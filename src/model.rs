@@ -37,7 +37,8 @@ pub const fn metric(name: &'static str, unit: &'static str, kind: Kind) -> Metri
 }
 
 /// The single interchange type between sampler, wire, record, replay and state. It borrows its
-/// data, so producing and consuming one allocates nothing.
+/// data, so producing and consuming one allocates nothing. `Mpi` carries a process's rank,
+/// world size (`NA` if unknown) and world key, after its `Proc` (D45).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event<'a> {
     Hello { proto: u32, version: &'a str, host: &'a str, step: &'a str, ntasks: u32, btime: u64 },
@@ -49,6 +50,7 @@ pub enum Event<'a> {
     Proc { pid: u32, start: u64, cg: u64, ppid: u32, comm: &'a str, cmd: &'a str },
     ProcVals { pid: u32, first: u16, v: &'a [u64] },
     ProcGone(u32),
+    Mpi { pid: u32, rank: u32, size: u64, world: &'a str },
     Warn(&'a str),
 }
 

@@ -14,6 +14,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 - A Slurm step row shows its tasks against the count from `squeue`, `step_0 su3 · 4093/4096 tasks ✕3`; `?` marks a count guessed from the task ids (replay).
 - `m` opens a map of the cursor row's step: one cell per task, grouped by node, with the CPU spread and the missing and gone tasks. It works in replay.
+- MPI ranks: the agent reads the rank, world and size of each new process in a Slurm step from its environment, once, and sends nothing else of it. A RANK column shows them (`s` sorts by it), the filter takes `r65` or `r64-127`, Detail names the world, and `m` on a ranked row maps its world. srun, mpirun and mpiexec launches all work.
+
+### Changed
+
+- The wire protocol is proto 2: it adds the `M` line, and a viewer ignores a line with an unknown tag. Viewer and agents must both be this version (`--agent PATH`).
+- Journals are schema 2, with the `mpi_ns`, `mpi_rank` and `mpi_size` columns. Schema-1 journals still replay.
 
 ## [0.3.0] - 2026-11-02
 

@@ -36,8 +36,9 @@ use crate::{RecordArgs, cgroup, procfs, wire};
 pub const MAX_ROWS: usize = 8192;
 /// Batch age at most: the loss window of a killed recorder (§8.3).
 const MAX_MS: u64 = 10_000;
-/// Fixed columns before the metric columns: ts, kind, cg, pid, start, ppid, path, comm, cmdline.
-const FIXED: usize = 9;
+/// Fixed columns before the metric columns: ts, kind, cg, pid, start, ppid, path, comm, cmdline,
+/// and since schema 2 `mpi_ns`, `mpi_rank`, `mpi_size` (D45).
+const FIXED: usize = 12;
 /// History a backward seek replays: twice the longest rule interval (60 s), so the sample
 /// before the cursor's of every entity, and with it its rates, is applied (§8.4).
 const BACK_MS: u64 = 120_000;
@@ -61,6 +62,9 @@ pub fn schema(cols: &Columns, meta: HashMap<String, String>) -> Schema {
         ("path", Utf8),
         ("comm", Utf8),
         ("cmdline", Utf8),
+        ("mpi_ns", Utf8),
+        ("mpi_rank", UInt32),
+        ("mpi_size", UInt32),
     ];
     let mut fields: Vec<Field> =
         fixed.into_iter().enumerate().map(|(i, (n, t))| Field::new(n, t, i > 2)).collect();
@@ -83,6 +87,9 @@ pub fn expand(pat: &str, job: Option<&str>, step: Option<&str>, host: &str) -> P
     p.replace('\0', "%").into()
 }
 
+/// A process's world key, rank and size, as its keyframe row holds them.
+type Rank<'a> = (&'a str, u32, u64);
+
 /// Arrow builders of one journal plus per-batch keyframe tracking (§8.3).
 pub struct Writer {
     w: StreamWriter<BufWriter<File>>,
@@ -91,9 +98,9 @@ pub struct Writer {
     kind: UInt8Builder,
     /// `cg` and `start`, then one per metric column (cgroup columns first).
     u64s: Vec<UInt64Builder>,
-    /// `pid` and `ppid`; `path`, `comm` and `cmdline`.
-    ids: [UInt32Builder; 2],
-    strs: [StringBuilder; 3],
+    /// `pid`, `ppid`, `mpi_rank` and `mpi_size`; `path`, `comm`, `cmdline` and `mpi_ns`.
+    ids: [UInt32Builder; 4],
+    strs: [StringBuilder; 4],
     /// Number of cgroup metric columns.
     width: usize,
     /// Entities that have their keyframe row in the open batch, the batch's first tick and the
@@ -110,7 +117,7 @@ impl Writer {
     pub fn create(path: &Path, st: &State, i: usize, meta: &[(&str, String)]) -> io::Result<Self> {
         let n = &st.nodes[i];
         let btime = if n.btime == NA { "na".into() } else { n.btime.to_string() };
-        let fixed = [("schema", "1".into()), ("version", env!("CARGO_PKG_VERSION").into())];
+        let fixed = [("schema", "2".into()), ("version", env!("CARGO_PKG_VERSION").into())];
         let node = [("host", n.host.clone()), ("step", n.step.clone()), ("btime", btime)];
         let all = meta.iter().cloned().chain(fixed).chain(node);
         let schema = schema(&st.cols, all.map(|(k, v)| (format!("unjam.{k}"), v)).collect());
@@ -147,23 +154,27 @@ impl Writer {
         }
         let mut procs: Vec<_> = n.procs.iter().collect();
         procs.sort_unstable_by_key(|p| *p.0);
-        procs
-            .into_iter()
-            .try_for_each(|(&pid, p)| self.row(n.prev[0], p.cg, Some((pid, p)), "", &p.vals))
+        procs.into_iter().try_for_each(|(&pid, p)| {
+            let w = p.mpi.and_then(|(w, r)| Some((st.worlds.get(usize::from(w))?, r)));
+            let mpi = w.map(|(w, r)| (&*w.key, r, w.size));
+            self.row(n.prev[0], p.cg, Some((pid, p, mpi)), "", &p.vals)
+        })
     }
 
-    /// One row; keyframe columns only on the entity's first row in the batch.
+    /// One row; keyframe columns only on the entity's first row in the batch. A process may
+    /// have a world, rank and size.
     fn row(
         &mut self,
         ts: u64,
         cg: u64,
-        p: Option<(u32, &Proc)>,
+        p: Option<(u32, &Proc, Option<Rank>)>,
         path: &str,
         v: &Vals,
     ) -> io::Result<()> {
         self.since = if self.kind.is_empty() { ts } else { self.since };
-        let key = self.keyed.insert(p.map_or((cg, NA), |(pid, p)| (u64::from(pid), p.start)));
-        let kf = p.filter(|_| key).map(|p| p.1);
+        let key = self.keyed.insert(p.map_or((cg, NA), |(pid, p, _)| (u64::from(pid), p.start)));
+        let mpi = p.filter(|_| key).and_then(|p| p.2);
+        let (p, kf) = (p.map(|p| (p.0, p.1)), p.filter(|_| key).map(|p| p.1));
         self.ts.append_value(i64::try_from(ts).unwrap_or(i64::MAX));
         self.kind.append_value(if p.is_some() { 2 } else { 1 });
         self.u64s[0].append_value(cg);
@@ -173,6 +184,9 @@ impl Writer {
         self.strs[0].append_option((key && p.is_none()).then_some(path));
         self.strs[1].append_option(kf.map(|p| &*p.comm));
         self.strs[2].append_option(kf.map(|p| &*p.cmd));
+        self.strs[3].append_option(mpi.map(|m| m.0));
+        self.ids[2].append_option(mpi.map(|m| m.1));
+        self.ids[3].append_option(mpi.and_then(|m| u32::try_from(m.2).ok()));
         let own = if p.is_some() { self.width..usize::MAX } else { 0..self.width };
         for (j, b) in self.u64s[2..].iter_mut().enumerate() {
             let x = own.contains(&j).then(|| v.v.get(j - own.start)).flatten();
@@ -184,7 +198,7 @@ impl Writer {
     /// Writes the open batch and flushes it to the file (§8.3).
     #[allow(clippy::similar_names, reason = "pid and ppid are the kernel's names")]
     pub fn cut(&mut self) -> io::Result<()> {
-        let ([pid, ppid], [path, comm, cmd]) = (&mut self.ids, &mut self.strs);
+        let ([pid, ppid, rank, size], [path, comm, cmd, ns]) = (&mut self.ids, &mut self.strs);
         let Some(([cg, start], vals)) = self.u64s.split_first_chunk_mut::<2>() else {
             return Ok(());
         };
@@ -192,7 +206,7 @@ impl Writer {
             return Ok(());
         }
         let fixed: [&mut dyn ArrayBuilder; FIXED] =
-            [&mut self.ts, &mut self.kind, cg, pid, start, ppid, path, comm, cmd];
+            [&mut self.ts, &mut self.kind, cg, pid, start, ppid, path, comm, cmd, ns, rank, size];
         let all = fixed.into_iter().chain(vals.iter_mut().map(|b| b as &mut dyn ArrayBuilder));
         let batch =
             RecordBatch::try_new(Arc::clone(&self.schema), all.map(ArrayBuilder::finish).collect());
@@ -228,6 +242,8 @@ struct Cols<'a> {
     u64s: [&'a Prim<UInt64Type>; 2],
     ids: [&'a Prim<UInt32Type>; 2],
     strs: [&'a StringArray; 3],
+    /// `mpi_ns`, `mpi_rank` and `mpi_size`: absent in schema-1 journals.
+    mpi: Option<(&'a StringArray, [&'a Prim<UInt32Type>; 2])>,
     metrics: Vec<(Ent, &'a Prim<UInt64Type>)>,
 }
 
@@ -250,6 +266,9 @@ impl<'a> Cols<'a> {
             u64s: [u64s("cg")?, u64s("start")?],
             ids: [ids("pid")?, ids("ppid")?],
             strs: [strs("path")?, strs("comm")?, strs("cmdline")?],
+            mpi: strs("mpi_ns")
+                .zip(ids("mpi_rank").zip(ids("mpi_size")))
+                .map(|(n, (r, s))| (n, [r, s])),
             metrics: metrics
                 .filter_map(|(f, c)| Some((ent(f.name())?, c.as_primitive_opt()?)))
                 .collect(),
@@ -333,7 +352,8 @@ impl Track {
         let hello = Event::Hello { proto: wire::PROTO, version, host, step, ntasks: 1, btime };
         let _ = st.apply(i, &hello, 0);
         let mut idx = [0u16; 2];
-        for f in self.schema.fields().iter().skip(FIXED) {
+        let metric = |f: &&Arc<Field>| f.name().starts_with("cg_") || f.name().starts_with("p_");
+        for f in self.schema.fields().iter().filter(metric) {
             let ent = if f.name().starts_with("p_") { Ent::Proc } else { Ent::Cgroup };
             let fm = |k: &str| f.metadata().get(k).map_or("", String::as_str);
             let kind = if fm("unjam.kind") == "counter" { Kind::Counter } else { Kind::Gauge };
@@ -390,6 +410,12 @@ impl Track {
                 let (start, ppid, comm, cmd) =
                     (start.value(r), ppid.value(r), comm.value(r), cmd.value(r));
                 let _ = st.apply(i, &Event::Proc { pid, start, cg: id, ppid, comm, cmd }, ts);
+                if let Some((ns, [rank, size])) = c.mpi.filter(|m| m.1[0].is_valid(r)) {
+                    let world = if ns.is_valid(r) { ns.value(r) } else { "-" };
+                    let size = if size.is_valid(r) { u64::from(size.value(r)) } else { NA };
+                    let mpi = Event::Mpi { pid, rank: rank.value(r), size, world };
+                    let _ = st.apply(i, &mpi, ts);
+                }
             }
             let _ = v.map(|v| st.apply(i, &Event::ProcVals { pid, first: 0, v }, ts));
             self.tick.2.insert(pid);
@@ -779,7 +805,7 @@ mod tests {
     /// The announcement of a host with a three-level cgroup tree and a shell.
     fn hello(st: &mut State, node: u32, host: &str) {
         let head = [
-            &format!("H 1 0.1 {host} 7.0 1 1700000000"),
+            &format!("H 2 0.1 {host} 7.0 1 1700000000"),
             "D c 0 cg_cpu_usage_usec us counter",
             "D c 1 cg_mem_current_bytes B gauge",
             "D c 2 cg_x_future_count 1 gauge",
@@ -789,6 +815,7 @@ mod tests {
             "G 2 1 a",
             "G 3 2 a/b",
             "P 10 100 3 1 sh sh~-c~x",
+            "M 10 3 4 slurm.pmix.7.0",
         ];
         feed(st, node, &head.map(str::to_owned));
     }
@@ -862,8 +889,8 @@ mod tests {
             let (vv, pv) = (trim(&v.v), trim(&v.pv));
             let _ = writeln!(
                 out,
-                "P {pid} {} {} {} {} {} {vv:?} {pv:?} {:?}",
-                p.start, p.cg, p.ppid, p.comm, p.cmd, v.t
+                "P {pid} {} {} {} {} {} {vv:?} {pv:?} {:?} {:?}",
+                p.start, p.cg, p.ppid, p.comm, p.cmd, v.t, p.mpi
             );
         }
         out
@@ -918,7 +945,7 @@ mod tests {
         let schema = StreamReader::try_new(File::open(&path).unwrap(), None).unwrap().schema();
         let m = schema.metadata();
         for (k, v) in [
-            ("schema", "1"),
+            ("schema", "2"),
             ("host", "n1"),
             ("step", "7.0"),
             ("btime", "1700000000"),
@@ -930,7 +957,10 @@ mod tests {
         let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
         assert_eq!(
             names[..FIXED],
-            ["ts", "kind", "cg", "pid", "start", "ppid", "path", "comm", "cmdline"]
+            [
+                "ts", "kind", "cg", "pid", "start", "ppid", "path", "comm", "cmdline", "mpi_ns",
+                "mpi_rank", "mpi_size"
+            ]
         );
         for (name, unit, kind, source) in [
             ("cg_cpu_usage_usec", "us", "counter", "cgroup"),
@@ -948,6 +978,36 @@ mod tests {
         let b = &batches(&path)[1];
         let fut = b.column_by_name("cg_x_future_count").unwrap();
         assert!(fut.is_valid(0) && fut.null_count() > 0, "NA becomes null");
+    }
+
+    #[test]
+    fn ranks_round_trip_and_a_schema_1_journal_still_replays() {
+        let d = tmp("schema1");
+        let (path, src) = journal(&d.0, "n1", 6);
+        let (mut r, _) = Reader::open(std::slice::from_ref(&path)).unwrap();
+        let mut st = State::new();
+        r.goto(&mut st, usize::MAX).unwrap();
+        assert_eq!(dump(&st.nodes[0]), dump(&src.nodes[0]));
+        assert!(dump(&st.nodes[0]).contains("Some((0, 3))") && st.worlds[0].size == 4);
+        // Schema 1: the same journal without the three mpi columns.
+        let (b, old) = (batches(&path), d.0.join("old.arrows"));
+        let keep: Vec<usize> = (0..b[0].num_columns())
+            .filter(|&i| !b[0].schema().field(i).name().starts_with("mpi_"))
+            .collect();
+        let mut meta = b[0].schema().metadata().clone();
+        meta.insert("unjam.schema".to_owned(), "1".to_owned());
+        let schema = Arc::new(b[0].schema().project(&keep).unwrap().with_metadata(meta));
+        let mut w = StreamWriter::try_new(File::create(&old).unwrap(), &schema).unwrap();
+        for x in &b {
+            let cols = keep.iter().map(|&i| Arc::clone(x.column(i))).collect();
+            w.write(&RecordBatch::try_new(Arc::clone(&schema), cols).unwrap()).unwrap();
+        }
+        w.finish().unwrap();
+        let (mut r, _) = Reader::open(&[old]).unwrap();
+        let mut st = State::new();
+        r.goto(&mut st, usize::MAX).unwrap();
+        let want = dump(&src.nodes[0]).replace("Some((0, 3))", "None");
+        assert_eq!(dump(&st.nodes[0]), want);
     }
 
     #[test]

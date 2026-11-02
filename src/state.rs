@@ -118,8 +118,8 @@ pub fn rate(kind: Kind, v: u64, pv: u64, dt_ms: u64) -> Option<f64> {
     }
 }
 
-/// A cgroup: tree links, its processes (sorted pids), values, the derived thread sum, and for
-/// a `task_<N>` cgroup its step's key and task id.
+/// A cgroup: tree links, its processes (sorted pids), values, the derived thread sum and rank
+/// span, and for a `task_<N>` cgroup its step's key and task id.
 #[derive(Debug, Default, PartialEq)]
 pub struct Cg {
     pub parent: u64,
@@ -128,10 +128,11 @@ pub struct Cg {
     pub procs: Vec<u32>,
     pub vals: Vals,
     pub threads: u64,
+    pub ranks: Option<(u32, u32)>,
     pub task: Option<(u64, u32)>,
 }
 
-/// A process with its `P` fields and values.
+/// A process with its `P` fields, values, and its world and rank from `M`.
 #[derive(Debug, PartialEq)]
 pub struct Proc {
     pub start: u64,
@@ -140,13 +141,14 @@ pub struct Proc {
     pub comm: Box<str>,
     pub cmd: Box<str>,
     pub vals: Vals,
+    pub mpi: Option<(u16, u32)>,
 }
 
-/// Task ids at most this large have presence bits: bounds the sets that a crafted
+/// Task and rank ids at most this large have presence bits: bounds the sets that a crafted
 /// line could grow (4M ids, 512 KiB).
 const IDS: u32 = 1 << 22;
 
-/// One bit per id: sets of tasks.
+/// One bit per id: sets of tasks or ranks.
 #[derive(Debug, Default, PartialEq)]
 pub struct Bits(Vec<u64>);
 
@@ -190,6 +192,14 @@ pub struct Step {
     pub live: Bits,
 }
 
+/// An MPI world (D45): its key (`PMIX_NAMESPACE` or the Slurm step), size, and seen ranks.
+#[derive(Debug, PartialEq)]
+pub struct World {
+    pub key: Box<str>,
+    pub size: u64,
+    pub seen: Bits,
+}
+
 /// One agent's view: identity, column map from its `D` table, entities and liveness stats.
 #[derive(Debug, Default, PartialEq)]
 pub struct Node {
@@ -219,12 +229,13 @@ pub struct Node {
     stale: (HashSet<u64>, HashSet<u32>),
 }
 
-/// The TUI data store filled by every feed, with the steps' task sets.
+/// The TUI data store filled by every feed, with the steps' task sets and the MPI worlds.
 #[derive(Debug, PartialEq)]
 pub struct State {
     pub cols: Columns,
     pub nodes: Vec<Node>,
     pub steps: HashMap<u64, Step>,
+    pub worlds: Vec<World>,
 }
 
 impl State {
@@ -236,7 +247,7 @@ impl State {
                 cols.intern(ent, n, "", Kind::Gauge);
             }
         }
-        Self { cols, nodes: Vec::new(), steps: HashMap::new() }
+        Self { cols, nodes: Vec::new(), steps: HashMap::new(), worlds: Vec::new() }
     }
 
     /// The single mutation path. `Err` means the line does not fit what the node announced
@@ -289,6 +300,10 @@ impl State {
                 n.procs.get_mut(&pid).ok_or(())?.vals.line(&n.cmap[1], n.prev[0], first, v, cpu)?;
             }
             Event::ProcGone(pid) => n.unlink(pid),
+            Event::Mpi { pid, rank, size, world } => {
+                n.procs.get_mut(&pid).ok_or(())?.mpi =
+                    world_of(&mut self.worlds, world, size, rank);
+            }
             Event::Warn(_) => {}
         }
         Ok(())
@@ -299,16 +314,37 @@ impl State {
     pub fn derive(&mut self) {
         for n in self.nodes.iter_mut().filter(|n| n.dirty) {
             n.dirty = false;
-            n.cgs.values_mut().for_each(|c| c.threads = 0);
+            n.cgs.values_mut().for_each(|c| (c.threads, c.ranks) = (0, None));
             for p in n.procs.values() {
-                let Some(&t) = p.vals.v.get(P_THREADS).filter(|&&t| t != NA) else { continue };
+                let t = p.vals.v.get(P_THREADS).copied().filter(|&t| t != NA).unwrap_or(0);
                 let mut id = p.cg;
                 for _ in 0..64 {
                     let Some(c) = n.cgs.get_mut(&id) else { break };
-                    (c.threads, id) = (c.threads + t, c.parent);
+                    (c.threads, c.ranks, id) = (c.threads + t, span(c.ranks, p.rank()), c.parent);
                 }
             }
         }
+    }
+}
+
+/// Interns `world` (at most `u16::MAX` worlds; a crafted journal gets no more), takes its size
+/// and marks `rank` seen; the process's world and rank.
+fn world_of(ws: &mut Vec<World>, world: &str, size: u64, rank: u32) -> Option<(u16, u32)> {
+    let i = ws.iter().position(|w| &*w.key == world).unwrap_or(ws.len());
+    let w = u16::try_from(i).ok().filter(|&w| w < u16::MAX)?;
+    if i == ws.len() {
+        ws.push(World { key: world.into(), size, seen: Bits::default() });
+    }
+    ws[i].seen.set(rank, true);
+    ws[i].size = if size == NA { ws[i].size } else { size };
+    Some((w, rank))
+}
+
+/// The union of two rank spans.
+fn span(a: Option<(u32, u32)>, b: Option<(u32, u32)>) -> Option<(u32, u32)> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some((a.0.min(b.0), a.1.max(b.1))),
+        _ => a.or(b),
     }
 }
 
@@ -318,6 +354,13 @@ fn mark(steps: &mut HashMap<u64, Step>, t: Option<(u64, u32)>, on: bool) {
     let s = steps.entry(h).or_default();
     s.live.set(id, on);
     s.seen.set(id, on || s.seen.has(id));
+}
+
+impl Proc {
+    /// The rank as a one-rank span.
+    fn rank(&self) -> Option<(u32, u32)> {
+        self.mpi.map(|(_, r)| (r, r))
+    }
 }
 
 /// Column id of `p_threads`.
@@ -403,7 +446,10 @@ impl Node {
         let vals = same.map(|p| p.vals.clone()).unwrap_or_default();
         self.unlink(pid);
         self.stale.1.remove(&pid);
-        self.procs.insert(pid, Proc { start, cg, ppid, comm: comm.into(), cmd: cmd.into(), vals });
+        self.procs.insert(
+            pid,
+            Proc { start, cg, ppid, comm: comm.into(), cmd: cmd.into(), vals, mpi: None },
+        );
         if let Some(c) = self.cgs.get_mut(&cg) {
             c.procs.insert(c.procs.binary_search(&pid).unwrap_or_else(|e| e), pid);
         }
@@ -435,7 +481,8 @@ pub enum Key {
     Proc(u32, u32),
 }
 
-/// How the rows are made: layout, sort column (0 = NAME, value column + 1, NCOL + 1 = NODE),
+/// How the rows are made: layout, sort column (0 = NAME, value column + 1, NCOL + 1 = RANK,
+/// NCOL + 2 = NODE),
 /// folds, filter, the authoritative rule list, the folded-range window, whether this is local,
 /// and which nodes are stale (set by the TUI once per second).
 #[derive(Debug)]
@@ -472,6 +519,8 @@ pub struct Row<'a> {
     pub v: [f64; NCOL],
     pub approx: bool,
     pub hist: [u16; HIST],
+    /// The MPI rank of a process, or the span of the ranks below a cgroup (D45).
+    pub rank: Option<(u32, u32)>,
 }
 
 /// The visible-window walk: rows in layout order until `limit` rows exist (§9.4).
@@ -553,14 +602,16 @@ impl<'a> Walk<'a, '_> {
     }
 
     /// Filter match: an ASCII case-insensitive substring of the name, a process's comm or a
-    /// cgroup's path; a leading `/` is ignored, so a path matches as typed.
+    /// cgroup's path; a leading `/` is ignored, so a path matches as typed. `r65` or `r64-127`
+    /// also matches the rows whose ranks meet that span (D45).
     fn hit(&self, r: &Row) -> bool {
         let q = self.v.filter.trim_start_matches('/').as_bytes();
         let has = |h: &str| {
             q.is_empty() || h.as_bytes().windows(q.len()).any(|w| w.eq_ignore_ascii_case(q))
         };
         let n = self.st.nodes.get(r.node as usize);
-        has(&r.name)
+        ranked(&self.v.filter, r.rank)
+            || has(&r.name)
             || match r.key {
                 Key::Cg(_, id) => n.and_then(|n| n.cgs.get(&id)).is_some_and(|c| has(&c.path)),
                 Key::Proc(_, p) => n.and_then(|n| n.procs.get(&p)).is_some_and(|p| has(&p.comm)),
@@ -573,9 +624,15 @@ impl<'a> Walk<'a, '_> {
     fn cmp(&self, a: &Row, b: &Row) -> Ordering {
         let name = natural(&a.name, &b.name).then(a.node.cmp(&b.node)).then(a.id.cmp(&b.id));
         let flip = |ord: Ordering| if self.v.desc { ord.reverse() } else { ord };
-        if self.v.sort > NCOL {
+        if self.v.sort > NCOL + 1 {
             let host = |r: &Row| self.st.nodes.get(r.node as usize).map_or("", |n| &n.host);
             return flip(natural(host(a), host(b)).then(name));
+        }
+        if self.v.sort == NCOL + 1 {
+            return match (a.rank, b.rank) {
+                (Some(x), Some(y)) => flip(x.cmp(&y)).then(name),
+                (x, y) => x.is_none().cmp(&y.is_none()).then(name),
+            };
         }
         let Some(col) = self.v.sort.checked_sub(1) else { return flip(name) };
         match (a.v[col].is_nan(), b.v[col].is_nan()) {
@@ -671,7 +728,7 @@ impl<'a> Walk<'a, '_> {
         let name = Cow::Borrowed(if p.cmd.is_empty() { &*p.comm } else { &*p.cmd });
         let (key, id) = (Key::Proc(node, pid), u64::from(pid));
         let hist = if dead { [0; HIST] } else { p.vals.hist() };
-        Some(Row { key, node, id, name, v, hist, ..Row::default() })
+        Some(Row { key, node, id, name, v, hist, rank: p.rank(), ..Row::default() })
     }
 }
 
@@ -684,7 +741,7 @@ fn cg_row<'a>(node: u32, id: u64, c: &'a Cg, name: Option<&'a str>) -> Row<'a> {
     v[4] = if approx { c.threads as f64 } else { v[4] };
     let (key, name, hist) =
         (Key::Cg(node, id), name.unwrap_or_else(|| seg(&c.path)).into(), c.vals.hist());
-    Row { key, node, id, name, v, approx, hist, ..Row::default() }
+    Row { key, node, id, name, v, approx, hist, rank: c.ranks, ..Row::default() }
 }
 
 /// Display values: CPU (µs/s → %), then the MEM gauge, IO counters and PIDS gauge at `cols`.
@@ -707,8 +764,19 @@ fn agg<'a>(key: Key, name: Cow<'a, str>, m: &[Row<'a>]) -> Row<'a> {
         }
         r.hist.iter_mut().zip(&x.hist).for_each(|(s, &h)| *s = s.saturating_add(h));
         r.approx |= x.approx;
+        r.rank = span(r.rank, x.rank);
     }
     r
+}
+
+/// Whether a rank filter, `r65` or `r64-127` (after any `/`), meets the rank span `rank`.
+fn ranked(filter: &str, rank: Option<(u32, u32)>) -> bool {
+    let Some(q) = filter.trim_start_matches('/').strip_prefix('r') else { return false };
+    let (a, b) = q.split_once('-').unwrap_or((q, q));
+    let (Ok(a), Ok(b), Some((lo, hi))) = (a.parse::<u32>(), b.parse::<u32>(), rank) else {
+        return false;
+    };
+    lo <= b && a <= hi
 }
 
 /// A step row's name with its tasks against the count `squeue` expects (`?` when guessed from
@@ -724,10 +792,11 @@ fn label<'a>(st: &State, s: &'a str) -> Cow<'a, str> {
     format!("{s}{name} · {live}/{all}{q} tasks{x}").into()
 }
 
-/// What the map pane shows (D44): a step's tasks.
+/// What the map pane shows (D44, D45): a step's tasks or a world's ranks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Of {
     Step(u64),
+    World(u16),
 }
 
 impl State {
@@ -738,25 +807,35 @@ impl State {
         (s.expect, s.name) = (Some(tasks), name.into());
     }
 
-    /// The map pane's target for a row: the step above it, if that step has tasks.
+    /// The map pane's target for a row: the world of a ranked process (or of the first ranked
+    /// process below a cgroup), else the step above it, if that step has tasks.
     pub fn of(&self, r: &Row) -> Option<Of> {
         let n = self.nodes.get(r.node as usize)?;
-        let cg = match r.key {
+        let below = |p: &Proc, id: u64| {
+            let up = std::iter::successors(Some(p.cg), |c| Some(n.cgs.get(c)?.parent));
+            up.take(64).any(|c| c == id)
+        };
+        let ranked = |id: u64| n.procs.values().find(|p| p.mpi.is_some() && below(p, id));
+        let (world, cg) = match r.key {
             Key::Step(h) | Key::Folded(h) => {
                 return self.steps.contains_key(&h).then_some(Of::Step(h));
             }
             Key::Job => return None,
-            Key::Proc(_, pid) => n.procs.get(&pid)?.cg,
-            Key::Cg(_, id) => id,
+            Key::Proc(_, pid) => n.procs.get(&pid).map(|p| (p.mpi, p.cg))?,
+            Key::Cg(_, id) => (r.rank.and_then(|_| ranked(id)?.mpi), id),
         };
+        if let Some((w, _)) = world {
+            return Some(Of::World(w));
+        }
         let mut up = std::iter::successors(Some(cg), |c| Some(n.cgs.get(c)?.parent)).take(64);
         let top = up.find(|c| n.cgs.get(c).is_some_and(|c| c.parent == n.root))?;
         let h = hash(step_name(n, n.cgs.get(&top)?));
         self.steps.contains_key(&h).then_some(Of::Step(h))
     }
 
-    /// The map pane's cells, sorted by node and id: node, task id, CPU % and memory bytes (NaN
-    /// where a stale node or level `o` gives none). The ids are the present ones.
+    /// The map pane's cells, sorted by node and id: node, task or rank id, CPU % and memory
+    /// bytes (NaN where a stale node or level `o` gives none; a rank's processes summed). The
+    /// ids are the present ones.
     pub fn cells(&self, v: &View, of: Of) -> Vec<(u32, u32, [f64; 2])> {
         let mut out = Vec::new();
         for (i, n) in (0..).zip(&self.nodes) {
@@ -770,9 +849,22 @@ impl State {
                     let val = |x: Option<f64>| x.filter(|_| !off).unwrap_or(f64::NAN);
                     Some((i, id, [val(cpu.map(|c| c / 1e4)), val(mem)]))
                 })),
+                Of::World(w) => out.extend(n.procs.values().filter_map(|p| {
+                    let (_, rank) = p.mpi.filter(|m| m.0 == w)?;
+                    let val = |x: Option<f64>| x.filter(|_| !dead).unwrap_or(f64::NAN);
+                    let mem = val(p.vals.get(2, Kind::Gauge));
+                    Some((i, rank, [val(cpu(&p.vals).map(|c| c / 1e4)), mem]))
+                })),
             }
         }
         out.sort_unstable_by_key(|c| (c.0, c.1));
+        // NaN only where every process of the rank has none (`max` drops a NaN).
+        let add = |x: f64, y: f64| if x.is_nan() { y } else { x + y.max(0.0) };
+        out.dedup_by(|b, a| {
+            let same = (a.0, a.1) == (b.0, b.1);
+            a.2 = if same { [add(a.2[0], b.2[0]), add(a.2[1], b.2[1])] } else { a.2 };
+            same
+        });
         out
     }
 }
@@ -829,7 +921,7 @@ mod tests {
 
     /// Wire text without node prefixes, as the agent writes it (fields joined by tabs).
     const DESC: &[&str] = &[
-        "H 1 0.1 n10 42.0 1 0",
+        "H 2 0.1 n10 42.0 1 0",
         "D c 0 cg_cpu_usage_usec us counter",
         "D c 1 cg_mem_current_bytes B gauge",
         "D p 0 p_cpu_user_usec us counter",
@@ -850,7 +942,7 @@ mod tests {
     /// Two ticks of one node: job 42 with step 0 and the batch step, tasks 0, 9 and 10 under
     /// `user`, two processes in task 0. `cpu` scales the node's CPU rates.
     fn node(st: &mut State, i: u32, host: &str, cpu: u64) {
-        let hello = format!("H 1 0.1 {host} 42.0 1 0");
+        let hello = format!("H 2 0.1 {host} 42.0 1 0");
         feed(st, i, &[&hello]);
         feed(st, i, &DESC[1..]);
         feed(
@@ -974,6 +1066,47 @@ mod tests {
     }
 
     #[test]
+    fn ranks_form_worlds_over_steps_and_sort_and_filter() {
+        let mut st = State::new();
+        feed(&mut st, 0, DESC);
+        let cgs = ["G 1 0 ", "G 2 1 step_batch", "G 3 1 step_0", "G 4 3 step_0/user"];
+        let p =
+            ["P 10 1 2 1 mpirun mpirun", "P 11 1 2 10 a a", "P 12 1 4 1 b b", "P 13 1 4 12 c c"];
+        let m = ["M 11 0 3 w~1", "M 12 2 - w~1", "M 13 2 - w~1"];
+        feed(&mut st, 0, &[&cgs[..], &p[..], &m[..]].concat());
+        st.derive();
+        let w = &st.worlds[0];
+        assert_eq!((&*w.key, w.size, w.seen.count()), ("w 1", 3, 2), "a later NA keeps the size");
+        assert_eq!(st.nodes[0].cgs[&1].ranks, Some((0, 2)), "a span over both steps");
+        let mut v = view(Layout::Flat);
+        (v.sort, v.desc) = (NCOL + 1, false);
+        let names: Vec<_> = rows(&st, &v, 4).iter().map(|r| (r.name.to_string(), r.rank)).collect();
+        assert_eq!(
+            names[..3],
+            [("a".into(), Some((0, 0))), ("b".into(), Some((2, 2))), ("c".into(), Some((2, 2)))]
+        );
+        assert_eq!(names[3].1, None, "no rank sorts last");
+        v.filter = "/r1-2".into();
+        let hit: Vec<_> = rows(&st, &v, 9).iter().map(|r| r.name.to_string()).collect();
+        assert_eq!(hit, ["b", "c"]);
+        assert!(
+            !ranked("r5", Some((0, 4)))
+                && ranked("r4", Some((0, 4)))
+                && !ranked("rx", Some((0, 0)))
+        );
+        assert_eq!(st.of(&rows(&st, &v, 1)[0]), Some(Of::World(0)));
+        let cells = st.cells(&v, Of::World(0));
+        assert_eq!(
+            cells.iter().map(|c| c.1).collect::<Vec<_>>(),
+            [0, 2],
+            "rank 2's processes are one cell"
+        );
+        feed(&mut st, 0, &["x 12", "P 12 9 4 1 d d"]);
+        assert_eq!(st.nodes[0].procs[&12].mpi, None, "a reused pid has no rank until its M");
+        assert_eq!(st.cells(&v, Of::World(0)).len(), 2, "rank 2 lives on in c");
+    }
+
+    #[test]
     fn layouts_of_an_empty_store() {
         for layout in [Layout::Step, Layout::Node, Layout::Flat] {
             assert!(rows(&State::new(), &view(layout), 100).len() <= 1, "{layout:?}");
@@ -1071,7 +1204,7 @@ mod tests {
         v.rules = vec![Rule::parse("*\t.\t1000\tp").unwrap()];
         let flat = dump(&rows(&st, &v, 4));
         assert_eq!(flat, "  ./a.out -n 4 100\n  ./a.out -n 4 50\n  kworker 20\n  kworker 10\n");
-        (v.sort, v.desc) = (NCOL + 1, false);
+        (v.sort, v.desc) = (NCOL + 2, false);
         let by_node = dump(&rows(&st, &v, 4));
         assert_eq!(by_node, "  ./a.out -n 4 100\n  kworker 20\n  ./a.out -n 4 50\n  kworker 10\n");
     }
@@ -1079,7 +1212,7 @@ mod tests {
     #[test]
     fn a_step_journal_names_its_step() {
         let mut st = State::new();
-        feed(&mut st, 0, &["H 1 0.1 n1 4242.1 1 0"]);
+        feed(&mut st, 0, &["H 2 0.1 n1 4242.1 1 0"]);
         feed(&mut st, 0, &DESC[1..]);
         feed(&mut st, 0, &["G 1 0 ", "G 2 1 task_0"]);
         let rows = rows(&st, &view(Layout::Step), 9);
@@ -1164,7 +1297,7 @@ mod tests {
         let mut st = State::new();
         node(&mut st, 0, "n1", 1);
         let live = ["G 1 0 ", "G 2 1 step_0", "G 3 2 step_0/user", "G 4 3 step_0/user/task_0"];
-        feed(&mut st, 0, &[&["H 1 0.1 n1 42.0 1 0"], &DESC[1..], &live[..]].concat());
+        feed(&mut st, 0, &[&["H 2 0.1 n1 42.0 1 0"], &DESC[1..], &live[..]].concat());
         feed(&mut st, 0, &["G 5 3 step_0/user/task_10", "G 7 1 step_batch"]);
         feed(&mut st, 0, &["P 100 1 4 1 a.out ./a.out~-n~4"]);
         assert_eq!((st.nodes[0].cgs.len(), st.nodes[0].procs.len()), (7, 2), "kept until T");
@@ -1197,7 +1330,7 @@ mod tests {
         feed(&mut st, 0, &["G 1 0 /"]);
         let bad = wire::parse(b"g\t1\t5\t1\n", &mut vals).unwrap();
         assert_eq!(st.apply(0, &bad, 0), Err(()), "value index without D");
-        feed(&mut st, 1, &["H 2 0.9 future 1.0 1 0", "G 1 0 /"]);
+        feed(&mut st, 1, &["H 3 0.9 future 1.0 1 0", "G 1 0 /"]);
         assert!(st.nodes[1].cgs.is_empty(), "a newer protocol is ignored after its H line");
     }
 
