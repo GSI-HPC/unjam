@@ -18,10 +18,10 @@ agent.rs    481  # stored P identity for S resyncs, pid reuse, moves and execs, 
 wire.rs     211  # measured; it was already 211 against 200, within the 10 % tolerance
 slurm.rs    199  # UX review: job name in the header, clear squeue and --bcast errors
 record.rs   602  # UX review: replay warnings and interval, strict --at, rec failed, stale-node skip
-state.rs    519  # UX review: off and stale rows blank, filter keeps subtrees and matches paths
-tui.rs      852  # UX review: footer, help pane, detail, NAME fit, z pause, ← parent, replay header
+state.rs    521  # TUI polish: no last-child guide on a set cut at the window
+tui.rs      880  # TUI polish: header and footer cut whole fields, styled key hints, right-aligned headings
 theme.rs     65  # UX review: UNJAM_THEME named in its error
-total      3705  # UX review: the 41 fixes of the v0.2 UX review, measured; was 3460 (owner)
+total      3735  # TUI polish (+30, tui and state); was 3705 after the v0.2 UX review (owner)
 
 # Release binary (bytes) and resolved normal dependencies (crates, root excluded) on
 # x86_64-unknown-linux-gnu. Re-baselined from measurement (+5 %) by the change that needs it.
