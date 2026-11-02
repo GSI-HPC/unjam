@@ -615,7 +615,8 @@ Below 80 columns or 8 rows the frame shows only "unjam needs at least 80x8 (now 
  ? help q quit ↑↓ move ←→ fold ␣ mark p level +/- rate v layout s sort / filter r record t theme
 ```
 
-- **Footer.** `? help q quit` come first, so an 80-column terminal cuts the end of the keys, not them. A new log line (srun's stderr, recording) shows in front of the keys for 10 s. An applied filter shows as "filter X (/ edits, Esc clears)", and editing it as `/X▏`.
+- **Footer.** Each hint is a key in the accent and its action in the dim style. `? help q quit` come first, and a narrow terminal drops whole hints from the end, so it never cuts them. A new log line (srun's stderr, recording) shows in front of the keys for 10 s. An applied filter shows as "filter X (/ edits, Esc clears)", and editing it as `/X▏`.
+- **Header lines.** A narrow terminal drops whole fields from the end of each line (the clock first, then `agents max`), never part of a value.
 - **Header, line 1:** the source (`unjam`, the job id and name, or `--replay`), node count with stale nodes, process count, interval, layout, sort column and clock. Replay shows the cursor time, the recorded interval (`unjam.interval_ms`) and `[▶]`, `[⏸]` or `[end]`. A live view shows `● rec` while recording (`rec failed` when no journal could be opened) and `[paused]` after `z`.
 - **Header, line 2: self-monitoring (D40, live modes, local mode too).** In replay there are no agents to monitor, and line 2 shows the position instead: `tick 6/14  00:16:41Z … 00:16:54Z`.
   - `tui`: CPU and RSS of the whole TUI process. The main thread `pread`s a cached `/proc/self/stat` (utime, stime, rss) once per second; CPU% is over wall time and covers all TUI threads.
@@ -626,6 +627,7 @@ Below 80 columns or 8 rows the frame shows only "unjam needs at least 80x8 (now 
 - **Node heat strip (D41, Slurm mode).** One cell per ⌈N / width⌉ nodes. A cell's colour is the `theme.heat` band of the highest CPU% among its nodes, relative to the busiest node of the job (at least one core, as the wire carries no core count), so imbalance shows on many-core nodes; the band also sets the cell's height (`▂▄▆█`), so mono and `NO_COLOR` show it too. A cell whose nodes are all `Off` is dotted. A dim "N nodes per cell" follows the cells. About 40 LOC.
 - **CPU history bar (D41).** Every row draws its last 16 CPU samples from `hist` (§4.5) as a bar sparkline in `theme.heat` colours. The colour bands against one core in local mode; in a job against the busiest node, and for rows summed over nodes (job, step, folded range) against all nodes at that load, so a 64-core node is not always saturated. About 35 LOC.
 - **Local mode, line 3:** the host CPU as a share of all CPUs ("17.0% of 4 CPUs", where a row's CPU% is per core) and the memory gauge.
+- **Table.** Its text starts one cell in, as the header and footer do, and the headings of number columns are right-aligned like the numbers. Flat rows have no tree guides; a process guide is `└` only when no sibling follows, also past the window. A mark is the theme's mark colour, bold and underlined.
 - **NAME** takes the width that is left, at most 72 cells, so values stay near their names on wide terminals; a cut name ends in `…`. Below 100 columns INT W is hidden when every row shows the same interval and level.
 
 The mock assumes `EnableExtraControllers=io,pids`. Without it, IO-R/s and IO-W/s are hidden and PIDS shows `~`-marked summed threads where processes are sampled (§4.3, §9.2).
@@ -648,7 +650,7 @@ The mock assumes `EnableExtraControllers=io,pids`. Without it, IO-R/s and IO-W/s
   - PIDS uses `cg_pids_current` and falls back to `~` plus the summed `p_threads` from `State::derive`.
   - A row whose effective level is off, and every row of a stale node, shows no values and no history (neither is sampled now), and the stale node's row reads `n0417 (stale)`; the help pane's node table marks it too.
   - CPU% keeps every digit up to 99999% (a 1024-core job row), then switches to `6.6M%`.
-- **Help/log** (`?`): the keys of the mode (live or replay) with a legend of INT W and PIDS `~`, the per-node table of §9.1 in 62 columns, and the newest 20 of the last 200 log lines. The pane has a title with the theme name and "any key closes".
+- **Help/log** (`?`): the keys of the mode (live or replay) with a legend of INT W and PIDS `~`, the per-node table of §9.1 in 60 columns (the pane pads its text by one cell, also on wrapped lines), and the newest 20 of the last 200 log lines. The pane has a title with the theme name and "any key closes".
 
 ### 9.3 Key bindings
 
