@@ -1,0 +1,105 @@
+---
+title: Add a metric source
+description: How to add a new source of metrics, such as likwid or PAPI counters, without touching the wire, recording, store or viewer code.
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+
+unjam was built so that a new **metric source** (for example hardware counters from likwid or PAPI) is a local change. The agents announce every metric with its name, unit and kind, so the wire, the recordings and the viewer pick up new columns by themselves.
+
+## The file allowlist
+
+A new source may touch **only**:
+
+| File | Change |
+|---|---|
+| `src/<name>.rs` | The source: a struct, `METRICS: &[Metric]`, `probe` and `impl Source` |
+| `src/source.rs` | One line in `SOURCES` |
+| `src/main.rs` | One `mod <name>;` line, with its `///` doc |
+| `docs/budget.txt` | One line for the new module |
+| `tests/fixtures/<name>/**` | Fixture files for its tests |
+| `docs/deps.md` | A row, if it adds a dependency (see the `lean-deps` skill) |
+| `docs/design.md` §5.3, `docs/perf.md` | A row for each file it reads per tick, and its measured cost |
+
+It **must not** touch `wire.rs`, `record.rs`, `state.rs` or `tui.rs`. A review rejects a source that does. The one sanctioned core change is a new entity kind (`Ent`, for example per-CPU or per-device rows), and that needs the owner's approval.
+
+## Step by step
+
+<Steps>
+
+1. **Name the metrics.** `<cg|p>_<source>_<quantity>_<unit>`, only `[a-z0-9_]`. Names are append-only and never renamed: they become wire names and Arrow column names.
+
+   ```rust
+   use crate::model::{metric as m, Kind, Metric};
+
+   pub const METRICS: &[Metric] = &[
+       m("p_likwid_flops_dp", "1", Kind::Counter),
+       m("p_likwid_mem_bytes", "B", Kind::Counter),
+   ];
+   ```
+
+   A `Counter` is shown as a rate per second, a `Gauge` as it is. Any unit string works; the viewer shows unknown units raw.
+
+2. **Write the probe.** It runs once at agent start. Return `Err(reason)` when the source cannot work on this node (a missing library, `perf_event_paranoid`, no permission). The agent sends one `W` line and runs without the source. A probe never panics.
+
+   ```rust
+   pub fn probe(env: &Env) -> Result<Box<dyn Source>, String> {
+       // check what you need; Err("likwid: perf_event_paranoid is 3".into()) skips the source
+       Ok(Box::new(Likwid { /* state, handles */ }))
+   }
+   ```
+
+3. **Implement `Source`.**
+
+   ```rust
+   impl Source for Likwid {
+       /// Per-process counters fill the process value vector.
+       fn entity(&self) -> Ent { Ent::Proc }
+
+       /// The descriptor table above.
+       fn metrics(&self) -> &'static [Metric] { METRICS }
+
+       /// Fills one value per metric (NA when unknown); Err means the process is gone.
+       fn sample(&mut self, t: Target, slots: &mut [Slot], io: &mut Files, out: &mut [u64]) -> Sampled {
+           let Target::Proc { pid, .. } = t else { return Ok(()) };
+           out.fill(NA);
+           // read through io.read(&mut slots[i], hot, dir, name) to use the shared fd cache
+           Ok(())
+       }
+   }
+   ```
+
+   Read files through `Files::read` with the slot of each metric file, so the source shares the bounded fd cache and its tier rule. Decide which files are hot.
+
+4. **Register it.** One line in `src/source.rs`:
+
+   ```rust
+   pub const SOURCES: &[(&str, Probe)] = &[
+       ("cgroup", crate::cgroup::probe),
+       ("proc", crate::procfs::probe),
+       ("likwid", crate::likwid::probe),
+   ];
+   ```
+
+5. **Test it on fixtures.** `Env` carries the `/proc` root and the own cgroup, so every reader runs against files under `tests/fixtures/<name>/`. Test the parsers, NA on missing files, and the probe's failure path.
+
+6. **Measure it.** Each per-tick read needs its cost in `docs/perf.md` (the `hot-path` skill has the commands: `mise run bench`, `perf stat`, `strace -c`). Keep the zero-allocation test green.
+
+7. **Run the gates.** `mise run check`, then `mise run it` for the integration tests.
+
+</Steps>
+
+## What you get for free
+
+- `D` lines announce the new metrics; viewers of older versions accept them.
+- The **Detail** view (<kbd>Enter</kbd>) shows every announced metric, raw and formatted.
+- **Recordings** get one new `UInt64` column per metric, with `unjam.unit`, `unjam.kind` and `unjam.source` as field metadata. Older recordings without the column read as null.
+- **Rates** and cross-node sums work, because they depend only on the kind.
+
+<Aside type="note" title="Table columns">
+The table shows a fixed list of default columns (D22). A new metric appears in Detail and in recordings, not as a table column. A new table column is a change to `tui.rs`, which is outside the allowlist and needs its own review.
+</Aside>
+
+## unsafe and FFI
+
+A source that needs a C library (likwid, PAPI) is the expected place for `unsafe`. Load the `unsafe-policy` skill first: prefer a maintained safe wrapper crate; otherwise keep every block inside `src/<name>.rs`, with `#[allow(unsafe_code, reason = "…")]`, a `// SAFETY:` comment and an entry in `docs/unsafe.md`. `tests/budget.rs` checks that the code and the ledger match.

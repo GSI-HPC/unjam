@@ -1,0 +1,101 @@
+---
+title: Data model
+description: Entities, their identities, self-describing metrics, the Source trait and the borrowed Event type.
+---
+
+import Figure from '../../../components/Figure.astro';
+import EntityTree from '../../../components/diagrams/EntityTree.astro';
+
+## The entity tree
+
+<Figure caption="The tree unjam shows. A virtual root (the host or the job) holds one node per agent, each node holds its cgroup tree, and each cgroup holds the processes in its cgroup.procs.">
+  <EntityTree />
+</Figure>
+
+A cgroup v2 directory can hold processes **and** child cgroups, unless domain controllers are on in its `cgroup.subtree_control` (the "no internal processes" rule; the root and threaded subtrees are exempt). So unjam reads `cgroup.procs` on **every** cgroup at level `p`, not only on leaves. In Slurm and systemd trees, processes usually sit in leaves.
+
+## Identities
+
+Paths are only labels. They are used for display and for rule matching, never as keys.
+
+| Entity | Key, live | Key in a recording | Reuse |
+|---|---|---|---|
+| Node | `u32` line prefix (`SLURM_PROCID`) | `unjam.host` (one file per node) | — |
+| Cgroup | `(node, inode)` | `(host, cg)` | A directory that is removed and created again under the same path gets a new inode. The agent sends `X old`, then `G new`, so a counter never goes backwards within one id. The inode comes from `getdents` (`DirEntryExt::ino`), with no extra syscall |
+| Process | `(node, pid)` | `(host, pid, start)` | `start` is `/proc/<pid>/stat` field 22. A known pid with a new `start` is a new process: `x pid`, then `P pid …`. A cached `stat` fd also returns `ESRCH` once its process has exited. A process that moves to another cgroup gets a new `P` line |
+
+## Metric descriptors
+
+```rust
+pub struct Metric { pub name: &'static str, pub unit: &'static str, pub kind: Kind }
+pub enum Kind { Counter, Gauge }   // Counter → shown as a rate
+pub const NA: u64 = u64::MAX;      // missing value: values stay 8 bytes, no Option
+```
+
+- **One table drives everything.** The descriptors become the wire's `D` lines, the viewer's rate maths and the Arrow schema. A new metric needs no change in the wire, record, state or TUI code.
+- **Units** are strings (`us`, `B`, `1`, `char`). A future source can use any other unit, and the viewer shows it raw. A string, not an enum, means a new source never edits the core.
+- **Names** match `[a-z0-9_]+` and start with the entity prefix (`cg_`, `p_`). Names are **append-only and never renamed**: they are the identity on the wire, in the viewer and in Arrow files.
+- **No cost class per metric** (D12). Reading `cpu.stat` or `io.stat` already makes the kernel flush its rstat tree each tick, so gating one costly file would save little. The rule interval is the only cost knob.
+
+The full list is in [Metrics and columns](/unjam/reference/metrics/).
+
+## The Source trait
+
+This is the **whole plug-in surface**:
+
+```rust
+pub enum Target<'a> {
+    Cgroup { dir: &'a Path },
+    Proc   { pid: u32, start: u64, comm: &'a str },
+}
+pub enum Slot { Empty, Open(File), Missing }   // one fd slot per metric file
+pub trait Source {
+    fn entity(&self) -> Ent;                    // Cgroup or Proc
+    fn metrics(&self) -> &'static [Metric];     // this source's slice of the columns
+    fn sample(&mut self, t: Target, slots: &mut [Slot], io: &mut Files, out: &mut [u64])
+        -> io::Result<()>;                      // Err: the entity is gone
+}
+pub type Probe = fn(&Env) -> Result<Box<dyn Source>, String>;
+pub const SOURCES: &[(&str, Probe)] = &[("cgroup", cgroup::probe), ("proc", procfs::probe)];
+```
+
+- `Sampler::new` runs every probe and puts the metrics of each entity kind one after the other. The offsets give each source its slice of the value vector.
+- A probe that fails (for example a future likwid source blocked by `perf_event_paranoid`) becomes one `W` line. It never stops the agent.
+- `Target` is an enum, not a generic. The entity's fd slots travel next to it, so a source caches its files through the shared [fd cache](/unjam/design/collection/#the-fd-cache). `Slot::Missing` remembers an absent file until the next 10 s retry.
+- `Box<dyn Source>` costs one indirect call per source per entity. That is negligible.
+
+How to add a source: [Add a metric source](/unjam/internals/extending/).
+
+## The Event type
+
+`Event<'a>` is the one interchange type between the sampler, the wire codec, the recorder, replay and the store. It borrows its strings and value slices, so the hot path allocates nothing per event.
+
+```rust
+pub enum Event<'a> {
+    Hello { proto: u32, version: &'a str, host: &'a str, step: &'a str, ntasks: u32, btime: u64 },
+    Desc  { ent: Ent, idx: u16, name: &'a str, unit: &'a str, kind: Kind },
+    Tick  { ts_ms: u64, self_cpu_us: u64, out_bytes: u64, dropped: u32, self_rss: u64 },
+    Cg    { id: u64, parent: u64, path: &'a str },
+    CgVals   { id: u64, first: u16, v: &'a [u64] },
+    CgGone(u64),
+    Proc  { pid: u32, start: u64, cg: u64, ppid: u32, comm: &'a str, cmd: &'a str },
+    ProcVals { pid: u32, first: u16, v: &'a [u64] },
+    ProcGone(u32),
+    Warn(&'a str),
+}
+```
+
+Each variant is one wire line (`H D T G g X P p x W`), described in [Wire lines](/unjam/reference/wire/).
+
+## In memory
+
+**Agent.** Two maps, `HashMap<u64, CgEnt>` and `HashMap<u32, ProcEnt>`. Each entry holds its metadata, a generation counter (to find removed entities) and its cached fds. Values are **not** stored: each tick sends absolute values (D8). One value buffer, one read buffer and recycled line buffers mean no allocation in steady state.
+
+**Viewer (`State`).**
+
+- `Columns` interns `(Ent, name)` to a `ColId`, with the unit and kind. This is how a new metric reaches the viewer with no code change.
+- `Node` maps each agent's local column index to a `ColId` and holds `cgs: HashMap<u64, Cg>` and `procs: HashMap<u32, Proc>`.
+- `Cg` and `Proc` hold the current and previous values (`v`, `pv`) with their times. A rate is `(v − pv) / (t − pt)` with `checked_sub`: a counter that goes backwards gives NA, never a negative rate.
+- `hist: [u16; 16]` is the ring of CPU per mille behind the history bar: 32 bytes per entity.
+- `State::derive` runs at most at 4 Hz. It sums `p_threads` into each cgroup and its ancestors, for the `~` PIDS fallback.
+- At 100,000 processes, `State` is about 33 MB.

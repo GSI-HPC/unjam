@@ -1,0 +1,78 @@
+---
+title: Testing
+description: Unit tests on captured fixture trees, golden screens, the 1,000-agent mux test, the budget test and the integration tests on sind Slurm clusters.
+---
+
+unjam has three test layers: **unit tests** in each module, run against real files captured from Slurm nodes; **the budget test**, which keeps the code small; and **integration tests** on real Slurm clusters in Docker, made with [sind](https://github.com/GSI-HPC/sind).
+
+```sh
+mise run test     # unit tests and tests/budget.rs
+mise run bench    # benchmarks (release build, report only)
+mise run it       # integration: create a sind cluster, test, delete it
+```
+
+## Fixtures
+
+Every reader takes its `/proc` root and cgroup root from `Env`, so tests run against files in `tests/fixtures/`, captured from sind workers:
+
+| Fixture | Holds |
+|---|---|
+| `proc/<pid>/{stat,io,cmdline}` | Including process names `a b` and `x) (y`, and a zombie |
+| `cgroup/25.11` | A Slurm 25.11 job tree (`job_42`) with `EnableExtraControllers=io,pids` |
+| `cgroup/26.05-sluid` | The same tree with a SLUID job directory |
+| `cgroup/no-controllers` | A job tree as default Slurm leaves it: no `io.stat`, `pids.current`, `memory.peak` or pressure files |
+| `golden/*.txt` | Expected `--batch` output and draw buffers (`mono` theme) |
+
+## Unit tests
+
+| Area | Covers |
+|---|---|
+| Parsers | `procfs::stat` with hostile process names, `kv`, `kv_eq` (PSI), `io_sum` over several disks, `memory.stat`, `auxv`, `nofile`, NA on missing files |
+| Slurm layout | `job_root` and `record_root` on 25.11, 26.05-SLUID, `node1_slurmstepd.scope`, and a `0::/` namespace root, which must fail |
+| Rules | `pattern_match`, `effective` and `TaskSet` tables; `Rule::parse` refuses `- p` and `500 o`; `next_due` on an exact multiple returns the **next** multiple |
+| Sampler | Timer grouping; pid reuse gives `x` then `P`; a recreated cgroup gives `X` then `G`; the fd-cache tiers at `cap − cap/8` and `cap`; a failed self-check gives cap 0; the fork-storm rule parses |
+| **Zero allocations** | A counting allocator (the one test-only `unsafe`) proves that 100 steady-state ticks of sample and encode allocate **nothing** |
+| Writer path | A blocked writer drops values and keeps structure; the budget limits bytes per second; the stagger formula |
+| Wire | Round trip of every line type, the 1000-byte cap, value splitting, string cleaning, extra trailing fields ignored |
+| **Mux** | 1,000 simulated agents. Their output is cut into whole-line chunks of at most 1024 bytes (slurmstepd's behaviour), interleaved randomly into one reader, and decoded into `State`. Every node's state must equal the reference exactly. One corrupt line must cause exactly one resync |
+| srun line | Golden argv for the default, `--nodelist`, `--srun-arg` and the keepalive forward |
+| Record | Schema and field metadata; keyframes on the first row per batch; a cut at 8,192 rows; seeking to the middle equals linear replay; a journal truncated at **200 random offsets** always gives its valid prefix and never panics |
+| State and viewer | Golden rows for the three layouts (fold, sibling sort with NA last, cross-node sums, folded node ranges); history ring wrap; heat strip grouping; the `~` PIDS fallback; hidden all-NA columns; `draw` against ratatui's `TestBackend`; `NO_COLOR` gives `mono`; `--batch` text |
+
+There are **no dev-dependencies**: tests use std, `TestBackend`, fixture trees and a small xorshift generator.
+
+## The budget test
+
+`tests/budget.rs` is an integration test that reads the source as text (it does not import the crate):
+
+1. Lines per module and in total, against `docs/budget.txt` (+10 % per module).
+2. Every item in `src/` has a `///` doc.
+3. Every dependency in `Cargo.toml` has a row in `docs/deps.md`.
+4. Every `allow(unsafe_code)` site matches an entry in `docs/unsafe.md`, one to one.
+
+Its own line counter is unit-tested inside the file. Size and crate count are checked by `scripts/size.sh`, and the unsafe rows of dependencies by `scripts/unsafe-deps.sh`; both scripts have self-tests.
+
+## Integration tests on sind
+
+`tests/sind/cluster.sh` writes the cluster: a controller, a submitter and three workers, users `alice` and `bob`, `WaitTime=10` and `ConstrainRAMSpace=yes`. CI runs three clusters:
+
+| Slurm | `EnableExtraControllers=io,pids` | `CgroupJobIdPaths=yes` | Proves |
+|---|---|---|---|
+| 25.11 | no | — | `job_<id>` names; IO columns hide, PIDS falls back to `~` |
+| 26.05 | yes | no | **SLUID** job directories |
+| 26.05 | yes | yes | `job_<id>` names on 26.05 |
+
+The nodes run the static musl binary, because the node images can have an older glibc than the build host. Assertions read `--batch` output.
+
+| # | Test | Asserts |
+|---|---|---|
+| 1 | Local view on a worker | The tree has `system.slice` and processes; the fd-cache self-check passed on real procfs and kernfs |
+| 2 | Attach isolation | 3 nodes, each with its `task_<N>` and `sleep 600`. **Decoy jobs of alice and of bob on the same nodes never appear.** The own step is absent. On 26.05 default the job directory is not `job_*` |
+| 3 | Selective rules | Node 0 shows processes at 500 ms; nodes 1–2 show cgroups only |
+| 4 | Teardown and survival | No `unjam` step 5 s after exit, and the job still runs. One agent killed: the others keep reporting past `WaitTime=10`. A SIGKILLed viewer with a 5 s keepalive leaves no step after 15 s |
+| 5 | Framing stress | 3 nodes × 500 processes at 100 ms for 30 s: **0 decode errors**; agent RSS under 16 MiB |
+| 6 | Record | Two journals; the job's exit code passes through; pyarrow reads columns and metadata; counters never decrease; the Parquet recipe gives the same row count; replay lists the process |
+| 7 | Record killed | After `scancel --signal=TERM`: a complete journal. After SIGKILL: at least one complete batch, and replay warns "truncated at byte N" once |
+| 8 | `--bcast` | 3 nodes report from a binary that exists only on the submitter; no copy is left on any worker |
+
+Each check prints `ok` or `not ok` and the run continues, so one failure shows every other result too. On failure, CI uploads the cluster's logs.

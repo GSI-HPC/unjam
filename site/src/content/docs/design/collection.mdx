@@ -1,0 +1,92 @@
+---
+title: Collection
+description: Which files unjam reads, how often, with how many syscalls, and how the bounded fd cache keeps the cost down.
+---
+
+import Figure from '../../../components/Figure.astro';
+import FdCache from '../../../components/diagrams/FdCache.astro';
+
+The agent reads only **plain text files** from cgroupfs and procfs, with std only: no libc calls in unjam's own code, no `unsafe`.
+
+## At start
+
+| File | Why |
+|---|---|
+| `/proc/self/cgroup` | The `0::<path>` line gives the own cgroup. No such line, or no cgroup2 mount: exit with "cgroup v2 only" |
+| `<root>/cgroup.controllers` | Its existence proves the mount is cgroup2 |
+| `/proc/self/auxv` | Page size (`AT_PAGESZ`) and clock tick (`AT_CLKTCK`), instead of `sysconf` |
+| `/proc/sys/kernel/hostname` | Host name for `H` |
+| `/proc/stat` `btime` | Boot time, so a process start time becomes wall time |
+| `/proc/self/limits` | The soft open-files limit, which sizes the fd cache (no `getrlimit`) |
+| `/sys/class/block/*/holders`, `dev` | Disks below a device-mapper or md device, whose IO the kernel would count twice |
+
+## Files per tick
+
+The rule level decides what is read: `o` nothing, `c` the cgroup files, `p` also the processes.
+
+| When | File | Syscalls, cached / uncached |
+|---|---|---|
+| Discovery walk: each due tick of a sampled subtree (at most 1 Hz); `o` subtrees every 10 s | `read_dir(<cg>)`, directories only | openat + 2 getdents + close |
+| Cgroup at `c` or `p` | `cpu.stat`, `memory.current`, `memory.peak`, `memory.events`, `memory.stat`, `io.stat`, `pids.current`, `cpu.pressure`, `memory.pressure`, `io.pressure` | 10 / 30 |
+| Cgroup at `p` | `cgroup.procs`, sorted and merge-diffed against the last list into `P` and `x` lines | 1 / 3 |
+| Process at `p` | `/proc/<pid>/stat`, `/proc/<pid>/io` | 2 / 6 |
+| New process, or `comm` changed (exec) | `/proc/<pid>/cmdline`, once | 3 |
+| Agent self | `/proc/self/stat` (own CPU and RSS for `T`) | 1 |
+
+A missing file (controller off, old kernel) gives NA. It is tried again only once per 10 s, so a node without the io and pids controllers does not pay a failed open per file per tick.
+
+## The read primitive
+
+All hot-path reads go through one function:
+
+```rust
+Files::read(&mut self, s: &mut Slot, hot: bool, dir: &Path, name: &str) -> io::Result<&[u8]>
+```
+
+- **`Slot::Open`:** `FileExt::read_at(buf, 0)`, which is std's `pread`. **One syscall.** If the read fills the buffer, the buffer doubles and the read repeats.
+- **`Slot::Empty`:** open, read, and keep the file if the tier rule below allows it; otherwise close it. Three syscalls.
+- **`ESRCH`** from a cached `/proc/<pid>/stat` means the process has exited: drop the fd and send `x`.
+
+Parsing works on `&[u8]` with byte-level number parsers. The `stat` line is split at the **last** `)`, because a process name can contain spaces and `)`.
+
+## The fd cache
+
+<Figure caption="A bounded fd cache with no eviction. Every file can use the lower seven eighths of the cap; the top eighth is kept for hot files. A slot is freed only when its entity goes away.">
+  <FdCache />
+</Figure>
+
+- **Cap.** `min(soft_nofile − 64, 1024)` for agents and the recorder, `min(soft_nofile − 64, 2048)` locally. The 64 spare fds cover stdio, `read_dir` and short-lived opens.
+- **Hot files** (`cpu.stat`, `memory.current`, `cgroup.procs`, `/proc/<pid>/stat`) are cached while `open < cap`. **All other files** are cached while `open < cap − cap/8`. This costs one comparison per open.
+- **Typical job node.** 70 cgroups at `p` and 100 processes need about 970 files. With cap 1024, about 920 are cached and every hot file is cached.
+- **Memory cost.** Each cached fd keeps a seq_file buffer of at least 4 KiB, charged to the agent's memcg, which in attach mode is inside the **job's** memcg. 1024 fds is about 5 MiB of job memory: explicit and bounded. No `setrlimit` is needed.
+- **Prompt close.** An entity's fds close the moment its `X` or `x` is sent. An open fd on a removed cgroup would keep it alive as a dying cgroup.
+
+### Self-check at start
+
+The cache relies on `pread` at offset 0 producing fresh content. The agent proves this once:
+
+1. procfs: read the cached `/proc/self/io` twice with a 4 KiB read in between. `rchar` must grow.
+2. kernfs: read the own cgroup's `cpu.stat` twice around about 2 ms of busy work. `usage_usec` must grow.
+
+If either check fails, the cap becomes 0 (always open, read, close) and the agent sends one `W` line.
+
+## Cost
+
+Per tick, at the default rules on a typical node, the budget is **at most 0.5 % of one core** for the agent. Measured numbers are in `docs/perf.md`:
+
+| Measurement | Result |
+|---|---|
+| Sample and encode, release build (fixture files, no rstat flush) | 2.7–3.2 µs per cgroup, about 1.1 µs per process |
+| Viewer decode and apply | 54–60 ns per value |
+| Allocations per steady tick (sample and encode) | **0** (unit test with a counting allocator) |
+| Stress: 3 nodes × 500 processes at 100 ms (10 Hz) | 590 KB/s into the viewer, agent 10 % of one core and 1.8 MiB RSS, 0 errors |
+
+The stress case is ten times the default rate with every process sampled. The default rules for a job are 1 to 2 s, and cgroups only above 16 nodes.
+
+:::note[rstat flushes]
+Reading `cpu.stat`, `io.stat` or `memory.stat` makes the kernel flush its per-CPU statistics tree for that cgroup. The walk is top-down, so the first read in a subtree is expected to pay for the flush. That is why there is no per-metric cost class: the rule interval is the knob.
+:::
+
+## Who may read what
+
+cgroupfs interface files are readable by everyone. `/proc/<pid>/io` needs ptrace read access, which a user has for their own processes. For other processes the value is NA, and the first refused open sends one `W` line per agent.

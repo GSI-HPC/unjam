@@ -1,0 +1,90 @@
+---
+title: Viewer
+description: The viewer's threads, its bounded receive path, one row walk for three layouts, and rendering that costs only what is visible.
+---
+
+import Figure from '../../../components/Figure.astro';
+import Layouts from '../../../components/diagrams/Layouts.astro';
+
+The viewer has to stay responsive with 1,000 agents and 100,000 processes. Three rules make that possible: **keys never wait behind data**, **decode work per loop is bounded**, and **only visible rows cost anything**.
+
+## Threads and channels
+
+| Thread | Does |
+|---|---|
+| main | Blocks on one data channel; handles keys, decodes lines, draws |
+| input | Blocks in `crossterm::event::read()`; queues keys; sets the quit flag on <kbd>q</kbd> and Ctrl-C at once |
+| stdout reader (attach) | Reads srun's stdout into a 64 KiB buffer and sends whole-line chunks |
+| stderr reader (attach) | Sends srun's stderr lines to the log |
+| ticker | Sends `Msg::Tick` once per second (self-monitoring, staleness) |
+| sampler (local only) | `agent::run`, the same loop a remote agent runs |
+
+- **Data channel** (`sync_channel(64)`): `Msg::Lines`, `Msg::Stderr`, `Msg::End`, `Msg::Tick`. It is bounded on purpose: when the viewer falls behind, srun's pipe fills, and the agents' writer threads absorb it by dropping values (see [Wire protocol](/unjam/design/wire/#never-block-the-sampler)).
+- **Key queue** (unbounded): `Msg::Key`, `Msg::Resize`. The input thread queues a key there and only `try_send`s a wake-up into the data channel, so a key never waits behind 64 queued chunks, and the input thread never blocks (D38).
+
+## The main loop
+
+1. Block on the data channel.
+2. Handle every queued key first.
+3. For each line: `wire::split_node` gives the node, `wire::parse` gives an `Event`, `State::apply` stores it.
+4. Stop decoding after **10 ms**, handle keys again, then continue. Key latency stays under about 50 ms, even during an 8 MB attach burst.
+5. Draw at once after a key, and at most at **4 Hz** after data. `State::derive` runs in the same slot.
+
+`State::apply` is the **one** way the store changes, for live data and replay alike. It returns `Err` to ask for a resync.
+
+## One walk, three layouts
+
+<Figure caption="The three layouts are level orders over one State, walked by one function (state::rows). The layout changes the tree, never the data.">
+  <Layouts />
+</Figure>
+
+- **step** (the Slurm default): job → step → node → task → process. A node row under a step is that node's `step_N` cgroup, measured by the kernel. Only job and step rows add up across nodes.
+- **node**: node → cgroup tree → processes.
+- **flat**: one row per process (or per task cgroup where processes are off), with a NODE column and one global sort. Locally this is the classic `top`.
+
+Fold state is keyed by `(level, key)`, so it survives layout changes. The sort orders **siblings only**: a row never leaves its parent (D39). NA sorts last in both directions.
+
+**Folded node ranges.** Under a step, the top nodes by the sort column fill the window; the rest fold into one row such as `n0418 … n1024 (606 folded)`. The step layout therefore has a bounded row count at any node count.
+
+## Only what is visible
+
+```rust
+pub fn rows(st: &State, view: &View, limit: usize) -> Vec<Row>
+```
+
+- `draw` passes `limit = scroll + height`. The walk enters only open subtrees and **stops after `limit` rows**.
+- A sibling set larger than the rows still needed is first cut with `select_nth_unstable_by`, then only the kept part is sorted. Flat at 100,000 processes costs about 1 ms per frame.
+- ratatui `Row`s and `Cell`s are built **only for the visible slice**, and ratatui's buffer diff writes only changed cells.
+- A default column that is NA on every visible row is hidden for that frame. The check runs over the visible slice only.
+- The cursor follows its entity, not its index. When data moves the entity past the limit, `tui::follow` builds all rows once, so a key always acts on the row the user sees highlighted.
+- `--batch N` prints the same `rows` as text.
+
+## Self-monitoring
+
+The tool must show its own cost (D40). The second header line shows:
+
+- `tui`: the viewer's CPU and RSS, from a cached `/proc/self/stat`, once per second;
+- `in` and `out`: bytes and lines per second from the agents, control bytes to them;
+- `drop` and `err`: dropped ticks and decode errors, summed;
+- `agents max`: the busiest agent's CPU and RSS (from `T`) with its node name.
+
+The help pane adds a per-node table: CPU, RSS, bytes out, lines per second, drops, errors and clock skew.
+
+## History and heat
+
+- **CPU history.** Each `Cg` and `Proc` keeps a 16-entry ring of CPU per mille (32 bytes). Each row draws it as a bar sparkline in the theme's heat colours.
+- **Node heat strip.** One cell per ⌈N / width⌉ nodes. The colour **and** the height (`▂▄▆█`) show the busiest node in the cell, relative to the busiest node in the job, so imbalance shows on many-core nodes and also in `mono`.
+
+## Themes
+
+```rust
+pub struct Theme {
+    pub name: &'static str,
+    pub base: Style, pub header: Style, pub dim: Style, pub accent: Style,
+    pub selected: Style, pub marked: Style, pub warn: Style, pub crit: Style,
+    pub tree: Style, pub heat: [Color; 4], pub glyphs: Glyphs,
+}
+pub const THEMES: &[Theme] = &[NORD, NIGHT, MOCHA, GRUVBOX, SOLAR, AMBER, MONO];
+```
+
+Themes are compiled-in `const` data: no theme files and no parser dependency (D30). The renderer reads styles only from these slots, so a new theme is one entry in the table. `NO_COLOR` forces `mono`, and a unit test checks that `mono` exists.

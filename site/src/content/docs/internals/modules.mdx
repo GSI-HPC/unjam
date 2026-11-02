@@ -1,0 +1,58 @@
+---
+title: Modules
+description: The twelve flat modules of unjam, what each one owns, and how they depend on each other.
+---
+
+import Figure from '../../../components/Figure.astro';
+import ModuleMap from '../../../components/diagrams/ModuleMap.astro';
+
+unjam is twelve flat files in `src/`. There are no nested modules, no library target and no workspace.
+
+<Figure caption="Line budgets per module from docs/budget.txt, grouped by role. The total cap is enforced by tests/budget.rs.">
+  <ModuleMap />
+</Figure>
+
+## What each module owns
+
+| Module | Owns |
+|---|---|
+| `main.rs` | The CLI (clap derive: viewer flags with the `--slurm`/`--replay` group, `record`, hidden `agent`), dispatch, exit codes, `parse_dur` |
+| `model.rs` | `Metric`, `Kind`, `Ent`, `NA`, the metric table, `Event`, `What`, `Rule`, `TaskSet`, `Control`, `effective`, `upsert`, `interval_ms`, `next_due` |
+| `source.rs` | `trait Source`, `Target`, `Slot`, `Env`, `Probe`, `SOURCES`, `Files` (the tiered fd cache and its self-check), the `kv` and `kv_eq` parsers |
+| `cgroup.rs` | The cgroup source (with the stacked-disk list), `walk`, `procs`, `io_sum`, `psi`, `self_cgroup`, `job_root`, `record_root`, the v2 check |
+| `procfs.rs` | The `/proc` source, `stat`, `ident`, `cmdline`, `auxv`, `nofile`, `usage`, `host_btime` |
+| `agent.rs` | `Sampler` (rules, timers, discovery, emit, own CPU and RSS), `run`, `Out` (writer thread, budget, stagger), `--unlink-self` |
+| `wire.rs` | The `Event` and `Control` text codec, `split_node`, the line cap and value splitting |
+| `slurm.rs` | Job resolution, `squeue`/`scontrol` queries, `srun_args` (with `--bcast`), the srun child and its reader threads, `Remote` teardown |
+| `record.rs` | `run_record`, `schema`, `Writer`, `Rec` (recording in the viewer), `Reader` (index, rounds, seek), `Counting`, replay |
+| `state.rs` | `State`, `Node`, `Cg`, `Proc`, `Columns`, `apply`, `derive`, `rate`, `rows` (three layouts, sort, filter, folded node ranges) |
+| `tui.rs` | `App`, `Feed`, `Msg`, the input thread, the event loop, keys, `draw` (header, self-monitoring, heat strip, history bars), `fmt`, `--batch` output, `default_rules` |
+| `theme.rs` | `Theme`, `Glyphs`, `THEMES`, `pick` |
+
+## Who uses whom
+
+```text
+main ─┬─ tui ─── state ─── model
+      │   ├──── record ─── state, model
+      │   └──── slurm ──── wire, model
+      ├─ agent ─┬─ source ─┬─ cgroup
+      │         │          └─ procfs
+      │         └─ wire ──── model
+      └─ record (record mode: agent::Sampler → State → Writer)
+```
+
+- `model` depends on nothing. It is the vocabulary every other module shares.
+- `state` knows nothing about where data comes from. Live lines, local lines and replayed batches all arrive through `State::apply`.
+- `wire`, `record`, `state` and `tui` do not know any concrete metric. A new metric source touches none of them.
+- `theme` is pure data plus `pick`.
+
+## Conventions
+
+- Every item has a `///` doc that says **why** it exists (`tests/budget.rs` checks this).
+- Functions stay at or below 60 lines.
+- No traits, generics or builders without a second user. The one trait, `Source`, is the required extension point.
+- The `#[cfg(test)]` module is the last item of its file and does not count against the budget.
+- Compiled-in data (the theme table) sits between `// budget: data` and `// budget: end` and does not count either.
+- Nothing prints to stdout outside the wire and `--batch` code: stdout is the agent protocol, or the application's in `record` mode (`clippy::print_stdout = "deny"`).
+
+The full type and function inventory, with a reason for each item, is §11 of the [design document](/unjam/reference/design-document/#11-type-and-function-inventory).
