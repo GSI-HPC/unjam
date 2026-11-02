@@ -1,0 +1,16 @@
+#!/bin/bash
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+# Fake squeue: job 4242 (4 nodes, running) and 4243 (pending). Format is fixed to unjam's.
+# FAKE_SLURM_NOJOB=1 → no jobs; FAKE_SLURM_TWO=1 → two running jobs of yours.
+args="$*"
+[ -n "${FAKE_SLURM_NOJOB:-}" ] && exit 0
+rows=("4242 4 RUNNING 0 train-llm" "4243 2 PENDING 0 postproc")
+[ -n "${FAKE_SLURM_TWO:-}" ] && rows+=("4250 1 RUNNING 0 notebook")
+case "$args" in
+  *--jobs=*) want=${args##*--jobs=}; want=${want%% *}
+    for r in "${rows[@]}"; do [ "${r%% *}" = "$want" ] && echo "$r"; done
+    [ "$want" = 4242 ] || [ "$want" = 4243 ] || [ "$want" = 4250 ] || { echo "slurm_load_jobs error: Invalid job id specified" >&2; exit 1; } ;;
+  *--states=RUNNING*) for r in "${rows[@]}"; do [[ $r == *RUNNING* ]] && echo "$r"; done ;;
+  *) printf '%s\n' "${rows[@]}" ;;
+esac

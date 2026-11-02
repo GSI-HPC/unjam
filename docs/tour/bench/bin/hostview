@@ -1,0 +1,12 @@
+#!/bin/bash
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+# hostview CMD...: runs CMD as on a cgroup v2 host: own mount and cgroup namespace rooted at the
+# bench's /host tree, a cgroup2 mount at /sys/fs/cgroup, CMD in user.slice/.../session-3.scope.
+U=${BENCH_UNIFIED:-/sys/fs/cgroup/unified}
+mkdir -p /run/bench-unified
+echo $$ > "$U/host/cgroup.procs"
+export BENCH_CG=/run/bench-unified
+export U
+exec unshare -m -C --propagation private sh -c \
+  'mount --bind "$U" /run/bench-unified && mount -t cgroup2 none /sys/fs/cgroup && echo $$ > /sys/fs/cgroup/user.slice/user-1000.slice/session-3.scope/cgroup.procs && exec "$@"' sh "$@"
