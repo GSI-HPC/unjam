@@ -27,14 +27,14 @@ Or with [mise](https://mise.jdx.dev/) (static binary for Linux x86_64 and aarch6
 
 ```sh
 mise use -g github:GSI-HPC/unjam      # latest release
-mise use -g github:GSI-HPC/unjam@0.2.0  # a fixed version
+mise use -g github:GSI-HPC/unjam@0.3.0  # a fixed version
 ```
 
 mise downloads the release asset and checks its GitHub build-provenance attestation before it
 installs. To check by hand, with the [GitHub CLI](https://cli.github.com/):
 
 ```sh
-gh release download v0.2.0 -R GSI-HPC/unjam -p 'unjam-linux-amd64' -p checksums.txt
+gh release download v0.3.0 -R GSI-HPC/unjam -p 'unjam-linux-amd64' -p checksums.txt
 sha256sum --ignore-missing -c checksums.txt
 gh attestation verify unjam-linux-amd64 -R GSI-HPC/unjam
 ```

@@ -6,7 +6,7 @@ description: The text protocol between unjam agents and the viewer, and the cont
 Agents write **tab-separated text lines** to stdout; srun carries them to the viewer. Every line is at most **1000 bytes** including the newline (Slurm cuts lines at 1024) and starts with the agent's node index, so lines from many nodes can be mixed freely. The design is explained in [Wire protocol](/unjam/design/wire/).
 
 ```text
-0	H	1	0.2.0	node1	4242.3	4	1793627942
+0	H	1	0.3.0	node1	4242.3	4	1793627942
 0	D	c	0	cg_cpu_usage_usec	us	counter
 0	G	81723	0	
 0	G	81731	81723	step_0

@@ -10,6 +10,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-02
+
 ### Added
 
 - RPM packages for Rocky Linux 9 and 10 and the latest Fedora (x86_64, aarch64) in a signed dnf repository at <https://gsi-hpc.github.io/unjam/rpm/>; `unjam-release` installs its configuration and key.
@@ -111,5 +113,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - CI: checks run through mise; release binaries are built with provenance.
 - New dependencies: `ratatui`, `arrow-ipc`, `arrow-array`, `arrow-schema` and `signal-hook`.
 
-[Unreleased]: https://github.com/GSI-HPC/unjam/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/GSI-HPC/unjam/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/GSI-HPC/unjam/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/GSI-HPC/unjam/compare/v0.1.0...v0.2.0
