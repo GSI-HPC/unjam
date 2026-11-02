@@ -1,0 +1,206 @@
+---
+// SPDX-License-Identifier: LGPL-3.0-or-later
+// SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+
+// A real unjam screen. `frame` shows one recorded screen (rendered at build time, no script);
+// without it, the component plays the whole recording with its key presses and captions.
+// Recordings come from site/src/data/term/ (see site/README.md for how to make them).
+import { ansiToHtml } from '../lib/ansi';
+import slurm from '../data/term/slurm.json';
+import host from '../data/term/host.json';
+import replay from '../data/term/replay.json';
+
+interface Props {
+  rec: 'slurm' | 'host' | 'replay';
+  frame?: number;
+  title?: string;
+  caption?: string;
+}
+const recs = { slurm, host, replay };
+const { rec, frame, title, caption } = Astro.props;
+const data = recs[rec];
+const cols = Number(data.size.split('x')[0]);
+const still = frame !== undefined;
+const html = ansiToHtml(data.frames[still ? frame : 0].a, cols);
+const prompt = title ?? { slurm: 'unjam --slurm=4242', host: 'unjam', replay: 'unjam --replay rec/*.arrows' }[rec];
+---
+
+<figure class="uj-term not-content" data-play={still ? undefined : ''} style={`--cols:${cols}`}>
+  <div class="bar" aria-hidden="true">
+    <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+    <span class="title">$ {prompt}</span>
+  </div>
+  <div class="screen">
+    <pre set:html={html} aria-label={`Terminal: ${prompt}`}></pre>
+    {!still && <div class="cap" aria-live="polite"><span class="keys"></span><span class="text"></span></div>}
+  </div>
+  {
+    !still && (
+      <div class="ctl">
+        <button type="button" class="pp" aria-label="Pause">❚❚</button>
+        <div class="track"><div class="fill"></div></div>
+        <button type="button" class="step" data-dir="-1" aria-label="Previous screen">‹</button>
+        <button type="button" class="step" data-dir="1" aria-label="Next screen">›</button>
+      </div>
+    )
+  }
+  {!still && <script type="application/json" set:html={JSON.stringify({ cols, frames: data.frames })} />}
+  {caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<style>
+  .uj-term {
+    --t-bg: var(--uj-term-bg);
+    --t-fg: #d8dee9;
+    container-type: inline-size;
+    margin: 1.5rem 0;
+    border: 1px solid var(--uj-line);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--t-bg);
+    box-shadow: 0 12px 40px -18px rgb(0 0 0 / 0.6);
+  }
+  .bar {
+    display: flex;
+    gap: 0.4rem;
+    align-items: center;
+    padding: 0.45rem 0.75rem;
+    background: #3b4252;
+    border-bottom: 1px solid #434c5e;
+  }
+  .dot { width: 0.65rem; height: 0.65rem; border-radius: 50%; background: #4c566a; }
+  .dot:nth-child(1) { background: #bf616a; }
+  .dot:nth-child(2) { background: #ebcb8b; }
+  .dot:nth-child(3) { background: #a3be8c; }
+  .title { margin-left: 0.6rem; font: 0.8rem var(--sl-font-mono); color: #a3adc0; }
+  .screen { position: relative; }
+  pre {
+    margin: 0;
+    padding: 0.6rem 0.75rem;
+    border: 0;
+    background: var(--t-bg);
+    color: var(--t-fg);
+    /* 100 columns fill the box: a mono cell is about 0.6 em wide. */
+    font: calc((100cqw - 1.5rem) / var(--cols) / 0.602) / 1.22 'JetBrains Mono', 'DejaVu Sans Mono', ui-monospace, monospace;
+    white-space: pre;
+    overflow: hidden;
+  }
+  .cap {
+    position: absolute;
+    left: 50%;
+    bottom: 1.4rem;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 0.6rem;
+    align-items: center;
+    max-width: 92%;
+    padding: 0.45rem 0.85rem;
+    border: 1px solid #4c566a;
+    border-radius: 8px;
+    background: rgb(46 52 64 / 0.94);
+    color: #eceff4;
+    font: 500 clamp(0.72rem, 2.1cqw, 0.95rem) / 1.35 var(--sl-font);
+    box-shadow: 0 8px 24px -8px rgb(0 0 0 / 0.7);
+    transition: opacity 0.25s;
+  }
+  .cap:has(.text:empty) { opacity: 0; }
+  .keys:empty { display: none; }
+  .keys :global(kbd) {
+    margin-right: 0.2rem;
+    border-color: #88c0d0;
+    background: #2e3f55;
+    color: #eceff4;
+    animation: press 0.5s ease-out;
+  }
+  @keyframes press {
+    from { transform: translateY(2px) scale(0.92); background: #88c0d0; color: #2e3440; }
+  }
+  .ctl {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    padding: 0.4rem 0.75rem;
+    background: #3b4252;
+    border-top: 1px solid #434c5e;
+  }
+  .ctl button {
+    min-width: 1.9rem;
+    padding: 0.1rem 0.4rem;
+    border: 1px solid #4c566a;
+    border-radius: 5px;
+    background: #2e3440;
+    color: #d8dee9;
+    font: 0.8rem var(--sl-font);
+    cursor: pointer;
+  }
+  .ctl button:hover { border-color: #88c0d0; }
+  .track { flex: 1; height: 4px; border-radius: 2px; background: #2e3440; overflow: hidden; }
+  .fill { height: 100%; width: 0; background: #88c0d0; transition: width 0.3s linear; }
+  figcaption {
+    padding: 0.5rem 0.85rem;
+    background: var(--sl-color-bg);
+    color: var(--sl-color-gray-3);
+    font-size: var(--sl-text-sm);
+    border-top: 1px solid var(--uj-line);
+  }
+</style>
+
+<script>
+  import { ansiToHtml } from '../lib/ansi';
+
+  const glyph: Record<string, string> = {
+    Down: '↓', Up: '↑', Left: '←', Right: '→', Enter: 'Enter', Escape: 'Esc', Space: 'space',
+  };
+  // "/ t r a i n" → [/] [train]; "s s s" → [s ×3].
+  function chips(keys: string): string {
+    const k = keys.split(' ').filter(Boolean).map((x) => glyph[x] ?? x);
+    const out: string[] = [];
+    if (k[0] === '/' && k.length > 1) out.push('/', k.slice(1).join(''));
+    else for (const x of k) {
+      const last = out.at(-1);
+      const m = last?.match(/^(.+?)(?: ×(\d+))?$/);
+      if (m && m[1] === x) out[out.length - 1] = `${x} ×${Number(m[2] ?? 1) + 1}`;
+      else out.push(x);
+    }
+    return out.map((x) => `<kbd>${x.replace(/</g, '&lt;')}</kbd>`).join('');
+  }
+
+  for (const fig of document.querySelectorAll<HTMLElement>('.uj-term[data-play]')) {
+    const { cols, frames } = JSON.parse(fig.querySelector('script')!.textContent!);
+    const pre = fig.querySelector('pre')!;
+    const keys = fig.querySelector<HTMLElement>('.keys')!;
+    const text = fig.querySelector<HTMLElement>('.text')!;
+    const fill = fig.querySelector<HTMLElement>('.fill')!;
+    const pp = fig.querySelector<HTMLButtonElement>('.pp')!;
+    const cache: string[] = [];
+    let i = 0;
+    let timer: number | undefined;
+    let playing = !matchMedia('(prefers-reduced-motion: reduce)').matches;
+    let visible = false;
+
+    const show = (n: number) => {
+      i = (n + frames.length) % frames.length;
+      const f = frames[i];
+      pre.innerHTML = cache[i] ??= ansiToHtml(f.a, cols);
+      keys.innerHTML = f.k ? chips(f.k) : '';
+      text.textContent = f.c;
+      fill.style.width = `${((i + 1) / frames.length) * 100}%`;
+    };
+    const schedule = () => {
+      clearTimeout(timer);
+      if (playing && visible) timer = window.setTimeout(() => { show(i + 1); schedule(); }, frames[i].d * 1000);
+    };
+    const setPlaying = (p: boolean) => {
+      playing = p;
+      pp.textContent = p ? '❚❚' : '▶';
+      pp.setAttribute('aria-label', p ? 'Pause' : 'Play');
+      schedule();
+    };
+    pp.addEventListener('click', () => setPlaying(!playing));
+    for (const b of fig.querySelectorAll<HTMLButtonElement>('.step'))
+      b.addEventListener('click', () => { setPlaying(false); show(i + Number(b.dataset.dir)); });
+    new IntersectionObserver(([e]) => { visible = e.isIntersecting; schedule(); }, { threshold: 0.3 }).observe(fig);
+    show(0);
+    setPlaying(playing);
+  }
+</script>
