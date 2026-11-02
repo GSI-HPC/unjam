@@ -1,0 +1,116 @@
+/*
+SPDX-License-Identifier: LGPL-3.0-or-later
+SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+*/
+
+/* Dense reference layout: wide content, small type, tight spacing, striped tables. The landing
+   page title is a shell prompt in the mono font, like the TUI. Colours stay in nord.css. */
+
+:root {
+  --sl-content-width: 64rem;
+  --sl-text-body: 0.9375rem;
+  --sl-line-height: 1.55;
+  --sl-nav-height: 3rem;
+  --sl-sidebar-width: 16rem;
+}
+
+.sl-markdown-content {
+  --sl-content-gap-y: 1rem;
+}
+.sl-markdown-content :is(p, ul, ol) {
+  margin-block: 0.6rem;
+}
+.sl-markdown-content h2 {
+  font-size: 1.4rem;
+  margin-top: 1.8rem;
+  padding: 0.25rem 0.6rem;
+  border-left: 4px solid var(--sl-color-accent);
+  background: var(--sl-color-gray-6);
+}
+.sl-markdown-content h3 {
+  font-size: 1.1rem;
+  margin-top: 1.4rem;
+}
+.sl-markdown-content pre {
+  font-size: 0.82rem;
+}
+
+/* Sidebar */
+.sidebar-content {
+  font-size: 0.85rem;
+}
+.sidebar-content a {
+  padding-block: 0.2rem;
+}
+.sidebar-content details > summary {
+  text-transform: uppercase;
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  color: var(--sl-color-gray-3);
+}
+
+/* Tables */
+.sl-markdown-content table {
+  width: 100%;
+  font-size: 0.88rem;
+}
+.sl-markdown-content tbody tr:nth-child(odd) {
+  background: var(--sl-color-gray-6);
+}
+.sl-markdown-content th {
+  background: var(--sl-color-gray-5);
+  position: sticky;
+  top: 0;
+}
+
+/* Cards and buttons */
+.card {
+  border-radius: 4px;
+  padding: 0.8rem 1rem;
+  border: 1px solid var(--sl-color-gray-5);
+}
+.sl-link-button {
+  border-radius: 4px;
+  padding: 0.4em 1em;
+  font-size: 0.9rem;
+}
+
+/* Landing page: a prompt and a block cursor in front of the mono title. */
+[data-has-hero] .hero {
+  padding-block: 2rem 1rem;
+  gap: 1.2rem;
+}
+[data-has-hero] .hero h1 {
+  font-family: var(--sl-font-mono);
+  font-size: clamp(2rem, 8vw, 3.2rem);
+  letter-spacing: -0.04em;
+}
+[data-has-hero] .hero h1::before {
+  content: '$ ';
+  color: var(--uj-green);
+}
+[data-has-hero] .hero h1::after {
+  content: '\258C';
+  color: var(--uj-frost);
+  animation: uj-blink 1.1s steps(1) infinite;
+}
+@keyframes uj-blink {
+  50% {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-has-hero] .hero h1::after {
+    animation: none;
+  }
+}
+
+/* Phones: a diagram keeps a readable size and scrolls sideways instead of shrinking. */
+@media (max-width: 50rem) {
+  .uj-figure {
+    overflow-x: auto;
+  }
+  .uj-figure svg {
+    min-width: 36rem;
+  }
+}
