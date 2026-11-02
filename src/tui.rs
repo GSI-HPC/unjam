@@ -806,13 +806,14 @@ fn band(pm: f64) -> usize {
 }
 
 /// A history bar: one glyph per sample, height relative to the row's peak (at least one core),
-/// colour banded against `top` per mille (one core locally, the busiest node's load in a job).
-fn bar(t: &Theme, hist: &[u16], top: f64) -> Vec<Span<'static>> {
+/// colour banded against `top` per mille (one core locally, the busiest node's load in a job);
+/// empty samples take `idle`.
+fn bar(t: &Theme, hist: &[u16], top: f64, idle: Style) -> Vec<Span<'static>> {
     let scale = u32::from(hist.iter().copied().max().unwrap_or(0).max(1000));
     let span = |h: u16| {
         let lvl = if h == 0 { 0 } else { 1 + (u32::from(h) * 7 / scale).min(7) as usize };
         let heat = Style::new().fg(t.heat[band(f64::from(h) * 1000.0 / top)]);
-        let style = if h == 0 { t.dim } else { heat };
+        let style = if h == 0 { idle } else { heat };
         Span::styled(t.glyphs.bars[lvl], style)
     };
     hist.iter().map(|&h| span(h)).collect()
@@ -925,7 +926,7 @@ fn strip_line(app: &App, t: &Theme, width: u16) -> Vec<Span<'static>> {
     let used = v.and_then(|v| v.get(1, Kind::Gauge)).unwrap_or(used);
     let full = if total > 0.0 { (used / total * 16.0).clamp(0.0, 16.0) as usize } else { 0 };
     let mut spans = vec![Span::styled(" CPU ", t.dim)];
-    spans.extend(bar(t, &hist, 1000.0));
+    spans.extend(bar(t, &hist, 1000.0, t.dim));
     let gauge = |i: usize, style, n| Span::styled(t.glyphs.bars[i].repeat(n), style);
     let mem = [gauge(8, heat(0.0), full), gauge(0, t.dim, 16 - full)];
     let cpu = format!(" {} of {ncpu} CPUs  ", fmt("%", cpu));
@@ -978,7 +979,9 @@ fn table(f: &mut Frame, app: &App, t: &Theme, vis: &[Row], area: Rect) {
         let pid = Cell::from(Line::from(take(3)).right_aligned());
         cells.push(if at { pid } else { pid.style(t.dim) });
         let top = if matches!(r.key, Key::Cg(..) | Key::Proc(..)) { top } else { top * nodes };
-        cells.push(Cell::from(Line::from(bar(t, &r.hist[HIST - usize::from(hw)..], top))));
+        // Dim on the cursor row would turn mono's reversed cells into a grey slab.
+        let idle = if at { Style::new() } else { t.dim };
+        cells.push(Cell::from(Line::from(bar(t, &r.hist[HIST - usize::from(hw)..], top, idle))));
         cells.extend(cols.iter().map(|&c| Cell::from(Line::from(take(5 + c)).right_aligned())));
         cells.extend(int.then(|| Cell::from(take(4))));
         let stale = matches!(r.key, Key::Cg(..) | Key::Proc(..)) && app.stale(r.node);
@@ -1606,7 +1609,7 @@ mod tests {
         let t = &THEMES[app.opts.theme];
         let fg: Vec<_> = strip_line(&app, t, 40)[1..3].iter().map(|s| s.style.fg).collect();
         assert_eq!(fg, [Some(t.heat[0]), Some(t.heat[3])], "1.4 of 34 cores is idle beside 34");
-        let fg = |top| bar(t, &[8000], top)[0].style.fg;
+        let fg = |top| bar(t, &[8000], top, t.dim)[0].style.fg;
         assert_eq!([fg(1000.0), fg(64_000.0)], [Some(t.heat[3]), Some(t.heat[1])], "8 cores");
     }
 
