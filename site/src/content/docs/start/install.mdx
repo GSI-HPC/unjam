@@ -55,7 +55,7 @@ gh attestation verify /usr/bin/unjam -R GSI-HPC/unjam
 
 ```sh
 mise use -g github:GSI-HPC/unjam          # latest release
-mise use -g github:GSI-HPC/unjam@0.2.0    # a fixed version
+mise use -g github:GSI-HPC/unjam@0.3.0    # a fixed version
 ```
 
 ## Static binary
@@ -63,7 +63,7 @@ mise use -g github:GSI-HPC/unjam@0.2.0    # a fixed version
 Download the asset for your architecture (`unjam-linux-amd64` or `unjam-linux-arm64`) from the [releases page](https://github.com/GSI-HPC/unjam/releases) and check it with the [GitHub CLI](https://cli.github.com/):
 
 ```sh
-gh release download v0.2.0 -R GSI-HPC/unjam -p 'unjam-linux-amd64' -p checksums.txt
+gh release download v0.3.0 -R GSI-HPC/unjam -p 'unjam-linux-amd64' -p checksums.txt
 sha256sum --ignore-missing -c checksums.txt
 gh attestation verify unjam-linux-amd64 -R GSI-HPC/unjam
 install -m 0755 unjam-linux-amd64 ~/.local/bin/unjam

@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
 #
 # Print the CHANGELOG.md section of one version (the release notes); fail if it is missing or empty.
-# Usage: scripts/changelog-section.sh 0.2.0
+# Usage: scripts/changelog-section.sh 0.3.0
 set -euo pipefail
 
 version=${1:?usage: changelog-section.sh VERSION}
