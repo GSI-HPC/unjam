@@ -1,0 +1,31 @@
+<!doctype html>
+<!--
+SPDX-License-Identifier: LGPL-3.0-or-later
+SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
+-->
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>unjam RPM packages</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 46rem; margin: 2rem auto; padding: 0 1rem; }
+  pre { padding: .75rem 1rem; overflow-x: auto; background: color-mix(in srgb, currentColor 8%, transparent); }
+</style>
+<h1>unjam RPM packages</h1>
+<p>Packages for Rocky Linux 9 and 10 (and other Enterprise Linux 9 and 10) and the latest
+Fedora, on x86_64 and aarch64. Install the repository configuration, then unjam:</p>
+<pre>
+dnf install https://gsi-hpc.github.io/unjam/rpm/unjam-release-el9.noarch.rpm     # EL 9
+dnf install https://gsi-hpc.github.io/unjam/rpm/unjam-release-el10.noarch.rpm    # EL 10
+dnf install https://gsi-hpc.github.io/unjam/rpm/unjam-release-fedora.noarch.rpm  # Fedora
+dnf install unjam
+</pre>
+<p>unjam-release installs <code>/etc/yum.repos.d/unjam.repo</code> and the signing key
+<a href="RPM-GPG-KEY-unjam">RPM-GPG-KEY-unjam</a>. dnf checks the signature of each package
+and of the repository metadata.</p>
+<p>The package holds the release binary without changes, so its build provenance stays
+valid:</p>
+<pre>gh attestation verify /usr/bin/unjam -R GSI-HPC/unjam</pre>
+<p>Source and releases: <a href="https://github.com/GSI-HPC/unjam">github.com/GSI-HPC/unjam</a></p>
+</html>
