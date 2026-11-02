@@ -18,7 +18,7 @@ const T = 8;
 ---
 
 <svg class="uj-d jr" viewBox="0 0 800 270" role="img" aria-labelledby="jr-t">
-  <title id="jr-t">The agent reads its own cgroup from /proc/self/cgroup, checks that the last three segments are step_*, user and task_*, and strips them. The rest is the job root, named job_4242 on Slurm 25.11 and a SLUID on 26.05. The agent's own step is excluded.</title>
+  <title id="jr-t">The agent reads its own cgroup from /proc/self/cgroup, checks that the last three segments are step_*, user and task_*, and strips them. The rest is the job root, named job_4242 on Slurm 25.11 and a SLUID on 26.05 by default. The agent's own step is excluded.</title>
   <text x="24" y="30" class="mono sm muted">/proc/self/cgroup  →  0::/</text>
   {
     segs.map((s, i) => (
@@ -27,7 +27,7 @@ const T = 8;
         {i === 2 ? (
           <>
             <text x={s.w / 2} y="25" text-anchor="middle" class="mono b jr-a">job_4242</text>
-            <text x={s.w / 2} y="25" text-anchor="middle" class="mono b jr-b">01KJ8…QZ</text>
+            <text x={s.w / 2} y="25" text-anchor="middle" class="mono b jr-b">s01JC…Z7M</text>
           </>
         ) : (
           <text x={s.w / 2} y="25" text-anchor="middle" class="mono">{s.t}</text>
@@ -44,7 +44,7 @@ const T = 8;
   </g>
   <g class="jr-name">
     <text x={pos[2] + segs[2].w / 2} y="174" text-anchor="middle" class="sm muted jr-a">Slurm 25.11: job_&lt;id&gt;</text>
-    <text x={pos[2] + segs[2].w / 2} y="174" text-anchor="middle" class="sm muted jr-b">26.05: a SLUID</text>
+    <text x={pos[2] + segs[2].w / 2} y="174" text-anchor="middle" class="sm muted jr-b">26.05 default: a SLUID</text>
   </g>
   <g class="jr-ex" transform={`translate(${pos[3]} 194)`}>
     <rect width="214" height="44" rx="7" class="area s-red" />
@@ -60,6 +60,7 @@ const T = 8;
     animation-duration: var(--T);
     animation-iteration-count: infinite;
     animation-timing-function: ease-in-out;
+    animation-fill-mode: backwards;
   }
   .jr .s5 { animation-name: jr-peel; animation-delay: 0s; }
   .jr .s4 { animation-name: jr-peel; animation-delay: 0.35s; }

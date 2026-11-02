@@ -33,7 +33,7 @@ const lit: [number, number][][] = [[[0.9, 5.6], [7.6, 8.8]], [[1.9, 8.8]], [[2.9
 
   <rect class="box" x="478" y="70" width="130" height="74" rx="9" />
   <text x="543" y="100" text-anchor="middle" class="b">writer</text>
-  <text x="543" y="122" text-anchor="middle" class="sm muted">write_all, may block</text>
+  <text x="543" y="122" text-anchor="middle" class="sm muted">1 buffer, may block</text>
 
   <rect class="box" x="664" y="70" width="120" height="74" rx="9" />
   <text x="724" y="100" text-anchor="middle" class="mono b">stdout</text>
@@ -45,7 +45,7 @@ const lit: [number, number][][] = [[[0.9, 5.6], [7.6, 8.8]], [[1.9, 8.8]], [[2.9
 
   <rect class="box s-orange" x="224" y="214" width="196" height="64" rx="9" />
   <text x="322" y="240" text-anchor="middle" class="b">pending</text>
-  <text x="322" y="262" text-anchor="middle" class="sm muted">structure: H D G X P x W</text>
+  <text x="322" y="262" text-anchor="middle" class="sm muted">structure: H D G X P x W T</text>
   <text x="91" y="250" text-anchor="middle" class="sm muted">values of a tick</text>
   <text x="91" y="268" text-anchor="middle" class="sm muted">that does not fit</text>
   <rect class="area s-red" x="36" y="214" width="110" height="64" rx="9" />
@@ -81,7 +81,7 @@ const lit: [number, number][][] = [[[0.9, 5.6], [7.6, 8.8]], [[1.9, 8.8]], [[2.9
     </rect>
     <rect x="-8" y="-6" width="16" height="12" rx="3" class="f-orange" opacity="0">
       <animate attributeName="opacity" dur={`${T}s`} repeatCount="indefinite" {...on(4.3, 7.2)} />
-      <animateMotion dur={`${T}s`} repeatCount="indefinite" path="M150 107 H200 C200 170 260 190 300 246 C300 160 300 150 254 104" keyPoints="0;0;0.62;0.62;1;1" keyTimes={`0;${k(4.3)};${k(5.3)};${k(6.6)};${k(7.2)};1`} calcMode="linear" />
+      <animateMotion dur={`${T}s`} repeatCount="indefinite" path="M150 107 H200 C200 170 236 190 246 246 C246 160 250 150 254 104" keyPoints="0;0;0.58;0.58;1;1" keyTimes={`0;${k(4.3)};${k(5.3)};${k(6.6)};${k(7.2)};1`} calcMode="linear" />
     </rect>
     <text x="322" y="168" text-anchor="middle" class="sm b f-red" opacity="0">queue full: drop values, keep structure
       <animate attributeName="opacity" dur={`${T}s`} repeatCount="indefinite" {...on(4.5, 6.4)} />

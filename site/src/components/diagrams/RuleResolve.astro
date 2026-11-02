@@ -33,10 +33,9 @@ const T = 7;
 </svg>
 
 <style define:vars={{ T: `${T}s` }}>
-  .rr .rr-r { animation: rr-scan var(--T) infinite; }
-  .rr .r1 { animation-delay: 0.6s; }
-  .rr .r2 { animation-delay: 1.2s; }
-  .rr .r3 { animation-delay: 1.8s; }
+  /* model::effective scans from the end and stops at the first match: r3, then r2. */
+  .rr .r2, .rr .r3 { animation: rr-scan var(--T) infinite backwards; }
+  .rr .r2 { animation-delay: 0.6s; }
   .rr .rr-win { animation: rr-win var(--T) infinite; }
   @keyframes rr-scan {
     0% { opacity: 0.35; }

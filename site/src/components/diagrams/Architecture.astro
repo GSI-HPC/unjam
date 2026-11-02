@@ -25,11 +25,12 @@ const y = (i: number) => 52 + i * 112;
       ['input', 'keys, never blocked'],
       ['stdout reader', 'whole-line chunks'],
       ['stderr reader', 'srun messages → log'],
+      ['control', 'rules, K → srun stdin'],
     ].map(([n, d], k) => (
-      <g transform={`translate(32 ${114 + k * 62})`}>
-        <rect class="f-panel2" width="206" height="50" rx="6" />
-        <text x="12" y="21" class="mono b">{n}</text>
-        <text x="12" y="40" class="muted sm">{d}</text>
+      <g transform={`translate(32 ${114 + k * 50})`}>
+        <rect class="f-panel2" width="206" height="42" rx="6" />
+        <text x="12" y="18" class="mono b">{n}</text>
+        <text x="12" y="35" class="muted sm">{d}</text>
       </g>
     ))
   }
@@ -77,11 +78,11 @@ const y = (i: number) => 52 + i * 112;
         <>
           {[0, 1].map((k) => (
             <rect width="16" height="8" rx="2" class="f-frost" x="-8" y="-4">
-              <animateMotion dur="2.4s" begin={`${i * 0.3 + k * 1.2}s`} repeatCount="indefinite" rotate="auto" path={`M524 ${y(i) + 52} C494 ${y(i) + 52} 496 188 470 188 M318 186 H258`} />
+              <animateMotion dur="2.4s" begin={`${i * 0.3 + k * 1.2 - 2.4}s`} repeatCount="indefinite" rotate="auto" path={`M524 ${y(i) + 52} C494 ${y(i) + 52} 496 188 470 188 M318 186 H258`} />
             </rect>
           ))}
           <circle r="4.5" class="f-orange">
-            <animateMotion dur="4.8s" begin="0.6s" repeatCount="indefinite" path={`M258 218 H318 M470 216 C496 216 494 ${y(i) + 80} 522 ${y(i) + 80}`} />
+            <animateMotion dur="4.8s" begin="-4.2s" repeatCount="indefinite" path={`M258 218 H318 M470 216 C496 216 494 ${y(i) + 80} 522 ${y(i) + 80}`} />
           </circle>
         </>
       ))
