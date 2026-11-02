@@ -26,6 +26,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - `space`, `p`, `+` and `-` on a process row act on its cgroup; `←` on a leaf moves to its parent.
 - The detail popup shows the full command line, CPU as %, `char` values as letters, and the sums of job and step rows.
 - Replay names the recorded interval, shows `[end]`, and its header line 2 shows the position in the recording.
+- The table aligns with the header: its text starts one cell in, and the headings of number columns are right-aligned like the numbers.
+- On a narrow terminal the header lines and the footer drop whole fields and key hints instead of cutting a value or the clock; footer keys show in the accent colour.
+- The detail and help panes pad their text by one cell, also on wrapped lines, and the detail pane names the node on its first line.
+- Flat rows have no tree guides, and a process cut off at the bottom of the window no longer shows `└`.
+- Marks are underlined in every theme (amber marks did not show), and mono's cursor row has no grey slab in the history column.
 - `--help` groups the attach flags under "Slurm attach (with --slurm)" and says that `--slurm` and `--bcast` take a value only with `=`.
 
 ### Fixed

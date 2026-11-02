@@ -421,7 +421,9 @@ impl<'a> Walk<'a, '_> {
         let room = self.limit.saturating_sub(self.out.len());
         let filter = !self.v.filter.is_empty() && !self.free;
         let step = matches!(parent, Some(Key::Step(_)));
-        if sibs.len() > room && room > 0 && !filter && !step {
+        // A cut set has more siblings past the window, so none of its rows is the last.
+        let cut = sibs.len() > room && room > 0 && !filter && !step;
+        if cut {
             sibs.select_nth_unstable_by(room - 1, |a, b| self.cmp(a, b));
             sibs.truncate(room);
         }
@@ -443,7 +445,8 @@ impl<'a> Walk<'a, '_> {
                 if let Key::Folded(_) = r.key { std::mem::take(&mut rest) } else { self.kids(&r) };
             let hit = !filter || self.hit(&r);
             let open = (filter && !hit) || self.v.is_open(r.key);
-            (r.depth, r.last, r.open) = (depth, i + 1 == n, (!kids.is_empty()).then_some(open));
+            (r.depth, r.last, r.open) =
+                (depth, i + 1 == n && !cut, (!kids.is_empty()).then_some(open));
             let (mark, key) = (self.out.len(), r.key);
             self.out.push(r);
             let free = self.free;

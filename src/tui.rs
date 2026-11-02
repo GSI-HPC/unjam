@@ -17,10 +17,11 @@ use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{self, Event as Term, KeyCode, KeyEvent};
 use ratatui::crossterm::event::{KeyEventKind, KeyModifiers};
+use ratatui::layout::HorizontalAlignment::{Left, Right};
 use ratatui::layout::{Constraint, Layout as Split, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row as TRow, Table, Wrap};
+use ratatui::widgets::{Block, Cell, Clear, Padding, Paragraph, Row as TRow, Table, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::agent::{OFF_WALK_MS, now_ms};
@@ -52,12 +53,35 @@ const COLS: [(&str, &str, u16); NCOL] = [
 ];
 /// Sort columns cycled by `s`: NAME, the value columns, then NODE (not in local mode).
 const SORTS: [&str; NCOL + 2] = ["NAME", "CPU%", "MEM", "IO-R/s", "IO-W/s", "PIDS", "NODE"];
-/// Footer key hints, help and quit first: an 80-column terminal cuts the end.
-const HINTS: &str = "? help q quit ↑↓ move ←→ fold ␣ mark p level +/- rate v layout s sort / filter r record t theme";
-/// Replay footer key hints.
-const REPLAY: &str = "? help q quit ␣ play , . tick < > 60s g G start/end v layout / filter";
 // budget: data
-/// Help pane keys and legend, live; each line fits the 62 columns of the pane at 80x24.
+/// Footer key hints as (key, action), help and quit first: a narrow terminal drops whole
+/// hints from the end.
+const HINTS: [(&str, &str); 12] = [
+    ("?", "help"),
+    ("q", "quit"),
+    ("↑↓", "move"),
+    ("←→", "fold"),
+    ("␣", "mark"),
+    ("p", "level"),
+    ("+/-", "rate"),
+    ("v", "layout"),
+    ("s", "sort"),
+    ("/", "filter"),
+    ("r", "record"),
+    ("t", "theme"),
+];
+/// Replay footer key hints.
+const REPLAY: [(&str, &str); 8] = [
+    ("?", "help"),
+    ("q", "quit"),
+    ("␣", "play"),
+    (", .", "tick"),
+    ("< >", "60s"),
+    ("g G", "start/end"),
+    ("v", "layout"),
+    ("/", "filter"),
+];
+/// Help pane keys and legend, live; each line fits the 60 columns of the pane at 80x24.
 const HELP: [&str; 10] = [
     "↑↓ j k  PgUp PgDn  g G  move         Enter  detail",
     "← → h l  fold (← on a leaf: parent)  ␣  mark    a  clear",
@@ -72,7 +96,7 @@ const HELP: [&str; 10] = [
 ];
 /// Help pane keys in replay.
 const HELP_REPLAY: [&str; 3] = [
-    "␣  play/pause    , .  one tick    < >  60 s    g G  start/end",
+    "␣  play/pause   , .  one tick   < >  60 s   g G  start/end",
     "↑↓ j k PgUp PgDn  move    ← →  fold    Enter  detail",
     "/  filter    v  layout    s S  sort    t  theme    q  quit",
 ];
@@ -751,6 +775,8 @@ fn texts(app: &App, r: &Row) -> [String; 5 + NCOL] {
     let gl = &THEMES[app.opts.theme].glyphs;
     let glyph = match r.open {
         Some(o) => [gl.closed, gl.open][usize::from(o)],
+        // Flat rows have no parent to hang from.
+        None if app.view.layout == Layout::Flat => "",
         None if matches!(r.key, Key::Proc(..)) => gl.guide[usize::from(r.last)],
         None => "  ",
     };
@@ -780,13 +806,14 @@ fn band(pm: f64) -> usize {
 }
 
 /// A history bar: one glyph per sample, height relative to the row's peak (at least one core),
-/// colour banded against `top` per mille (one core locally, the busiest node's load in a job).
-fn bar(t: &Theme, hist: &[u16], top: f64) -> Vec<Span<'static>> {
+/// colour banded against `top` per mille (one core locally, the busiest node's load in a job);
+/// empty samples take `idle`.
+fn bar(t: &Theme, hist: &[u16], top: f64, idle: Style) -> Vec<Span<'static>> {
     let scale = u32::from(hist.iter().copied().max().unwrap_or(0).max(1000));
     let span = |h: u16| {
         let lvl = if h == 0 { 0 } else { 1 + (u32::from(h) * 7 / scale).min(7) as usize };
         let heat = Style::new().fg(t.heat[band(f64::from(h) * 1000.0 / top)]);
-        let style = if h == 0 { t.dim } else { heat };
+        let style = if h == 0 { idle } else { heat };
         Span::styled(t.glyphs.bars[lvl], style)
     };
     hist.iter().map(|&h| span(h)).collect()
@@ -804,8 +831,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         [1, 1, 1, 0, 1].map(|h| if h == 0 { Constraint::Fill(1) } else { Constraint::Length(h) });
     let [head, mon, strip, body, foot] = Split::vertical(sizes).areas(area);
     let ([l0, l1], err) = (title(app), app.st.nodes.iter().any(|n| n.errors > 0));
-    f.render_widget(Paragraph::new(l0).style(t.header), head);
-    f.render_widget(Paragraph::new(l1).style(if err { t.crit } else { t.dim }), mon);
+    let w = usize::from(area.width);
+    f.render_widget(Paragraph::new(fit(&l0, "  ", w)).style(t.header), head);
+    let style = if err { t.crit } else { t.dim };
+    f.render_widget(Paragraph::new(fit(&l1, " · ", w)).style(style), mon);
     f.render_widget(Paragraph::new(Line::from(strip_line(app, t, strip.width))), strip);
     let height = usize::from(body.height.saturating_sub(1));
     app.view.window = height.saturating_sub(4).max(4);
@@ -820,15 +849,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         let at = Rect { y: body.y + 1, height: 1, ..body };
         f.render_widget(Paragraph::new(" no match (Esc clears the filter)").style(t.dim), at);
     }
-    let fresh = app.log.front().filter(|_| now_ms().saturating_sub(app.logged) < 10_000);
-    let keys = if app.replay.is_some() { REPLAY } else { HINTS };
-    let text = match (app.overlay, &*app.view.filter, fresh) {
-        (3, f, _) => format!(" /{f}▏"),
-        (_, "", Some(l)) => format!(" {l} │ {keys}"),
-        (_, "", None) => format!(" {keys}"),
-        (_, f, _) => format!(" filter {f} (/ edits, Esc clears) │ {keys}"),
-    };
-    f.render_widget(Paragraph::new(text).style(t.dim.bg(t.header.bg.unwrap_or_default())), foot);
+    let style = t.dim.bg(t.header.bg.unwrap_or_default());
+    f.render_widget(Paragraph::new(footer(app, t, w)).style(style), foot);
     let (w, h) = (area.width, area.height);
     let pop = Rect { x: w / 10, y: h / 10, width: w * 4 / 5, height: h * 4 / 5 };
     let lines = match app.overlay {
@@ -839,9 +861,41 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if let Some((lines, title)) = lines {
         f.render_widget(Clear, pop);
         let block = Block::bordered().title(title).style(t.base).border_style(t.tree);
+        // The padding also indents the wrapped part of a long command line.
+        let block = block.padding(Padding::horizontal(1));
         let text = Paragraph::new(lines.join("\n")).wrap(Wrap { trim: false });
         f.render_widget(text.block(block), pop);
     }
+}
+
+/// The footer: the filter being edited, or any fresh log line or applied filter, then the key
+/// hints of the mode with the keys in the accent; only whole hints that fit.
+fn footer(app: &App, t: &Theme, w: usize) -> Line<'static> {
+    let fresh = app.log.front().filter(|_| now_ms().saturating_sub(app.logged) < 10_000);
+    let keys = if app.replay.is_some() { &REPLAY[..] } else { &HINTS[..] };
+    let (text, keys) = match (app.overlay, &*app.view.filter, fresh) {
+        (3, f, _) => (format!(" /{f}▏"), &[][..]),
+        (_, "", Some(l)) => (format!(" {l} │ "), keys),
+        (_, "", None) => (" ".into(), keys),
+        (_, f, _) => (format!(" filter {f} (/ edits, Esc clears) │ "), keys),
+    };
+    // Each hint is "key action ", so the last one may lose its trailing blank.
+    let mut used = text.chars().count();
+    let fit = |(k, a): &&(&str, &str)| {
+        used += k.chars().count() + a.chars().count() + 2;
+        used <= w + 1
+    };
+    let key = t.accent.not_dim();
+    let hints = keys.iter().take_while(fit);
+    let hints = hints.flat_map(|&(k, a)| [Span::styled(k, key), " ".into(), a.into(), " ".into()]);
+    [Span::raw(text)].into_iter().chain(hints).collect()
+}
+
+/// The longest prefix of `s` that fits `width` cells and ends before a `sep`: a narrow
+/// terminal drops whole header fields from the end instead of cutting the clock or a value.
+fn fit<'a>(s: &'a str, sep: &str, width: usize) -> &'a str {
+    let prefixes = s.match_indices(sep).map(|(i, _)| &s[..i]).chain([s]);
+    prefixes.take_while(|p| p.chars().count() <= width).last().unwrap_or(s)
 }
 
 /// Local mode: host CPU history and memory gauge (nord-host mock); Slurm mode: the node heat
@@ -872,7 +926,7 @@ fn strip_line(app: &App, t: &Theme, width: u16) -> Vec<Span<'static>> {
     let used = v.and_then(|v| v.get(1, Kind::Gauge)).unwrap_or(used);
     let full = if total > 0.0 { (used / total * 16.0).clamp(0.0, 16.0) as usize } else { 0 };
     let mut spans = vec![Span::styled(" CPU ", t.dim)];
-    spans.extend(bar(t, &hist, 1000.0));
+    spans.extend(bar(t, &hist, 1000.0, t.dim));
     let gauge = |i: usize, style, n| Span::styled(t.glyphs.bars[i].repeat(n), style);
     let mem = [gauge(8, heat(0.0), full), gauge(0, t.dim, 16 - full)];
     let cpu = format!(" {} of {ncpu} CPUs  ", fmt("%", cpu));
@@ -888,11 +942,12 @@ fn strip_line(app: &App, t: &Theme, width: u16) -> Vec<Span<'static>> {
 fn table(f: &mut Frame, app: &App, t: &Theme, vis: &[Row], area: Rect) {
     let (cols, hw) = (shown(vis), if area.width >= 100 { 16 } else { 8 });
     let node = app.view.layout == Layout::Flat && !app.opts.local;
-    let cpu = if hw == 16 { "CPU history" } else { "CPU" };
+    let cpu = if hw == 16 { "CPU history" } else { "CPU hist" };
     let mut tx: Vec<_> = vis.iter().map(|r| texts(app, r)).collect();
     let mut int = tx.iter().map(|x| &x[4]).filter(|s| !s.is_empty());
     let int = int.next().is_some_and(|a| hw == 16 || int.any(|b| b != a));
-    let mut head = vec![("NAME", 0), ("NODE", 8), ("PID", 7), (cpu, hw)];
+    // NAME starts one cell in, as the header and footer lines do.
+    let mut head = vec![(" NAME", 0), ("NODE", 8), ("PID", 7), (cpu, hw)];
     head.retain(|h| node || h.0 != "NODE");
     head.extend(cols.iter().map(|&c| (COLS[c].0, COLS[c].2)));
     head.extend(int.then_some(("  INT W", 7)));
@@ -906,7 +961,7 @@ fn table(f: &mut Frame, app: &App, t: &Theme, vis: &[Row], area: Rect) {
     #[allow(clippy::cast_precision_loss, reason = "a node count")]
     let nodes = app.st.nodes.len().max(1) as f64;
     let rows = vis.iter().zip(&mut tx).enumerate().map(|(i, (r, tx))| {
-        let room = usize::from(name).saturating_sub(tx[0].chars().count());
+        let room = usize::from(name).saturating_sub(tx[0].chars().count() + 1);
         if tx[1].chars().count() > room {
             tx[1] = tx[1].chars().take(room.saturating_sub(1)).chain(['…']).collect();
         }
@@ -915,6 +970,7 @@ fn table(f: &mut Frame, app: &App, t: &Theme, vis: &[Row], area: Rect) {
         let look = [t.accent, t.base, t.marked]
             [if marked { 2 } else { usize::from(matches!(r.key, Key::Proc(..))) }];
         let mut cells = vec![Cell::from(Line::from(vec![
+            Span::raw(" "),
             Span::styled(take(0), t.tree),
             Span::styled(take(1), look),
         ]))];
@@ -923,7 +979,9 @@ fn table(f: &mut Frame, app: &App, t: &Theme, vis: &[Row], area: Rect) {
         let pid = Cell::from(Line::from(take(3)).right_aligned());
         cells.push(if at { pid } else { pid.style(t.dim) });
         let top = if matches!(r.key, Key::Cg(..) | Key::Proc(..)) { top } else { top * nodes };
-        cells.push(Cell::from(Line::from(bar(t, &r.hist[HIST - usize::from(hw)..], top))));
+        // Dim on the cursor row would turn mono's reversed cells into a grey slab.
+        let idle = if at { Style::new() } else { t.dim };
+        cells.push(Cell::from(Line::from(bar(t, &r.hist[HIST - usize::from(hw)..], top, idle))));
         cells.extend(cols.iter().map(|&c| Cell::from(Line::from(take(5 + c)).right_aligned())));
         cells.extend(int.then(|| Cell::from(take(4))));
         let stale = matches!(r.key, Key::Cg(..) | Key::Proc(..)) && app.stale(r.node);
@@ -931,7 +989,11 @@ fn table(f: &mut Frame, app: &App, t: &Theme, vis: &[Row], area: Rect) {
         let look = [Style::new(), t.warn, t.selected][at];
         TRow::new(cells).style(look)
     });
-    let header = TRow::new(head.iter().map(|h| Cell::from(h.0))).style(t.header);
+    // Numbers are right-aligned, and so are their headings.
+    let right = |h: &str| h == "PID" || COLS.iter().any(|c| c.0 == h);
+    let head =
+        head.iter().map(|h| Line::from(h.0).alignment([Left, Right][usize::from(right(h.0))]));
+    let header = TRow::new(head.map(Cell::from)).style(t.header);
     f.render_widget(Table::new(rows, widths).header(header).column_spacing(1).style(t.base), area);
 }
 
@@ -939,19 +1001,24 @@ fn table(f: &mut Frame, app: &App, t: &Theme, vis: &[Row], area: Rect) {
 /// announced, raw and as the table shows it; a cross-node row lists its sums.
 fn detail(app: &App, r: &Row) -> Vec<String> {
     let n = &app.st.nodes[r.node as usize];
+    // The host goes on the first line, not after a wrapped command line.
+    let host = &n.host;
     let found = match r.key {
-        Key::Cg(_, id) => n.cgs.get(&id).map(|c| (0, &c.vals, format!("cgroup /{}", c.path))),
-        Key::Proc(_, pid) => {
-            n.procs.get(&pid).map(|p| (1, &p.vals, format!("pid {pid} {}\n {}", p.comm, p.cmd)))
+        Key::Cg(_, id) => {
+            n.cgs.get(&id).map(|c| (0, &c.vals, format!("cgroup /{}  ({host})", c.path)))
         }
+        Key::Proc(_, pid) => n
+            .procs
+            .get(&pid)
+            .map(|p| (1, &p.vals, format!("pid {pid} {}  ({host})\n{}", p.comm, p.cmd))),
         _ => None,
     };
     let Some((ent, vals, what)) = found else {
-        let sums = COLS.iter().zip(r.v).map(|((c, u, _), v)| format!(" {c:<26} {}", fmt(u, v)));
-        let head = [format!(" {}: sums over its nodes", r.name), String::new()];
+        let sums = COLS.iter().zip(r.v).map(|((c, u, _), v)| format!("{c:<26} {}", fmt(u, v)));
+        let head = [format!("{}: sums over its nodes", r.name), String::new()];
         return head.into_iter().chain(sums).collect();
     };
-    let mut out = vec![format!(" {what}  ({})", n.host), String::new()];
+    let mut out = vec![what, String::new()];
     for (c, (name, unit, kind)) in app.st.cols.0[ent].iter().enumerate() {
         let (raw, shown) =
             (vals.v.get(c).copied().unwrap_or(NA), vals.get(c, *kind).unwrap_or(f64::NAN));
@@ -963,21 +1030,21 @@ fn detail(app: &App, r: &Row) -> Vec<String> {
             (u, _) => (u, fmt(u, shown) + per),
         };
         out.push(match raw {
-            NA => format!(" {name:<26} NA (not announced or absent)"),
-            _ => format!(" {name:<26} {raw:>16} {unit:<3} {shown}"),
+            NA => format!("{name:<26} NA (not announced or absent)"),
+            _ => format!("{name:<26} {raw:>16} {unit:<3} {shown}"),
         });
     }
     out
 }
 
-/// Help pane: the keys of the mode and a legend, the per-node self-monitoring table (62
+/// Help pane: the keys of the mode and a legend, the per-node self-monitoring table (60
 /// columns, the pane's width at 80x24) and the log tail.
 fn help(app: &App) -> Vec<String> {
     let keys = if app.replay.is_some() { &HELP_REPLAY[..] } else { &HELP[..] };
-    let mut out: Vec<String> = keys.iter().map(|l| format!(" {l}")).collect();
+    let mut out: Vec<String> = keys.iter().map(|&l| l.into()).collect();
     let row = |v: [&str; 8]| {
         format!(
-            " {:<12} {:>6} {:>6} {:>8} {:>6} {:>4} {:>4} {:>6}",
+            "{:<12} {:>6} {:>6} {:>8} {:>6} {:>4} {:>4} {:>6}",
             v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]
         )
     };
@@ -994,7 +1061,7 @@ fn help(app: &App) -> Vec<String> {
         out.push(row([&n.host, &cpu, &rss, &out_s, &msg, &drop, &err, &skew]) + stale);
     }
     out.push(String::new());
-    out.extend(app.log.iter().take(20).map(|l| format!(" {l}")));
+    out.extend(app.log.iter().take(20).cloned());
     out
 }
 
@@ -1151,11 +1218,42 @@ mod tests {
         let rows = state::rows(&app.st, &app.view, usize::MAX);
         let sshd = rows.iter().find(|r| r.key == Key::Proc(0, 10)).unwrap();
         let text = detail(&app, sshd).join("\n");
-        assert!(text.starts_with(" pid 10 sshd\n sshd: /usr/sbin/sshd -D  (n1)"), "{text}");
-        assert!(text.contains(" p_state                                  82     R"), "{text}");
-        assert!(text.contains(" p_threads                                 3     3"), "{text}");
+        assert!(text.starts_with("pid 10 sshd  (n1)\nsshd: /usr/sbin/sshd -D\n\n"), "{text}");
+        assert!(text.contains("\np_state                                  82     R"), "{text}");
+        assert!(text.contains("\np_threads                                 3     3"), "{text}");
         let job = detail(&app, &rows[0]).join("\n");
-        assert!(job.starts_with(" job 42: sums over its nodes\n\n CPU%  "), "{job}");
+        assert!(job.starts_with("job 42: sums over its nodes\n\nCPU%  "), "{job}");
+    }
+
+    #[test]
+    fn header_lines_drop_whole_fields() {
+        assert_eq!(fit("unjam  4/4 nodes  12:00:00Z", "  ", 26), "unjam  4/4 nodes");
+        assert_eq!(fit("unjam  4/4 nodes  12:00:00Z", "  ", 27), "unjam  4/4 nodes  12:00:00Z");
+        assert_eq!(
+            fit("tui 1.0% 5M · drop 0 err 0 · agents", " · ", 30),
+            "tui 1.0% 5M · drop 0 err 0"
+        );
+    }
+
+    #[test]
+    fn footer_keeps_whole_hints_with_the_keys_in_the_accent() {
+        let (app, _rx) = app(true, "nord");
+        let line = footer(&app, &THEMES[0], 31);
+        let text: String = line.spans.iter().map(|s| &*s.content).collect();
+        assert_eq!(text, " ? help q quit ↑↓ move ←→ fold ");
+        assert_eq!(line.spans[1].style, THEMES[0].accent.not_dim());
+        assert_eq!(line.spans[3].style, Style::new());
+    }
+
+    #[test]
+    fn flat_rows_have_no_guides_and_a_cut_set_has_no_last_row() {
+        let (mut app, _rx) = app(true, "mono");
+        host(&mut app, 0, "vm", 1);
+        app.view.layout = Layout::Flat;
+        assert!(!state::rows(&app.st, &app.view, 1)[0].last, "a sibling follows past the window");
+        assert!(state::rows(&app.st, &app.view, usize::MAX).last().unwrap().last);
+        let flat = text(&frame(&mut app, 100, 14));
+        assert!(!flat.contains('├') && !flat.contains('└'), "{flat}");
     }
 
     #[test]
@@ -1177,7 +1275,7 @@ mod tests {
         feed(&mut app, 0, &[format!("P 30 1 4 1 python3 {}", cmd.replace(' ', "~"))]);
         app.st.derive();
         let narrow = text(&frame(&mut app, 80, 14));
-        assert!(narrow.contains("└ python3 train.py --epochs 90 --da…      30"), "{narrow}");
+        assert!(narrow.contains(" └ python3 train.py --epochs 90 --d…      30"), "{narrow}");
         assert!(text(&frame(&mut app, 220, 14)).contains(cmd));
         assert!(text(&frame(&mut app, 79, 14)).contains("unjam needs at least 80x8 (now 79x14)"));
     }
@@ -1511,7 +1609,7 @@ mod tests {
         let t = &THEMES[app.opts.theme];
         let fg: Vec<_> = strip_line(&app, t, 40)[1..3].iter().map(|s| s.style.fg).collect();
         assert_eq!(fg, [Some(t.heat[0]), Some(t.heat[3])], "1.4 of 34 cores is idle beside 34");
-        let fg = |top| bar(t, &[8000], top)[0].style.fg;
+        let fg = |top| bar(t, &[8000], top, t.dim)[0].style.fg;
         assert_eq!([fg(1000.0), fg(64_000.0)], [Some(t.heat[3]), Some(t.heat[1])], "8 cores");
     }
 

@@ -69,7 +69,8 @@ const fn palette(
         dim: Style::new().fg(rgb(dim)),
         accent: Style::new().fg(rgb(accent)).add_modifier(bold),
         selected: Style::new().bg(rgb(sel)),
-        marked: Style::new().fg(rgb(mark)).add_modifier(bold),
+        // Underlined too: amber's mark colour is close to its accent.
+        marked: Style::new().fg(rgb(mark)).add_modifier(bold.union(Modifier::UNDERLINED)),
         warn: Style::new().fg(rgb(heat[2])),
         crit: Style::new().fg(rgb(heat[3])).add_modifier(bold),
         tree: Style::new().fg(rgb(accent)),
@@ -164,6 +165,11 @@ mod tests {
         assert!(pick(None, Some("nope"), false).unwrap_err().starts_with("UNJAM_THEME: unknown"));
         let names: Vec<_> = THEMES.iter().map(|t| t.name).collect();
         assert_eq!(names, ["nord", "night", "mocha", "gruvbox", "solar", "amber", "mono"]);
+    }
+
+    #[test]
+    fn marks_are_underlined_in_every_theme() {
+        assert!(THEMES.iter().all(|t| t.marked.add_modifier.contains(Modifier::UNDERLINED)));
     }
 
     #[test]
