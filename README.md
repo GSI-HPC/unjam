@@ -7,6 +7,21 @@ step to Arrow files and replay them.
 
 unjam is under development; [docs/design.md](docs/design.md) describes where it is going.
 
+## Install
+
+RPM packages for Rocky Linux 9 and 10 (and other Enterprise Linux 9 and 10) and the latest
+Fedora, on x86_64 and aarch64:
+
+```sh
+dnf install https://gsi-hpc.github.io/unjam/rpm/unjam-release-el9.noarch.rpm  # or -el10, -fedora
+dnf install unjam
+```
+
+`unjam-release` installs the repository configuration and its signing key; dnf checks the
+signatures of the packages and of the repository metadata. The package holds the release
+binary without changes: `gh attestation verify /usr/bin/unjam -R GSI-HPC/unjam` checks its
+build provenance.
+
 ## Usage
 
 ```sh

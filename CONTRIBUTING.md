@@ -79,7 +79,27 @@ CI then runs the following steps for the tag, which must be on `main`:
 
 1. Run the checks and integration tests.
 2. Build static x86_64 and aarch64 binaries with build provenance attestations and checksums.
-3. Create a **draft** GitHub release with the binaries and the CHANGELOG section as notes.
-4. Wait for a reviewer of the `crates-io` environment to approve, then publish to [crates.io](https://crates.io/) with Trusted Publishing.
+3. Package the binaries as RPMs for Rocky Linux 9, Rocky Linux 10 and the latest Fedora (`rpm.yml`), sign them with the key of the `rpm-signing` environment and attest them.
+4. Create a **draft** GitHub release with the binaries, the RPMs and the CHANGELOG section as notes.
+5. Wait for a reviewer of the `crates-io` environment to approve, then publish to [crates.io](https://crates.io/) with Trusted Publishing.
 
-Publish the draft release by hand after the crate is on crates.io.
+Publish the draft release by hand after the crate is on crates.io. Publishing starts `pages.yml`: it builds the dnf repository at <https://gsi-hpc.github.io/unjam/rpm/> again from the RPMs of all published releases, deploys it and installs unjam from it on each distribution. To add RPMs to a release that has none, run `rpm.yml` by hand with its tag.
+
+### RPM Signing Key
+
+One RSA key signs all packages and the repository metadata. Its public half is `pkg/rpm/RPM-GPG-KEY-unjam`; `scripts/rpm.sh` stops if the secret key does not match it. To make the key (once):
+
+```sh
+export GNUPGHOME=$(mktemp -d)
+gpg --batch --passphrase '' --quick-gen-key 'unjam packages (GSI-HPC/unjam)' rsa4096 sign never
+gpg --armor --export > pkg/rpm/RPM-GPG-KEY-unjam          # commit this file
+gpg --armor --export-secret-keys > unjam-rpm-signing.asc  # keep offline, then delete here
+gh api -X PUT repos/GSI-HPC/unjam/environments/rpm-signing \
+  -F 'deployment_branch_policy[protected_branches]=false' -F 'deployment_branch_policy[custom_branch_policies]=true'
+gh api repos/GSI-HPC/unjam/environments/rpm-signing/deployment-branch-policies -f name=main -f type=branch
+gh api repos/GSI-HPC/unjam/environments/rpm-signing/deployment-branch-policies -f name='v*' -f type=tag
+gh secret set RPM_SIGNING_KEY --env rpm-signing -R GSI-HPC/unjam < unjam-rpm-signing.asc
+rm -rf "$GNUPGHOME"
+```
+
+The environment gives the key only to runs on `main` and `v*` tags, never to a pull request. GitHub Pages must deploy from GitHub Actions (Settings → Pages → Source).

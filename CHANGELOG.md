@@ -12,6 +12,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- RPM packages for Rocky Linux 9 and 10 and the latest Fedora (x86_64, aarch64) in a signed dnf repository at <https://gsi-hpc.github.io/unjam/rpm/>; `unjam-release` installs its configuration and key.
 - `z` pauses the live view and resumes it; the header shows `[paused]`.
 - The header shows the job name after the job id.
 - `--rule` takes its fields split by spaces (`--rule '* . 2s c'`) and intervals with units.
