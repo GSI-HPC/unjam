@@ -53,11 +53,34 @@ const COLS: [(&str, &str, u16); NCOL] = [
 ];
 /// Sort columns cycled by `s`: NAME, the value columns, then NODE (not in local mode).
 const SORTS: [&str; NCOL + 2] = ["NAME", "CPU%", "MEM", "IO-R/s", "IO-W/s", "PIDS", "NODE"];
-/// Footer key hints, help and quit first: an 80-column terminal cuts the end.
-const HINTS: &str = "? help q quit ↑↓ move ←→ fold ␣ mark p level +/- rate v layout s sort / filter r record t theme";
-/// Replay footer key hints.
-const REPLAY: &str = "? help q quit ␣ play , . tick < > 60s g G start/end v layout / filter";
 // budget: data
+/// Footer key hints as (key, action), help and quit first: a narrow terminal drops whole
+/// hints from the end.
+const HINTS: [(&str, &str); 12] = [
+    ("?", "help"),
+    ("q", "quit"),
+    ("↑↓", "move"),
+    ("←→", "fold"),
+    ("␣", "mark"),
+    ("p", "level"),
+    ("+/-", "rate"),
+    ("v", "layout"),
+    ("s", "sort"),
+    ("/", "filter"),
+    ("r", "record"),
+    ("t", "theme"),
+];
+/// Replay footer key hints.
+const REPLAY: [(&str, &str); 8] = [
+    ("?", "help"),
+    ("q", "quit"),
+    ("␣", "play"),
+    (", .", "tick"),
+    ("< >", "60s"),
+    ("g G", "start/end"),
+    ("v", "layout"),
+    ("/", "filter"),
+];
 /// Help pane keys and legend, live; each line fits the 62 columns of the pane at 80x24.
 const HELP: [&str; 10] = [
     "↑↓ j k  PgUp PgDn  g G  move         Enter  detail",
@@ -823,15 +846,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         let at = Rect { y: body.y + 1, height: 1, ..body };
         f.render_widget(Paragraph::new(" no match (Esc clears the filter)").style(t.dim), at);
     }
-    let fresh = app.log.front().filter(|_| now_ms().saturating_sub(app.logged) < 10_000);
-    let keys = if app.replay.is_some() { REPLAY } else { HINTS };
-    let text = match (app.overlay, &*app.view.filter, fresh) {
-        (3, f, _) => format!(" /{f}▏"),
-        (_, "", Some(l)) => format!(" {l} │ {keys}"),
-        (_, "", None) => format!(" {keys}"),
-        (_, f, _) => format!(" filter {f} (/ edits, Esc clears) │ {keys}"),
-    };
-    f.render_widget(Paragraph::new(text).style(t.dim.bg(t.header.bg.unwrap_or_default())), foot);
+    let style = t.dim.bg(t.header.bg.unwrap_or_default());
+    f.render_widget(Paragraph::new(footer(app, t, w)).style(style), foot);
     let (w, h) = (area.width, area.height);
     let pop = Rect { x: w / 10, y: h / 10, width: w * 4 / 5, height: h * 4 / 5 };
     let lines = match app.overlay {
@@ -845,6 +861,29 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         let text = Paragraph::new(lines.join("\n")).wrap(Wrap { trim: false });
         f.render_widget(text.block(block), pop);
     }
+}
+
+/// The footer: the filter being edited, or any fresh log line or applied filter, then the key
+/// hints of the mode with the keys in the accent; only whole hints that fit.
+fn footer(app: &App, t: &Theme, w: usize) -> Line<'static> {
+    let fresh = app.log.front().filter(|_| now_ms().saturating_sub(app.logged) < 10_000);
+    let keys = if app.replay.is_some() { &REPLAY[..] } else { &HINTS[..] };
+    let (text, keys) = match (app.overlay, &*app.view.filter, fresh) {
+        (3, f, _) => (format!(" /{f}▏"), &[][..]),
+        (_, "", Some(l)) => (format!(" {l} │ "), keys),
+        (_, "", None) => (" ".into(), keys),
+        (_, f, _) => (format!(" filter {f} (/ edits, Esc clears) │ "), keys),
+    };
+    // Each hint is "key action ", so the last one may lose its trailing blank.
+    let mut used = text.chars().count();
+    let fit = |(k, a): &&(&str, &str)| {
+        used += k.chars().count() + a.chars().count() + 2;
+        used <= w + 1
+    };
+    let key = t.accent.not_dim();
+    let hints = keys.iter().take_while(fit);
+    let hints = hints.flat_map(|&(k, a)| [Span::styled(k, key), " ".into(), a.into(), " ".into()]);
+    [Span::raw(text)].into_iter().chain(hints).collect()
 }
 
 /// The longest prefix of `s` that fits `width` cells and ends before a `sep`: a narrow
@@ -1182,6 +1221,16 @@ mod tests {
             fit("tui 1.0% 5M · drop 0 err 0 · agents", " · ", 30),
             "tui 1.0% 5M · drop 0 err 0"
         );
+    }
+
+    #[test]
+    fn footer_keeps_whole_hints_with_the_keys_in_the_accent() {
+        let (app, _rx) = app(true, "nord");
+        let line = footer(&app, &THEMES[0], 31);
+        let text: String = line.spans.iter().map(|s| &*s.content).collect();
+        assert_eq!(text, " ? help q quit ↑↓ move ←→ fold ");
+        assert_eq!(line.spans[1].style, THEMES[0].accent.not_dim());
+        assert_eq!(line.spans[3].style, Style::new());
     }
 
     #[test]
