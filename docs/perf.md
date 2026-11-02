@@ -22,6 +22,7 @@ commit, the machine (sind worker, Slurm line, kernel) and the command that produ
 | — | — | `io.stat` | — | — | rstat flush |
 | — | — | `memory.stat` | — | — | |
 | 485e292 | 6.18.44 (dev container, not a sind worker) | `/proc/meminfo` (1.5 KB) | 1.5–2.0 | 2.6–3.5 | Local TUI only, once per second; `fs::read` with its heap buffer was 4.6–5.9 µs. 20,000 reads per case, 3 runs |
+| a5d94e1 | 6.18.44 (dev container, not a sind worker) | `/proc/<pid>/environ` (5.5 KB; 13.5 KB) | never cached | 4.4–4.9; 10.7–11.4 | `procfs::mpi_of`: open, read, close and the nine-key scan, once per new process in a step's `user` subtree (D45). The time grows with the environment's size. 20,000 reads of the test process's own environment per case, 3 runs, release build. A sind measurement under load is still to do |
 
 ## Benchmarks (`mise run bench`)
 
