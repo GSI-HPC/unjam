@@ -15,7 +15,7 @@ export default defineConfig({
       description: 'A top-like terminal UI over the cgroup v2 tree, for Linux hosts and Slurm jobs.',
       logo: { src: './src/assets/logo.svg' },
       favicon: '/favicon.svg',
-      customCss: ['./src/styles/nord.css'],
+      customCss: ['./src/styles/nord.css', './src/styles/layout.css'],
       social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/GSI-HPC/unjam' }],
       editLink: { baseUrl: 'https://github.com/GSI-HPC/unjam/edit/main/site/' },
       lastUpdated: false,
