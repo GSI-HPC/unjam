@@ -1,0 +1,62 @@
+WEBVTT
+
+1
+00:00:00.000 --> 00:00:04.900
+unjam: see inside your Slurm job. Live, on every node.
+
+2
+00:00:04.900 --> 00:00:11.900
+Your 4-node job is slow. Which node? Which process?
+
+3
+00:00:11.900 --> 00:00:16.200
+unjam --slurm starts one small agent per node in an overlap step.
+
+4
+00:00:16.200 --> 00:00:20.500
+Each agent reads the cgroup v2 tree and streams it back. No daemon, no root.
+
+5
+00:00:20.509 --> 00:00:24.504
+unjam --slurm: all nodes of job 4242 in one tree
+
+6
+00:00:24.504 --> 00:00:29.157
+node3 lags: 14 % CPU, the other nodes 90 %
+
+7
+00:00:29.157 --> 00:00:31.169
+v: step, node or flat layout
+
+8
+00:00:31.169 --> 00:00:36.528
+flat: every process, sorted by CPU
+
+9
+00:00:36.528 --> 00:00:39.567
+/: filter by name or path
+
+10
+00:00:39.575 --> 00:00:44.717
+unjam: any cgroup v2 host: slices, services, sessions
+
+11
+00:00:44.717 --> 00:00:48.633
+Enter: every metric of one process
+
+12
+00:00:48.633 --> 00:00:51.883
+unjam record writes one Arrow file per node.
+
+13
+00:00:51.883 --> 00:00:55.133
+Replay it later with unjam --replay, or read it with pyarrow.
+
+14
+00:00:55.142 --> 00:01:02.733
+unjam --replay: scrub through a recorded job
+
+15
+00:01:02.733 --> 00:01:11.033
+Install with mise or dnf. Documentation: gsi-hpc.github.io/unjam
+
