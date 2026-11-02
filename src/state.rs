@@ -231,7 +231,7 @@ impl State {
     }
 
     /// PIDS fallback (§4.3): sums `p_threads` into each process's cgroup and its ancestors, for
-    /// nodes that changed since the last call. Runs in the TUI's ≤ 4 Hz redraw slot.
+    /// nodes that changed since the last call. The TUI runs it once per second and after a seek.
     pub fn derive(&mut self) {
         for n in self.nodes.iter_mut().filter(|n| n.dirty) {
             n.dirty = false;

@@ -39,20 +39,20 @@ Strings are cleaned (bytes below 0x20 become `?`, invalid UTF-8 is replaced) and
 
 A slow viewer, a full pipe or a congested srun must never delay sampling, and never use unbounded memory on a compute node. The agent's output path:
 
-<Figure caption="The sampler hands each tick to a writer thread with try_send on a queue of four buffers. When the queue is full or the byte budget is spent, the tick's values are dropped and its structure lines wait in pending, which goes out first with the next tick.">
+<Figure caption="The sampler hands each tick to a writer thread with try_send on a queue of four buffers. When no buffer is free or the queue is full, the tick's values are dropped and its structure lines wait in pending, which goes out first with the next tick. When only the byte budget is spent, the structure goes out at once without the values.">
   <Backpressure />
 </Figure>
 
 - **Writer thread.** The sampler fills a buffer per tick and calls `try_send` on a `sync_channel(4)`. The writer thread sleeps the stagger delay, writes the buffer with `write_all`, and returns it on a second channel for reuse. In steady state nothing is allocated.
-- **Structure is never dropped.** `H D G X P x W` and `T` go into `pending`; values go into `vals`. When there is no free buffer or no budget, only `vals` is dropped; `pending` goes out first with the next tick. `T` reports the dropped ticks.
+- **Structure is never dropped.** `H D G X P x W` and `T` go into `pending`; values go into `vals`. When there is no free buffer or the queue is full, only `vals` is dropped and `pending` goes out first with the next tick. When only the budget is spent, `pending` goes out at once without `vals`. `T` reports the dropped ticks.
 - **Token bucket.** Each agent has a byte budget (set by `B`, default 4 MiB/s divided over the nodes), refilled per millisecond and capped at two seconds' worth. A tick's values are sent only if the tokens cover them.
-- **Bounded memory.** At most four buffers in flight. `pending` grows only with structural churn and is capped at **1 MiB**. Past the cap, the agent sends a `W` line and applies `R * . <longest interval> c` to itself: processes off everywhere, which stops a fork storm from growing the backlog. The user's next rule change, or <kbd>0</kbd>, replaces it.
+- **Bounded memory.** At most five buffers in flight: four in the queue and one in the writer. `pending` grows only with structural churn and is capped at **1 MiB**. Past the cap, the agent sends a `W` line and applies `R * . <longest interval> c` to itself: processes off everywhere, which stops a fork storm from growing the backlog. <kbd>0</kbd> replaces it. A later rule from the user overrides it only for that rule's nodes and paths, because the last matching rule wins.
 
 ```rust
 let vals = !self.vals.is_empty() && self.tokens >= self.vals.len() as u64;
 // … take a spare buffer, put pending first, then the values if allowed …
 match self.tx.try_send((buf, delay)) {
-    Ok(()) => { self.pending.clear(); self.tokens -= len; }
+    Ok(()) => { self.pending.clear(); self.sent += len; self.tokens = self.tokens.saturating_sub(len); }
     Err(TrySendError::Full((b, _))) => { self.spare.push(b); self.dropped += u32::from(vals); }
     Err(TrySendError::Disconnected(_)) => return Err(io::ErrorKind::BrokenPipe.into()),
 }
@@ -65,7 +65,7 @@ match self.tx.try_send((buf, delay)) {
 | A malformed line, or a value count that does not fit the node's `D` table | The node's error counter grows, and the viewer sends `S <node>` (at most every 10 s per node) |
 | A node sends no `T` for 3 × its longest interval | The node is shown stale |
 | An agent exits | srun's stderr says so; the node turns stale; the others keep running |
-| srun exits | Every node is marked ended; the data stays |
+| srun exits | Every node is marked stale and the header shows `(ended)`; the tree stays |
 | The agent's write fails (`EPIPE`) | The agent exits 0 |
 | A node speaks another `proto` | All its lines are ignored, with one log line |
 
@@ -76,7 +76,7 @@ A resync (`S`) sends `H`, `D` and all `G` and `P` again. The next `T` then remov
 | Case | Into the viewer |
 |---|---|
 | 4 nodes, 100 processes and 70 cgroups each, 1 Hz | about 85 KB/s |
-| 1,000 nodes, large-job defaults | about 0.5 MB/s |
+| 1,000 nodes, large-job defaults | about 0.26 MB/s |
 | 100,000 processes at 1 Hz, all at `p` | about 10 MB/s raw, capped by the 4 MiB/s budget (drops reported) |
 | Measured: 3 nodes × 500 processes at 10 Hz (IT 5) | 590 KB/s, 15,000 lines/s, 0 errors |
 

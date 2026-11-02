@@ -85,17 +85,17 @@ pub enum Event<'a> {
 }
 ```
 
-Each variant is one wire line (`H D T G g X P p x W`), described in [Wire lines](/unjam/reference/wire/).
+Each variant has its own wire tag (`H D T G g X P p x W`); a long value list continues on further `g` or `p` lines, described in [Wire lines](/unjam/reference/wire/).
 
 ## In memory
 
-**Agent.** Two maps, `HashMap<u64, CgEnt>` and `HashMap<u32, ProcEnt>`. Each entry holds its metadata, a generation counter (to find removed entities) and its cached fds. Values are **not** stored: each tick sends absolute values (D8). One value buffer, one read buffer and recycled line buffers mean no allocation in steady state.
+**Agent.** Two maps, `HashMap<u64, CgEnt>` and `HashMap<u32, ProcEnt>`. Each entry holds its metadata and its cached fds; a cgroup entry also holds a generation counter (to find removed cgroups after a walk). Values are **not** stored: each tick sends absolute values (D8). One value buffer, one read buffer and recycled line buffers mean no allocation in steady state.
 
 **Viewer (`State`).**
 
-- `Columns` interns `(Ent, name)` to a `ColId`, with the unit and kind. This is how a new metric reaches the viewer with no code change.
-- `Node` maps each agent's local column index to a `ColId` and holds `cgs: HashMap<u64, Cg>` and `procs: HashMap<u32, Proc>`.
+- `Columns` interns `(Ent, name)` to a column id (`u16`), with the unit and kind. This is how a new metric reaches the viewer with no code change.
+- `Node` maps each agent's local column index to a column id and holds `cgs: HashMap<u64, Cg>` and `procs: HashMap<u32, Proc>`.
 - `Cg` and `Proc` hold the current and previous values (`v`, `pv`) with their times. A rate is `(v − pv) / (t − pt)` with `checked_sub`: a counter that goes backwards gives NA, never a negative rate.
 - `hist: [u16; 16]` is the ring of CPU per mille behind the history bar: 32 bytes per entity.
-- `State::derive` runs at most at 4 Hz. It sums `p_threads` into each cgroup and its ancestors, for the `~` PIDS fallback.
+- `State::derive` runs once per second, in the viewer's 1 Hz tick (and after a replay seek). It sums `p_threads` into each cgroup and its ancestors, for the `~` PIDS fallback.
 - At 100,000 processes, `State` is about 33 MB.

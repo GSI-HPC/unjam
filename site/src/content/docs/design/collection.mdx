@@ -6,7 +6,7 @@ description: Which files unjam reads, how often, with how many syscalls, and how
 import Figure from '../../../components/Figure.astro';
 import FdCache from '../../../components/diagrams/FdCache.astro';
 
-The agent reads only **plain text files** from cgroupfs and procfs, with std only: no libc calls in unjam's own code, no `unsafe`.
+The agent reads only **files** from cgroupfs, procfs and sysfs, with std only: no libc calls in unjam's own code, no `unsafe`.
 
 ## At start
 
@@ -26,7 +26,7 @@ The rule level decides what is read: `o` nothing, `c` the cgroup files, `p` also
 
 | When | File | Syscalls, cached / uncached |
 |---|---|---|
-| Discovery walk: each due tick of a sampled subtree (at most 1 Hz); `o` subtrees every 10 s | `read_dir(<cg>)`, directories only | openat + 2 getdents + close |
+| Discovery walk of the whole tree: on a due tick (at most 1 Hz), and at least every 10 s | `read_dir(<cg>)`, directories only | openat + 2 getdents + close |
 | Cgroup at `c` or `p` | `cpu.stat`, `memory.current`, `memory.peak`, `memory.events`, `memory.stat`, `io.stat`, `pids.current`, `cpu.pressure`, `memory.pressure`, `io.pressure` | 10 / 30 |
 | Cgroup at `p` | `cgroup.procs`, sorted and merge-diffed against the last list into `P` and `x` lines | 1 / 3 |
 | Process at `p` | `/proc/<pid>/stat`, `/proc/<pid>/io` | 2 / 6 |
@@ -81,10 +81,10 @@ Per tick, at the default rules on a typical node, the budget is **at most 0.5 % 
 | Allocations per steady tick (sample and encode) | **0** (unit test with a counting allocator) |
 | Stress: 3 nodes × 500 processes at 100 ms (10 Hz) | 590 KB/s into the viewer, agent 10 % of one core and 1.8 MiB RSS, 0 errors |
 
-The stress case is ten times the default rate with every process sampled. The default rules for a job are 1 to 2 s, and cgroups only above 16 nodes.
+The stress case is twenty times the default rate for a job, with every process sampled. The default interval is 1 s locally and 2 s for a job; above 16 nodes the default is cgroups only, every 4 s.
 
 :::note[rstat flushes]
-Reading `cpu.stat`, `io.stat` or `memory.stat` makes the kernel flush its per-CPU statistics tree for that cgroup. The walk is top-down, so the first read in a subtree is expected to pay for the flush. That is why there is no per-metric cost class: the rule interval is the knob.
+Reading `cpu.stat`, `io.stat` or `memory.stat` makes the kernel flush its per-CPU statistics tree for that cgroup. Cgroups are read in no fixed order (the agent iterates a hash map), so which read pays for a flush varies. That is why there is no per-metric cost class: the rule interval is the knob.
 :::
 
 ## Who may read what

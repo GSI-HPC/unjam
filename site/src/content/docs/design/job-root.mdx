@@ -59,9 +59,9 @@ If a site runs steps in a namespace rooted **at the task**, `/proc/self/cgroup` 
 
 ## Tested on both naming schemes
 
-- Unit tests run `job_root` and `record_root` on fixture trees captured from Slurm 25.11 (`job_42`), 26.05 (SLUID), a `node1_slurmstepd.scope` variant and a `0::/` namespace root (which must fail).
-- Integration test IT 2 runs on three sind clusters: 25.11, 26.05, and 26.05 with `CgroupJobIdPaths=yes`. It starts **decoy jobs of the same user and of another user on the same nodes** and checks that no path, pid or command line of a decoy appears. On 26.05 default it also checks that the job directory is **not** `job_*`, which proves the SLUID path.
+- Unit tests run `job_root` and `record_root` on `/proc/self/cgroup` lines in the Slurm 25.11 (`job_42`), 26.05 (SLUID) and `node1_slurmstepd.scope` layouts, and check that a `0::/` namespace root and paths outside a step fail.
+- Integration test IT 2 runs on three sind clusters: 25.11, 26.05, and 26.05 with `CgroupJobIdPaths=yes`. It starts **decoy jobs of the same user and of another user on the same nodes** and checks that no command line of a decoy appears. On 26.05 default it also checks that the job directory is **not** `job_*`, which proves the SLUID path.
 
 ## Local mode on a compute node
 
-Local mode has no job lookup. To look at one job on a node without Slurm attach, point `--root` at its directory: see [For site administrators](/unjam/guide/site/).
+Local mode has no job lookup. To look at one job on a node without Slurm attach, point `--root` at its directory: see [Watch a host](/unjam/guide/host/#a-slurm-job-from-inside-the-node).
