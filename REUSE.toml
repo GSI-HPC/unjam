@@ -11,3 +11,11 @@ path = ["tests/fixtures/**", ".claude/**", "pkg/rpm/RPM-GPG-KEY-unjam"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "© GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany"
 SPDX-License-Identifier = "LGPL-3.0-or-later"
+
+# The docs site: pages (front matter must come first), JSON (npm manifests, terminal recordings)
+# and images cannot carry a header.
+[[annotations]]
+path = ["site/package.json", "site/package-lock.json", "site/src/content/**", "site/src/data/**", "site/src/assets/**", "site/public/**"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "© GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany"
+SPDX-License-Identifier = "LGPL-3.0-or-later"
