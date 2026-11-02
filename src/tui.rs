@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{self, Event as Term, KeyCode, KeyEvent};
 use ratatui::crossterm::event::{KeyEventKind, KeyModifiers};
+use ratatui::layout::HorizontalAlignment::{Left, Right};
 use ratatui::layout::{Constraint, Layout as Split, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -888,11 +889,12 @@ fn strip_line(app: &App, t: &Theme, width: u16) -> Vec<Span<'static>> {
 fn table(f: &mut Frame, app: &App, t: &Theme, vis: &[Row], area: Rect) {
     let (cols, hw) = (shown(vis), if area.width >= 100 { 16 } else { 8 });
     let node = app.view.layout == Layout::Flat && !app.opts.local;
-    let cpu = if hw == 16 { "CPU history" } else { "CPU" };
+    let cpu = if hw == 16 { "CPU history" } else { "CPU hist" };
     let mut tx: Vec<_> = vis.iter().map(|r| texts(app, r)).collect();
     let mut int = tx.iter().map(|x| &x[4]).filter(|s| !s.is_empty());
     let int = int.next().is_some_and(|a| hw == 16 || int.any(|b| b != a));
-    let mut head = vec![("NAME", 0), ("NODE", 8), ("PID", 7), (cpu, hw)];
+    // NAME starts one cell in, as the header and footer lines do.
+    let mut head = vec![(" NAME", 0), ("NODE", 8), ("PID", 7), (cpu, hw)];
     head.retain(|h| node || h.0 != "NODE");
     head.extend(cols.iter().map(|&c| (COLS[c].0, COLS[c].2)));
     head.extend(int.then_some(("  INT W", 7)));
@@ -906,7 +908,7 @@ fn table(f: &mut Frame, app: &App, t: &Theme, vis: &[Row], area: Rect) {
     #[allow(clippy::cast_precision_loss, reason = "a node count")]
     let nodes = app.st.nodes.len().max(1) as f64;
     let rows = vis.iter().zip(&mut tx).enumerate().map(|(i, (r, tx))| {
-        let room = usize::from(name).saturating_sub(tx[0].chars().count());
+        let room = usize::from(name).saturating_sub(tx[0].chars().count() + 1);
         if tx[1].chars().count() > room {
             tx[1] = tx[1].chars().take(room.saturating_sub(1)).chain(['…']).collect();
         }
@@ -915,6 +917,7 @@ fn table(f: &mut Frame, app: &App, t: &Theme, vis: &[Row], area: Rect) {
         let look = [t.accent, t.base, t.marked]
             [if marked { 2 } else { usize::from(matches!(r.key, Key::Proc(..))) }];
         let mut cells = vec![Cell::from(Line::from(vec![
+            Span::raw(" "),
             Span::styled(take(0), t.tree),
             Span::styled(take(1), look),
         ]))];
@@ -931,7 +934,11 @@ fn table(f: &mut Frame, app: &App, t: &Theme, vis: &[Row], area: Rect) {
         let look = [Style::new(), t.warn, t.selected][at];
         TRow::new(cells).style(look)
     });
-    let header = TRow::new(head.iter().map(|h| Cell::from(h.0))).style(t.header);
+    // Numbers are right-aligned, and so are their headings.
+    let right = |h: &str| h == "PID" || COLS.iter().any(|c| c.0 == h);
+    let head =
+        head.iter().map(|h| Line::from(h.0).alignment([Left, Right][usize::from(right(h.0))]));
+    let header = TRow::new(head.map(Cell::from)).style(t.header);
     f.render_widget(Table::new(rows, widths).header(header).column_spacing(1).style(t.base), area);
 }
 
@@ -1177,7 +1184,7 @@ mod tests {
         feed(&mut app, 0, &[format!("P 30 1 4 1 python3 {}", cmd.replace(' ', "~"))]);
         app.st.derive();
         let narrow = text(&frame(&mut app, 80, 14));
-        assert!(narrow.contains("└ python3 train.py --epochs 90 --da…      30"), "{narrow}");
+        assert!(narrow.contains(" └ python3 train.py --epochs 90 --d…      30"), "{narrow}");
         assert!(text(&frame(&mut app, 220, 14)).contains(cmd));
         assert!(text(&frame(&mut app, 79, 14)).contains("unjam needs at least 80x8 (now 79x14)"));
     }

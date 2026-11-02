@@ -1,13 +1,13 @@
  unjam  vm  2 procs  1s  tree  sort CPU% ▼  12:00:00Z
  tui - - ·┌ detail · any key closes ─────────────────────────────────────────────────────┐
  CPU ▁▁▁▁▁│ cgroup /  (vm)                                                               │
-NAME      │                                                                              │     INT W
-▾ /       │ cg_cpu_usage_usec                   6120000 us  68.0%                        │~4    1s p
-  ▾ system│ cg_mem_current_bytes             3221225472 B   3.0G                         │12    1s p
-    ▾ sshd│ cg_io_read_bytes           NA (not announced or absent)                      │ 2    1s p
-      └ ss│ cg_io_write_bytes          NA (not announced or absent)                      │ 3
-  ▾ user.s│ cg_pids_current            NA (not announced or absent)                      │ 3    1s p
-    └ -bas│                                                                              │ 1
+ NAME     │                                                                              │DS   INT W
+ ▾ /      │ cg_cpu_usage_usec                   6120000 us  68.0%                        │~4    1s p
+   ▾ syste│ cg_mem_current_bytes             3221225472 B   3.0G                         │12    1s p
+     ▾ ssh│ cg_io_read_bytes           NA (not announced or absent)                      │ 2    1s p
+       └ s│ cg_io_write_bytes          NA (not announced or absent)                      │ 3
+   ▾ user.│ cg_pids_current            NA (not announced or absent)                      │ 3    1s p
+     └ -ba│                                                                              │ 1
           │                                                                              │
           └──────────────────────────────────────────────────────────────────────────────┘
 
