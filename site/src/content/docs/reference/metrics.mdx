@@ -58,6 +58,6 @@ A **pressure** counter is the total time in which at least one task of the cgrou
 | IO-W/s | rate of `cg_io_write_bytes` | rate of `p_io_write_bytes` |
 | PIDS | `cg_pids_current`, else `~` + summed `p_threads` below | `p_threads` |
 
-A rate is the difference of two samples over their time difference. A counter that goes backwards gives NA, never a negative rate. On job and step rows, values of all nodes are summed; a `char` column shows `*` when the nodes differ.
+A rate is the difference of two samples over their time difference. A counter that goes backwards gives NA, never a negative rate. On job, step and folded-range rows, the table values of all nodes are summed.
 
 Metrics without a column are in the detail view (<kbd>Enter</kbd>) and in recordings.

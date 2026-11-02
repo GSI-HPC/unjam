@@ -17,7 +17,7 @@ unjam is twelve flat files in `src/`. There are no nested modules, no library ta
 | Module | Owns |
 |---|---|
 | `main.rs` | The CLI (clap derive: viewer flags with the `--slurm`/`--replay` group, `record`, hidden `agent`), dispatch, exit codes, `parse_dur` |
-| `model.rs` | `Metric`, `Kind`, `Ent`, `NA`, the metric table, `Event`, `What`, `Rule`, `TaskSet`, `Control`, `effective`, `upsert`, `interval_ms`, `next_due` |
+| `model.rs` | `Metric`, `Kind`, `Ent`, `NA`, the `metric` constructor, `Event`, `What`, `Rule`, `TaskSet`, `Control`, `effective`, `upsert`, `interval_ms`, `next_due` |
 | `source.rs` | `trait Source`, `Target`, `Slot`, `Env`, `Probe`, `SOURCES`, `Files` (the tiered fd cache and its self-check), the `kv` and `kv_eq` parsers |
 | `cgroup.rs` | The cgroup source (with the stacked-disk list), `walk`, `procs`, `io_sum`, `psi`, `self_cgroup`, `job_root`, `record_root`, the v2 check |
 | `procfs.rs` | The `/proc` source, `stat`, `ident`, `cmdline`, `auxv`, `nofile`, `usage`, `host_btime` |
@@ -26,7 +26,7 @@ unjam is twelve flat files in `src/`. There are no nested modules, no library ta
 | `slurm.rs` | Job resolution, `squeue`/`scontrol` queries, `srun_args` (with `--bcast`), the srun child and its reader threads, `Remote` teardown |
 | `record.rs` | `run_record`, `schema`, `Writer`, `Rec` (recording in the viewer), `Reader` (index, rounds, seek), `Counting`, replay |
 | `state.rs` | `State`, `Node`, `Cg`, `Proc`, `Columns`, `apply`, `derive`, `rate`, `rows` (three layouts, sort, filter, folded node ranges) |
-| `tui.rs` | `App`, `Feed`, `Msg`, the input thread, the event loop, keys, `draw` (header, self-monitoring, heat strip, history bars), `fmt`, `--batch` output, `default_rules` |
+| `tui.rs` | `App`, `Msg`, `Opts`, the input thread, the event loop, keys, `draw` (header, self-monitoring, heat strip, history bars), `fmt`, `--batch` output, `default_rules` |
 | `theme.rs` | `Theme`, `Glyphs`, `THEMES`, `pick` |
 
 ## Who uses whom
@@ -34,7 +34,8 @@ unjam is twelve flat files in `src/`. There are no nested modules, no library ta
 ```text
 main ─┬─ tui ─── state ─── model
       │   ├──── record ─── state, model
-      │   └──── slurm ──── wire, model
+      │   └──── wire ───── model
+      ├─ slurm ─── tui (attach: srun child, then the same viewer)
       ├─ agent ─┬─ source ─┬─ cgroup
       │         │          └─ procfs
       │         └─ wire ──── model
@@ -43,7 +44,7 @@ main ─┬─ tui ─── state ─── model
 
 - `model` depends on nothing. It is the vocabulary every other module shares.
 - `state` knows nothing about where data comes from. Live lines, local lines and replayed batches all arrive through `State::apply`.
-- `wire`, `record`, `state` and `tui` do not know any concrete metric. A new metric source touches none of them.
+- `wire` and `record` know no concrete metric, and `state` and `tui` know only the default table columns. A new metric source touches none of them.
 - `theme` is pure data plus `pick`.
 
 ## Conventions

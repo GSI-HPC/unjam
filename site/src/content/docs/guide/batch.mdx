@@ -16,6 +16,8 @@ Without `--batch`, a stdout that is not a terminal stops unjam with `stdout is n
 
 ## Output
 
+A snapshot, shortened:
+
 ```text
  unjam  vm  8 procs  1s  tree  sort CPU% ▼  14:18:25Z
  tui 0.0% 4.7M · in 1.3K/s 22 msg/s · out 0 · drop 0 err 0
@@ -45,7 +47,8 @@ nodes=1 stale=0 errors=0 dropped=0 missing=0
 `--rule` replaces the default sampling rules (see [Control the sampling](/unjam/guide/sampling/)). That is how a script asks for exactly the subtree it needs:
 
 ```sh
-# Node 0 with processes every 500 ms, nodes 1-2 cgroups only every 2 s.
+# Node 0's step_0 with processes every 500 ms, nodes 1-2 cgroups only every 2 s.
+# Nothing else matches, so the rest is off.
 unjam --slurm=$J --batch 3 --rule '0 step_0 500ms p' --rule '1-2 . 2s c'
 ```
 

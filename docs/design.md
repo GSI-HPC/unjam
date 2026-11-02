@@ -54,10 +54,10 @@ This is the living design of the repository. It started as the reviewed round-on
 
 | Mode | Command | Processes | Threads |
 |---|---|---|---|
-| Local (default) | `unjam [--root /sys/fs/cgroup] [--interval 1s] [--rule R]… [--theme NAME] [--batch N]` | 1 | main (ingest, draw), input, sampler |
-| Attach | `unjam --slurm[=JOBID] [--interval 2s] [--nodelist LIST] [--budget 4M] [--agent PATH] [--bcast[=DIR]] [--srun-arg ARG]… [--record DIR] [--rule R]… [--batch N] [--print-srun]`, plus the hidden `--agent-keepalive SECS` | unjam TUI, srun, one `unjam agent` per node | TUI: main, input, srun-stdout reader, srun-stderr reader. Agent: sampler, stdin reader, stdout writer |
+| Local (default) | `unjam [--root /sys/fs/cgroup] [--interval 1s] [--rule R]… [--theme NAME] [--batch N]` | 1 | main (ingest, draw), input, 1 Hz ticker, sampler, writer |
+| Attach | `unjam --slurm[=JOBID] [--interval 2s] [--nodelist LIST] [--budget 4M] [--agent PATH] [--bcast[=DIR]] [--srun-arg ARG]… [--record DIR] [--rule R]… [--batch N] [--print-srun]`, plus the hidden `--agent-keepalive SECS` | unjam TUI, srun, one `unjam agent` per node | TUI: main, input, 1 Hz ticker, control (srun stdin), srun-stdout reader, srun-stderr reader. Agent: sampler, stdin reader, stdout writer |
 | Record | `srun [opts] unjam record [-o PATTERN] [-i 5s] [--no-procs] -- CMD ARGS…` | Per node: one recorder plus the app. All other tasks are the app itself | Recorder: 1 |
-| Replay | `unjam --replay FILE.arrows… [--batch N] [--at TIME]` | 1 | main, input |
+| Replay | `unjam --replay FILE.arrows… [--batch N] [--at TIME]` | 1 | main, input, 1 Hz ticker |
 | (internal) | `unjam agent [--root PATH] [--keepalive 120] [--unlink-self]` (hidden) | | |
 
 - **CLI shape (D43).** One viewer command with a data-source flag; `record` and the hidden `agent` stay subcommands. `--slurm` and `--replay` form one mutually exclusive clap group. `--slurm` uses `num_args(0..=1)` with `require_equals(true)`: `--slurm=123` is valid, `--slurm 123` is an error, which clap reports as a subcommand conflict; `main` adds a hint that `--slurm` and `--bcast` take a value only with `=`, and the help text says so. The Slurm-only flags (`--nodelist`, `--budget`, `--agent`, `--agent-keepalive`, `--srun-arg`, `--bcast`, `--record DIR`, `--print-srun`) use clap `requires = "slurm"` and have their own help heading, "Slurm attach (with --slurm)".
@@ -119,15 +119,15 @@ agent stderr ──> srun stderr ──> TUI stderr-reader thread ──> log ri
 ```
 
 - **Start.** The TUI writes the default rules to srun's stdin right after spawning it, and srun buffers them. Each agent first prints `H`, then `D` lines, then structure (`G`, `P`), all with a staggered delay (§7.5). After that it sends `T` ticks as the rules dictate. Before the first `R` arrives, every cgroup is `Off` (structure only).
-- **Liveness.** The TUI sends `K` every 30 s. An agent exits on stdin EOF, on `EPIPE`, or after `--keepalive` seconds (default 120; set from `--agent-keepalive`) without any input. This guards against orphaned agents. Whether slurmstepd closes task stdin when srun is SIGKILLed is **UNVERIFIED**, and the keepalive makes the answer irrelevant.
+- **Liveness.** The TUI sends `K` after 30 s without another control line. An agent exits on stdin EOF, on `EPIPE`, or after `--keepalive` seconds (default 120; set from `--agent-keepalive`) without any input. This guards against orphaned agents. Whether slurmstepd closes task stdin when srun is SIGKILLed is **UNVERIFIED**, and the keepalive makes the answer irrelevant.
 - **One agent dies.** The other agents keep running (`--kill-on-bad-exit=0`, `--wait=0`, checked by IT 4). The dead node becomes stale in the TUI.
-- **Quit (`q`, the end of `--batch`, SIGTERM or SIGHUP to the TUI):**
-  1. Drop `ChildStdin`. srun forwards EOF, the agents exit 0, and srun exits.
-  2. Poll `try_wait` every 50 ms for up to 3 s.
-  3. Run `scancel --quiet <J>.<S>`. The step id comes from the agents' `H` lines.
-  4. Wait 3 s more, then `Child::kill` (SIGKILL) and `wait`.
-  5. `ratatui::restore()`.
-- **Job ends while attached.** Slurm ends every step and srun exits. The TUI shows a `job ended` banner and keeps the last data until `q`.
+- **Quit (`q`, Ctrl-C, the end of `--batch`, SIGTERM or SIGHUP to the TUI):**
+  1. `ratatui::restore()`.
+  2. Drop `ChildStdin`. srun forwards EOF, the agents exit 0, and srun exits.
+  3. Poll `try_wait` every 50 ms for up to 3 s.
+  4. Run `scancel --quiet <J>.<S>`. The step id comes from the agents' `H` lines.
+  5. Wait 3 s more, then `Child::kill` (SIGKILL) and `wait`.
+- **Job ends while attached.** Slurm ends every step and srun exits. The TUI marks every node stale, shows `(ended)` in the header and keeps the tree until `q`.
 - **srun fails** (policy, permissions). The terminal is restored, the stderr tail is printed, and unjam exits 1.
 
 ### 3.4 Local mode
@@ -147,7 +147,7 @@ agent stderr ──> srun stderr ──> TUI stderr-reader thread ──> log ri
   3. Sample the whole scope at `-i` (default 5 s) with processes on. Sampler events feed a local `state::State`, the viewer's store, and `record::Writer` writes each tick from it as a complete snapshot, with no wire encode or decode in the job. `--root DIR` records a cgroup subtree instead of the own scope (tests, and use outside Slurm); then only (a) applies.
   4. **Lifetime.** Stop when all of these hold: (a) the child has exited; (b) every other child directory of `user/` reports `populated 0` in `cgroup.events`; (c) the own task cgroup's `cgroup.procs` holds only our own pid and the pids that were there before the app started. Rule (c) catches daemonized descendants left in our own task cgroup. Outside Slurm, only (a) and (c) apply.
   5. Write the final batch and the end-of-stream marker, then exit with the child's code, or 128+signal.
-- **Signals.** `signal_hook::flag::register` for SIGTERM, SIGINT and SIGHUP sets a flag. Signals are **not** forwarded: where Slurm signals every process in the step, forwarding would deliver signals such as USR1 twice. The recorder keeps sampling until the lifetime rule holds, so the app's shutdown phase is recorded too, but at most 5 s after the signal: `scancel --signal=TERM` reaches only the task leader (the recorder) on Slurm 26.05, so the app may never stop, and the journal must be finished before `KillWait` ends in SIGKILL. The recorder then exits with 128 + signal and Slurm reaps the rest of the step.
+- **Signals.** `signal_hook::flag::register` for SIGTERM, SIGINT and SIGHUP sets a flag. Signals are **not** forwarded: where Slurm signals every process in the step, forwarding would deliver signals such as USR1 twice. The recorder keeps sampling until the lifetime rule holds, so the app's shutdown phase is recorded too, but at most 5 s after the signal: `scancel --signal=TERM` reaches only the task leader (the recorder) on Slurm 26.05, so the app may never stop, and the journal must be finished before `KillWait` ends in SIGKILL. The recorder then exits with the child's code, or with 128 + signal while the child still runs, and Slurm reaps the rest of the step.
 - **Output pattern.** Tokens `%j` (`SLURM_JOB_ID`), `%s` (`SLURM_STEP_ID`), `%n` (hostname), `%%`. A missing value becomes `na`. The default is `unjam-%j.%s-%n.arrows`. Files are created new with mode 0600 (they hold command lines) and are never overwritten.
 - **Fallback.** If recording cannot start (the output file exists, its directory is missing, no cgroup2 scope), the recorder prints `unjam: record: <reason>; running unrecorded` to stderr and `exec`s the app, so the job still runs.
 
@@ -423,7 +423,7 @@ K                                                                 keepalive
 ```
 
 - `tasks` is `*` or ranges such as `0-15,32,40-41`, matched against `SLURM_PROCID` (0 locally). Agents ignore lines whose set does not include them.
-- An `R` with the task set and pattern of an existing rule replaces that rule in place, so each agent's rule list stays bounded. Agent and TUI apply `R` with the same `model::upsert`, so an agent's list is the TUI's list restricted to the rules that apply to it. The TUI keeps the authoritative list and re-sends it after `S`.
+- An `R` with the task set and pattern of an existing rule replaces that rule in place, so each agent's rule list stays bounded. Agent and TUI apply `R` with the same `model::upsert`, so an agent's list is the TUI's list restricted to the rules that apply to it. The TUI keeps the authoritative list; `S` does not touch the agents' rules, so nothing is re-sent.
 - `--rule TEXT` is parsed as `R\t` + TEXT by the same `Rule::parse`.
 - Malformed lines produce one `W` line and change nothing.
 
@@ -434,7 +434,7 @@ K                                                                 keepalive
 | Local, or ≤ 16 nodes | `R * . <interval> p` | `B * 4194304/N` |
 | > 16 nodes | `R * . <2×interval> c`, `R * */user - o` | `B * max(4096, 4194304/N)` |
 
-For a large job this leaves about 7 cgroups per node (root, steps, `slurm/`) at 0.5 Hz: 1k nodes × 7 × ≈150 B / 2 s ≈ 0.5 MB/s. The kernel's hierarchical accounting means step cgroups already include their tasks.
+For a large job this leaves about 7 cgroups per node (root, steps, `slurm/`) at twice the interval (4 s with the 2 s attach default): 1k nodes × 7 × ≈150 B / 4 s ≈ 0.26 MB/s. The kernel's hierarchical accounting means step cgroups already include their tasks.
 
 The user marks nodes or paths and presses `p` to turn processes on where needed. On a node row, or on any row below one, a rule targets that node (`tasks = i`); on a cross-node row (the job or a step in the step layout) it targets `*`. To read a subtree more cheaply or more often, the user changes its interval with `+`/`-`.
 
@@ -498,10 +498,10 @@ Verified in Slurm 25.11 source:
 ### 7.5 Agent output path: never block the sampler
 
 - **Writer thread.** The sampler fills a line buffer per tick and calls `try_send` on a `sync_channel(4)` to a writer thread, which does blocking `write_all` to stdout. Buffers are recycled through a return channel, so there is no allocation in steady state.
-- **Lossless drop policy.** Values are absolute (ADR D8), so a dropped tick only lowers time resolution. Rates over the next interval stay correct. Structure lines (`H D G X P x W`) are never dropped: when the queue is full or the budget is exhausted, they are kept in `pending` and sent ahead of the next tick's values. `dropped_ticks` reports the losses in `T`.
+- **Lossless drop policy.** Values are absolute (ADR D8), so a dropped tick only lowers time resolution. Rates over the next interval stay correct. Structure lines (`H D G X P x W` and `T`) are never dropped: when no buffer is free or the queue is full, they are kept in `pending` and sent ahead of the next tick's values. When only the budget is exhausted, they are sent at once without the values. `dropped_ticks` reports the losses in `T`.
 - **Byte budget.** A token bucket per agent, refilled at the `B` rate and capped at 2 s worth of tokens. A tick's value lines are sent only if tokens ≥ their size. The default total is 4 MiB/s divided by N.
 - **Staggered emission.** Sampling stays phase-aligned, but the writer delays each send by `procid × min(interval/2, 250 ms) / ntasks`. srun and the TUI see a ramp, not 1k simultaneous bursts. The same spread applies to the start-up snapshot and to `S` resyncs.
-- **Bounded memory.** The queue holds at most 4 buffers. `pending` grows only with structural churn and is capped at 1 MiB. Past the cap, the agent emits `W` and applies `R * . <longest active interval> c` to itself. That rule is valid under the §6.1 grammar, turns processes off everywhere, and bounds a fork storm. The TUI's next `C`/`R` from the user, or `0`, replaces it.
+- **Bounded memory.** The queue holds at most 4 buffers, the writer 1 more. `pending` grows only with structural churn and is capped at 1 MiB. Past the cap, the agent emits `W` and applies `R * . <longest active interval> c` to itself. That rule is valid under the §6.1 grammar, turns processes off everywhere, and bounds a fork storm. `0` (`C`, then the defaults) replaces it; a later `R` from the user overrides it only where that rule matches, because the last match wins.
 
 ### 7.6 Bandwidth (estimates)
 
@@ -509,7 +509,7 @@ Verified in Slurm 25.11 source:
 |---|---|
 | Process line ≈ 100 B, cgroup line ≈ 160 B | — |
 | Typical: 4 nodes × (100 processes + 70 cgroups) at 1 Hz | ≈ 85 KB/s |
-| Large-job default at 1k nodes | ≈ 0.5 MB/s |
+| Large-job default at 1k nodes | ≈ 0.26 MB/s |
 | Extreme: 100k processes at 1 Hz, all at `p` | ≈ 10 MB/s raw, capped by the 4 MiB/s default budget to ≈ 0.4 effective Hz per node, with drops reported |
 | Attach start at 100k processes | ≈ 100 B × 100k ≈ 10 MB of P lines, spread over ≥ 250 ms by stagger and then limited by the budget |
 
@@ -632,10 +632,10 @@ The mock assumes `EnableExtraControllers=io,pids`. Without it, IO-R/s and IO-W/s
 
 ### 9.2 Layouts and views
 
-- **Three layouts (D39)** are level orders in `View`, walked by the one `state::rows`. `v` cycles step → node → flat. Fold state is keyed by `(level, key)`.
+- **Three layouts (D39)** are level orders in `View`, walked by the one `state::rows`. `v` cycles step → node → flat. Fold state is keyed by the row's `Key` (job, step, folded range, cgroup, process).
   - **step** (the Slurm default): job → step → node → task → process. A node row under a step is that node's `step_N` cgroup, measured by the kernel. Only the job and step rows are computed across nodes: Counter rates and Gauges are summed, and `p_state`/`char` columns show `*` when the nodes differ. Phase alignment means the sums compare samples from the same instant.
   - **node**: node → cgroup tree → processes.
-  - **flat**: one row per process, or per task cgroup where processes are `Off`, with a NODE column and one global sort. With no rules (replay), the leaf cgroups listed are those that hold no process. In local mode this is the classic `top`.
+  - **flat**: one row per process, or per leaf cgroup whose processes are not sampled, with a NODE column and one global sort. With no rules (replay), the leaf cgroups listed are those that hold no process. In local mode this is the classic `top`.
   - A journal of `unjam record` is rooted at a step's `user` cgroup, so its root's kids are tasks; the step layout names their step from the journal (`4242.1`), not `task_0`.
   - Local mode has no node level: `v` toggles between the cgroup tree and flat.
 - **Sort.** The sort column orders siblings only; a row never leaves its parent. Tree layouts sort every sibling set at every level by the row's own value; flat has one sibling set, so its sort is global. Counter → rate, Gauge → value, NA always last in both directions, NAME and NODE in natural order (NODE sorts by host, then NAME), ties in natural order. The cursor follows its entity across redraws, and a key acts on that entity even when data re-sorted the rows since the last frame.
@@ -1177,7 +1177,7 @@ slurm:
 | # | Risk | Mitigation |
 |---|---|---|
 | K1 | srun keeping each message whole at high task counts is **UNVERIFIED** (the slurmstepd side is verified in 25.11 source) | 1000-byte cap, node prefix, `S` resync, IT 5 on 25.11 and 26.05, mux test |
-| K2 | srun I/O throughput and CPU at 1k tasks on a shared login node is **UNVERIFIED** | Byte budget (4 MiB/s total), large-job defaults (about 0.5 MB/s), stagger. Measure before claiming 1k-node numbers |
+| K2 | srun I/O throughput and CPU at 1k tasks on a shared login node is **UNVERIFIED** | Byte budget (4 MiB/s total), large-job defaults (about 0.26 MB/s), stagger. Measure before claiming 1k-node numbers |
 | K3 | Site policy: job_submit or cli_filter on `--overlap` steps, `MaxStepCount`, SPANK, overlap steps under `ConstrainRAMSpace` | `--srun-arg` escape hatch. IT 2 runs with `ConstrainRAMSpace=yes` |
 | K4 | `pread`@0 regeneration on procfs or kernfs | Startup self-check with automatic fallback (§5.2) |
 | K5 | memcg-charged fd cache memory | Cap `min(soft_nofile − 64, 1024)` fds (≈ 5 MiB) in job context; prompt close on removal; hot tier keeps the most-read files cached when the cap binds |
@@ -1256,7 +1256,7 @@ Open:
 | D36 | **Revised by the owner (Q2):** built-in `--bcast` (srun `--bcast=/tmp/unjam.<J>.<uid>.<nonce>`, agent `--unlink-self` removes the copy at start; about 30 LOC) and static musl release binaries: publish.yml job `binaries` on x86_64 (`ubuntu-latest`) and aarch64 (`ubuntu-24.04-arm`), target `*-unknown-linux-musl`, `mise run build:musl`, `actions/attest-build-provenance`, assets `unjam-linux-{amd64,arm64}` plus `checksums.txt`. New IT 8 | Originally deferred, with `--srun-arg=--bcast=…` as the escape hatch | Sites without a shared filesystem get a working default, and the copy is never left behind. Static binaries run on any compute node's libc |
 | D37 | Single CI realm `unjam-it`, passed to the action's `realm` input; mise `[env]` uses a template default | Per-matrix `unjam-<n>` realms | Each matrix job has its own runner and Docker daemon, so realms isolate nothing there (sind `guides/ci-cd.md`). mise `[env]` would override a per-job value anyway |
 | D38 | Dedicated input thread blocks in `crossterm::event::read()`, queues `Msg::Key`/`Msg::Resize` on an unbounded key queue and wakes the main thread through the data channel of the srun readers. The main thread blocks on that one data channel (`Msg::{Lines, Stderr, End, Tick}`), handles the queued keys first, decodes lines for at most 10 ms per batch, then checks for keys again (§3.1, §7.3) | Keys polled in the main loop with `event::poll(timeout)` | A draw can block on a slow terminal (ssh); keys still arrive and `q`/Ctrl-C set a quit flag at once. One blocking `recv` is simpler than poll plus timeouts. Cost: 1 thread, about 10 LOC |
-| D39 | Exactly 3 layouts as level orders in `View`, walked by one `state::rows`: step (Slurm default: job → step → node → task → process), node (node → cgroup tree → processes), flat (NODE column, global sort; classic `top` locally). `v` cycles. Fold state keyed by `(level, key)`. The sort column orders siblings only. No "by command" layout and no RANK column in round one (§9.2) | Fixed by-node / by-path pivot | Each layout answers a different question. As data, cost ≈ +50 LOC in state.rs and 3 golden tests. Flat sort at 100k processes ≈ 1 ms per frame (select_nth). Replaces the generic by-path view |
+| D39 | Exactly 3 layouts as level orders in `View`, walked by one `state::rows`: step (Slurm default: job → step → node → task → process), node (node → cgroup tree → processes), flat (NODE column, global sort; classic `top` locally). `v` cycles. Fold state keyed by the row's `Key`. The sort column orders siblings only. No "by command" layout and no RANK column in round one (§9.2) | Fixed by-node / by-path pivot | Each layout answers a different question. As data, cost ≈ +50 LOC in state.rs and 3 golden tests. Flat sort at 100k processes ≈ 1 ms per frame (select_nth). Replaces the generic by-path view |
 | D40 | Self-monitoring header: TUI CPU and RSS, bytes and messages per second in, control bytes out, the busiest agent's CPU and RSS with its node, drops and errors. `T` gains a 5th field `self_rss_bytes`; no proto bump (§9.1) | Self-CPU of the agents only | The tool must show its own cost on 1k-node jobs. About 30 LOC |
 | D41 | All mock features in v1 (Q13): node heat strip, CPU history bar per row (16 × u16 ring), `r` key and `--record DIR` (TUI writes received events via `record::Writer`, one `.arrows` per node, `unjam.source=tui`), folded node ranges in the step layout (§8.5, §9) | Defer them | Owner decision. About 150 LOC in total; the LOC budget was raised to ≈ 2,700 (cap 2,900) |
 | D42 | No site requirement for `EnableExtraControllers` (Q12). IO and PIDS columns hide when the controllers are absent; PIDS falls back to summed threads marked `~`. CI matrix: 25.11 without `EXTRA`, 26.05 with `EXTRA`, 26.05 with `EXTRA` and `JOBIDPATHS`; ITs assert io and pids values only where `EXTRA` is set (§4.3, §14.2, §18) | Ask sites to set it | Sites cannot always change `cgroup.conf`; the tool degrades instead of failing. The matrix tests both cases |

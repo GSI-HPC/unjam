@@ -36,7 +36,7 @@ df[keyframe] = df.groupby([df["kind"], entity])[keyframe].ffill()
 
 ## Rates from counters
 
-Counters (unit `us` or `B`, kind `counter`) only grow. Divide differences by the time step to get a rate; a CPU time in microseconds per second of wall time, divided by 10⁴, is a CPU percentage of one core:
+Counters (field metadata `unjam.kind` = `counter`) only grow. Divide differences by the time step to get a rate; a CPU time in microseconds per second of wall time, divided by 10⁴, is a CPU percentage of one core:
 
 ```python
 cg = df[df["kind"] == 1].sort_values(["cg", "ts"])
@@ -72,7 +72,7 @@ uv run --with pyarrow==21.0.0 python -c "import sys,pyarrow as pa,pyarrow.parque
 ```
 
 <Aside type="note" title="A file from a killed job">
-A journal cut by SIGKILL has no end-of-stream marker. `pa.ipc.open_stream(...).read_all()` then raises an error at the cut. Read batch by batch to keep the complete part:
+A journal cut by SIGKILL has no end-of-stream marker. If the cut falls inside a batch, `pa.ipc.open_stream(...).read_all()` raises an error there. Read batch by batch to keep the complete part:
 
 ```python
 with pa.ipc.open_stream("cut.arrows") as r:

@@ -16,6 +16,7 @@ The viewer has to stay responsive with 1,000 agents and 100,000 processes. Three
 | input | Blocks in `crossterm::event::read()`; queues keys; sets the quit flag on <kbd>q</kbd> and Ctrl-C at once |
 | stdout reader (attach) | Reads srun's stdout into a 64 KiB buffer and sends whole-line chunks |
 | stderr reader (attach) | Sends srun's stderr lines to the log |
+| control (attach) | Writes control lines to srun's stdin; sends `K` after 30 s without one |
 | ticker | Sends `Msg::Tick` once per second (self-monitoring, staleness) |
 | sampler (local only) | `agent::run`, the same loop a remote agent runs |
 
@@ -28,7 +29,7 @@ The viewer has to stay responsive with 1,000 agents and 100,000 processes. Three
 2. Handle every queued key first.
 3. For each line: `wire::split_node` gives the node, `wire::parse` gives an `Event`, `State::apply` stores it.
 4. Stop decoding after **10 ms**, handle keys again, then continue. Key latency stays under about 50 ms, even during an 8 MB attach burst.
-5. Draw at once after a key, and at most at **4 Hz** after data. `State::derive` runs in the same slot.
+5. Draw at once after a key, and at most at **4 Hz** after data. `State::derive` runs once per second, on `Msg::Tick`.
 
 `State::apply` is the **one** way the store changes, for live data and replay alike. It returns `Err` to ask for a resync.
 
@@ -38,11 +39,11 @@ The viewer has to stay responsive with 1,000 agents and 100,000 processes. Three
   <Layouts />
 </Figure>
 
-- **step** (the Slurm default): job → step → node → task → process. A node row under a step is that node's `step_N` cgroup, measured by the kernel. Only job and step rows add up across nodes.
+- **step** (the Slurm default): job → step → node → task → process. A node row under a step is that node's `step_N` cgroup, measured by the kernel. Only job, step and folded-range rows add up across nodes.
 - **node**: node → cgroup tree → processes.
-- **flat**: one row per process (or per task cgroup where processes are off), with a NODE column and one global sort. Locally this is the classic `top`.
+- **flat**: one row per process (or per leaf cgroup whose processes are not sampled), with a NODE column and one global sort. Locally this is the classic `top`.
 
-Fold state is keyed by `(level, key)`, so it survives layout changes. The sort orders **siblings only**: a row never leaves its parent (D39). NA sorts last in both directions.
+Fold state is keyed by the row's `Key` (job, step, folded range, cgroup or process), so it survives layout changes. The sort orders **siblings only**: a row never leaves its parent (D39). NA sorts last in both directions.
 
 **Folded node ranges.** Under a step, the top nodes by the sort column fill the window; the rest fold into one row such as `n0418 … n1024 (606 folded)`. The step layout therefore has a bounded row count at any node count.
 
@@ -84,7 +85,10 @@ pub struct Theme {
     pub selected: Style, pub marked: Style, pub warn: Style, pub crit: Style,
     pub tree: Style, pub heat: [Color; 4], pub glyphs: Glyphs,
 }
-pub const THEMES: &[Theme] = &[NORD, NIGHT, MOCHA, GRUVBOX, SOLAR, AMBER, MONO];
+pub const THEMES: &[Theme] = &[
+    palette("nord", …), palette("night", …), palette("mocha", …), palette("gruvbox", …),
+    palette("solar", …), palette("amber", …), Theme { name: "mono", … },
+];
 ```
 
 Themes are compiled-in `const` data: no theme files and no parser dependency (D30). The renderer reads styles only from these slots, so a new theme is one entry in the table. `NO_COLOR` forces `mono`, and a unit test checks that `mono` exists.

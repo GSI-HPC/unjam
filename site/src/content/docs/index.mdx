@@ -42,7 +42,7 @@ unjam reads the cgroup v2 tree that Slurm and systemd already build, puts the pr
     `srun unjam record -- ./app` writes a crash-safe Arrow stream per node. Replay it in the same TUI, or load it in pandas or pyarrow.
   </Card>
   <Card title="Small and careful" icon="approve-check">
-    One static binary of a few megabytes, no `unsafe` in its own code, and a sampler that never blocks. The agent shows its own CPU and memory cost in the header.
+    One static binary of a few megabytes, no `unsafe` in the shipped code, and a sampler that never blocks. The agent shows its own CPU and memory cost in the header.
   </Card>
 </CardGrid>
 

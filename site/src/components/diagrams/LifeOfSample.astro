@@ -4,17 +4,17 @@
 
 // One value from a cgroup file to a cell on the screen, through the functions that move it.
 const top = [
+  ['Sampler::tick', 'timer due'],
   ['Files::read', 'pread at 0'],
   ['Cgroup::sample', 'parse cpu.stat'],
   ['Event::CgVals', 'borrowed slice'],
   ['wire::write', 'g line, ≤ 1000 B'],
-  ['Out', 'queue, budget'],
-  ['writer', 'stdout'],
+  ['Out::send', 'writer → stdout'],
 ];
 const bottom = [
   ['tui::draw', 'visible rows'],
   ['state::rows', 'layout, sort'],
-  ['State::apply', 'v, pv, t, pt'],
+  ['State::apply', 'v, pv, t'],
   ['wire::parse', 'Event again'],
   ['split_node', 'node prefix'],
   ['reader', '64 KiB chunks'],

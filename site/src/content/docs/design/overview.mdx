@@ -18,10 +18,10 @@ The design priorities are, in order: **correct, small, fast**. Each item in the 
 
 | Mode | Command | Processes | Threads |
 |---|---|---|---|
-| Local | `unjam` | 1 | main (ingest and draw), input, sampler |
-| Attach | `unjam --slurm[=JOBID]` | viewer, srun, one `unjam agent` per node | viewer: main, input, srun stdout reader, srun stderr reader. Agent: sampler, stdin reader, stdout writer |
+| Local | `unjam` | 1 | main (ingest and draw), input, 1 Hz ticker, sampler, writer |
+| Attach | `unjam --slurm[=JOBID]` | viewer, srun, one `unjam agent` per node | viewer: main, input, 1 Hz ticker, control (srun stdin), srun stdout reader, srun stderr reader. Agent: sampler, stdin reader, stdout writer |
 | Record | `srun unjam record -- CMD` | one recorder per node plus the application | recorder: 1 |
-| Replay | `unjam --replay FILE.arrows…` | 1 | main, input |
+| Replay | `unjam --replay FILE.arrows…` | 1 | main, input, 1 Hz ticker |
 
 There is **no async runtime**: std threads and `std::sync::mpsc` are sufficient for a few file descriptors per process (decision D3).
 
@@ -71,15 +71,15 @@ agent writer ──stdout──▶ slurmstepd (line-buffered) ──▶ srun ─
 agent stderr ──▶ srun stderr ──▶ viewer stderr reader ──▶ log
 ```
 
-- **Liveness.** The viewer sends `K` every 30 s. An agent exits on stdin EOF, on `EPIPE`, or after 120 s without input. An orphaned agent therefore always ends.
+- **Liveness.** The viewer sends `K` after 30 s without another control line. An agent exits on stdin EOF, on `EPIPE`, or after 120 s without input. An orphaned agent therefore always ends.
 - **One agent dies.** The others keep running. The node turns stale in the view.
-- **Quit** (`q`, end of `--batch`, SIGTERM, SIGHUP):
-  1. Close srun's stdin. srun forwards EOF; the agents exit 0.
-  2. Wait up to 3 s.
-  3. `scancel --quiet <J>.<S>` (the step id comes from the agents' `H` lines).
-  4. Wait 3 s more, then SIGKILL srun.
-  5. Restore the terminal.
-- **The job ends.** Slurm ends every step. The viewer shows `job ended` and keeps the last data.
+- **Quit** (`q`, Ctrl-C, end of `--batch`, SIGTERM, SIGHUP):
+  1. Restore the terminal.
+  2. Close srun's stdin. srun forwards EOF; the agents exit 0.
+  3. Wait up to 3 s.
+  4. `scancel --quiet <J>.<S>` (the step id comes from the agents' `H` lines).
+  5. Wait 3 s more, then SIGKILL srun.
+- **The job ends.** Slurm ends every step. The viewer marks every node stale, shows `(ended)` in the header and keeps the tree until you quit.
 
 ## Local mode
 

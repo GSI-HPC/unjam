@@ -27,7 +27,7 @@ A recorder runs **inside the job**. Slurm can SIGKILL it after `KillWait`, the n
 2. **Collect** rows in arrow-array builders. Cut a batch every **10 s or 8,192 rows**, whichever comes first; write and flush it.
 3. **Keyframe rule.** The first row of each entity in a batch carries `path`, `comm`, `cmdline`, `ppid` and `start`. Every batch therefore decodes on its own.
 4. **End** (normal exit or SIGTERM): write the last batch, then the end-of-stream marker.
-5. **Crash** (SIGKILL, OOM, node crash): at most the open batch (10 s) is lost.
+5. **Crash** (SIGKILL, OOM): at most the open batch (10 s) is lost. There is no fsync, so a node crash can lose more.
 6. **No `fsync`** on the hot path. It is expensive on Lustre and GPFS, and the page cache survives a process kill.
 
 **Memory.** At the 8,192-row cap: 8,192 rows × about 30 columns × 8 bytes ≈ 2 MB, plus validity bitmaps and strings: at most about 3 MB. Typically about 100 KB. 65,536-row batches would need about 16 MB in the job (D16).
@@ -38,8 +38,8 @@ A recorder runs **inside the job**. Slurm can SIGKILL it after `KillWait`, the n
 
 ## Two writers, one format
 
-- **`unjam record`**: the sampler feeds a local `State`; `Writer` writes each tick from it as a **complete snapshot** of the step's tasks on this node. `unjam.source=record`.
-- **The viewer** (<kbd>r</kbd>, `--record DIR`): `Rec` feeds what the viewer receives into one `Writer` per node (`unjam.source=tui`). A node's tick is written when its **next** tick starts, because an agent sends a tick's structure before its `T`; writing at `T` would mix in the next tick's structure. A node silent for three intervals before the recording starts is not recorded.
+- **`unjam record`**: the sampler feeds a local `State`; `Writer` writes each tick from it as a **complete snapshot** of the step's tasks on this node. Schema metadata `unjam.source=record`.
+- **The viewer** (<kbd>r</kbd>, `--record DIR`): `Rec` feeds what the viewer receives into one `Writer` per node (schema metadata `unjam.source=tui`). A node's tick is written when its **next** tick starts, because an agent sends a tick's structure before its `T`; writing at `T` would mix in the next tick's structure. A node silent for three intervals before the recording starts is not recorded.
 
 ## Replay and seeking
 
@@ -48,7 +48,7 @@ A recorder runs **inside the job**. Slurm can SIGKILL it after `KillWait`, the n
 - **Several files** share one cursor over **sampling rounds**: ticks of different nodes that are closer than half the shortest tick gap form one round. One step moves every node by one tick.
 - **Memory.** One decoded batch per file: about 250 KB per node typically.
 - Validation stays on: `with_skip_validation` (an `unsafe fn`) is never called.
-- **Truncated files** replay up to the last complete batch, with one warning: "truncated at byte N". A unit test truncates a journal at 200 random offsets; each must give its valid prefix and never panic.
+- **Truncated files** replay up to the last complete batch, with one warning: "truncated at byte N". A unit test reads a journal intact and truncated at 199 random offsets; each must give its valid prefix and never panic.
 
 :::caution[Replay inputs must be trusted]
 arrow-ipc 60 allocates an LZ4 buffer at the uncompressed length the file states, before any check. A crafted file can therefore abort replay with an allocation failure. The fix belongs upstream (a capped preallocation).

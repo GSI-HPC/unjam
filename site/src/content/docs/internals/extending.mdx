@@ -18,7 +18,8 @@ A new source may touch **only**:
 | `src/main.rs` | One `mod <name>;` line, with its `///` doc |
 | `docs/budget.txt` | One line for the new module |
 | `tests/fixtures/<name>/**` | Fixture files for its tests |
-| `docs/deps.md` | A row, if it adds a dependency (see the `lean-deps` skill) |
+| `Cargo.toml`, `Cargo.lock`, `docs/deps.md` | The dependency and its row, if it adds one (see the `lean-deps` skill) |
+| `docs/unsafe.md` | An entry per `unsafe` site, if it has any (see [below](#unsafe-and-ffi)) |
 | `docs/design.md` §5.3, `docs/perf.md` | A row for each file it reads per tick, and its measured cost |
 
 It **must not** touch `wire.rs`, `record.rs`, `state.rs` or `tui.rs`. A review rejects a source that does. The one sanctioned core change is a new entity kind (`Ent`, for example per-CPU or per-device rows), and that needs the owner's approval.
@@ -27,7 +28,7 @@ It **must not** touch `wire.rs`, `record.rs`, `state.rs` or `tui.rs`. A review r
 
 <Steps>
 
-1. **Name the metrics.** `<cg|p>_<source>_<quantity>_<unit>`, only `[a-z0-9_]`. Names are append-only and never renamed: they become wire names and Arrow column names.
+1. **Name the metrics.** `<cg|p>_<source>_<quantity>[_<unit>]`, only `[a-z0-9_]`. Names are append-only and never renamed: they become wire names and Arrow column names.
 
    ```rust
    use crate::model::{metric as m, Kind, Metric};
@@ -93,7 +94,7 @@ It **must not** touch `wire.rs`, `record.rs`, `state.rs` or `tui.rs`. A review r
 
 - `D` lines announce the new metrics; viewers of older versions accept them.
 - The **Detail** view (<kbd>Enter</kbd>) shows every announced metric, raw and formatted.
-- **Recordings** get one new `UInt64` column per metric, with `unjam.unit`, `unjam.kind` and `unjam.source` as field metadata. Older recordings without the column read as null.
+- **Recordings** get one new `UInt64` column per metric, with `unjam.unit`, `unjam.kind` and `unjam.source` (`cgroup` or `proc`: the entity, not the source) as field metadata. Older recordings without the column read as null.
 - **Rates** and cross-node sums work, because they depend only on the kind.
 
 <Aside type="note" title="Table columns">

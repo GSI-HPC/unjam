@@ -38,7 +38,7 @@ description: The messages unjam prints when something is wrong, what they mean a
 | `<path>: permission denied, NA` in the log | A file of another user's process (usually `/proc/<pid>/io`) is not readable. Its value is NA; this is logged once per agent |
 | `node N: proto X, need Y: ignored` | The agent on that node is another unjam version with a different wire grammar. Use the same version everywhere |
 | `drop` above 0 in the header | Agents dropped value ticks because of the byte budget or a slow stream. Rates stay correct; only time resolution drops. Raise `--budget` or sample less |
-| `output backlog over 1 MiB: rules now R * . N c` | An agent saw a storm of new processes and turned process sampling off to protect the job. <kbd>p</kbd> or <kbd>0</kbd> turns it back on |
+| `output backlog over 1 MiB: rules now R * . N c` | An agent saw a storm of new processes and turned process sampling off to protect the job. <kbd>0</kbd> turns it back on |
 | `err` above 0 | Lines failed to decode. The viewer asks that agent to resend its state (at most every 10 s) |
 
 ## Recording and replay

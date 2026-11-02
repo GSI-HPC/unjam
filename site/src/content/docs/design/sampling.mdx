@@ -18,7 +18,7 @@ pub struct Rule { pub tasks: TaskSet, pub pattern: Box<str>, pub interval_ms: u3
 
 - **Tasks** is `*` or ranges such as `0-15,32`, matched against the node index.
 - **Pattern** is `/`-separated segments, relative to the agent's root. Each segment is a literal or `*`. A pattern matches a cgroup when it matches the **first k segments** of its path, so a pattern always covers a whole subtree. `.` matches everything.
-- **Level.** `p` reads the cgroup files and the processes, `c` only the cgroup files, `o` nothing. `o` keeps the structure (rescanned every 10 s) and sends no values.
+- **Level.** `p` reads the cgroup files and the processes, `c` only the cgroup files, `o` nothing. `o` keeps the structure (rescanned at least every 10 s) and sends no values.
 - **Interval** is rounded to 100 ms and kept between 100 ms and 60 s. An `o` rule has interval `-`. The parser refuses `-` with `c` or `p`, and a number with `o` (D21).
 
 ### The last match wins
@@ -37,7 +37,7 @@ pub fn effective(rules: &[Rule], task: u32, path: &str) -> (u32, What) {
 
 With no match, a cgroup is `Off`. The agent and the viewer call the **same function**, so the INT and W columns always show what the agent does.
 
-An `R` line with the task set and pattern of an existing rule **replaces** it in place (`model::upsert`), so the list stays short however often a key is pressed. The viewer keeps the full list and sends it again after a resync.
+An `R` line with the task set and pattern of an existing rule **replaces** it in place (`model::upsert`), so the list stays short however often a key is pressed. The viewer keeps the full list. A resync (`S`) does not touch the agents' rules, so nothing is sent again.
 
 ## Phase-aligned timers
 
@@ -81,7 +81,7 @@ The viewer chooses the first rules from the job size (`tui::default_rules`):
 | Local, or up to 16 nodes | `R * . <interval> p` | 4 MiB/s ÷ N |
 | More than 16 nodes | `R * . <2 × interval> c`, `R * */user - o` | max(4 KiB/s, 4 MiB/s ÷ N) |
 
-For a large job this samples about seven cgroups per node (the root, the steps, their `slurm/`) every 2 to 4 s. At 1,000 nodes that is about 0.5 MB/s into the viewer. The kernel's hierarchical accounting means a step cgroup already includes its tasks, so the totals are still correct. To look closer, the user marks nodes or subtrees and presses <kbd>p</kbd>.
+For a large job this samples about seven cgroups per node (the root, the steps, their `slurm/`) every 4 s by default (twice the 2 s `--slurm` interval). At 1,000 nodes that is about 0.26 MB/s into the viewer. The kernel's hierarchical accounting means a step cgroup already includes its tasks, so the totals are still correct. To look closer, the user marks nodes or subtrees and presses <kbd>p</kbd>.
 
 ## The cost knob
 

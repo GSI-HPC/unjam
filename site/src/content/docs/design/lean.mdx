@@ -42,7 +42,7 @@ No library target, no workspace, no cargo features of its own (D2). One build co
 | `lz4_flex` (not imported) | Its `safe-encode` and `safe-decode` features force arrow-ipc's LZ4 codec to its safe implementation |
 | `signal-hook` | SIGTERM, SIGINT and SIGHUP set a flag. Already in the tree through crossterm, so 0 new crates |
 
-Rejected on purpose: tokio (three threads suffice, about 20 crates), serde and bincode (the wire is text), anyhow and thiserror, libc, nix and rustix as direct dependencies, chrono (about 10 lines of date maths), log and tracing (`W` lines and the log ring), parquet (D35), zstd (C code), procfs and sysinfo (they allocate per read and cache no fds). `cargo-deny` bans tokio and C-building `-sys` crates.
+Rejected on purpose: tokio (a few std threads suffice, about 20 crates), serde and bincode (the wire is text), anyhow and thiserror, libc, nix and rustix as direct dependencies, chrono (about 10 lines of date maths), log and tracing (`W` lines and the log ring), parquet (D35), zstd (C code), procfs and sysinfo (they allocate per read and cache no fds). `cargo-deny` bans tokio and the known C-building `-sys` crates (openssl-sys, zstd-sys, libz-sys); the `lean-deps` review covers the rest.
 
 ## No unsafe in unjam's code
 
