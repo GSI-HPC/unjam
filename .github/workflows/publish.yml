@@ -101,8 +101,11 @@ jobs:
   rpms:
     name: RPM packages
     needs: binaries
+    # A called workflow cannot hold more than its caller grants, even in a job that does not run:
+    # rpm.yml's upload job (manual runs only) asks for contents and actions write.
     permissions:
-      contents: read
+      contents: write
+      actions: write
       id-token: write
       attestations: write
     uses: ./.github/workflows/rpm.yml
