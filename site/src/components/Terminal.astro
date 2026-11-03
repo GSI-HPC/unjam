@@ -81,7 +81,7 @@ const prompt = title ?? { slurm: 'unjam --slurm=4242', host: 'unjam', replay: 'u
     background: var(--t-bg);
     color: var(--t-fg);
     /* 100 columns fill the box: a mono cell is about 0.6 em wide. */
-    font: calc((100cqw - 1.5rem) / var(--cols) / 0.602) / 1.22 'JetBrains Mono', 'DejaVu Sans Mono', ui-monospace, monospace;
+    font: calc((100cqw - 1.5rem) / var(--cols) / 0.602) / 1.22 var(--sl-font-mono);
     white-space: pre;
     overflow: hidden;
   }

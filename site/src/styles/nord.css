@@ -23,8 +23,9 @@ SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Da
   --sl-color-gray-5: #434c5e;
   --sl-color-gray-6: #3b4252;
   --sl-color-black: #2e3440;
-  --sl-font: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
-  --sl-font-mono: 'JetBrains Mono', ui-monospace, 'DejaVu Sans Mono', monospace;
+  --sl-font: 'Inter Variable', 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --sl-font-mono: 'JetBrains Mono Variable', 'JetBrains Mono', 'DejaVu Sans Mono', Menlo,
+    'Liberation Mono', 'Courier New', monospace;
 
   /* Callouts: aurora colours, not the Starlight defaults. */
   --sl-color-blue-low: #2a3a4f;
