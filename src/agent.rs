@@ -40,10 +40,12 @@ pub struct Opts {
     pub cap: usize,
 }
 
-/// A known cgroup: path for rules and display, effective rule, fd slots and last pid list.
+/// A known cgroup: path for rules and display, whether it lies in a step's `user` subtree,
+/// effective rule, fd slots and last pid list.
 struct CgEnt {
     dir: PathBuf,
     rel: Box<str>,
+    step: bool,
     parent: u64,
     seen: u32,
     interval: u32,
@@ -53,13 +55,14 @@ struct CgEnt {
     pids: Vec<u32>,
 }
 
-/// A known process: identity for reuse detection, `P` fields for resyncs, and fd slots.
+/// A known process: identity for reuse detection, `P` and `M` fields for resyncs, and fd slots.
 struct ProcEnt {
     start: u64,
     cg: u64,
     ppid: u32,
     comm: Box<str>,
     cmd: Box<str>,
+    mpi: Option<procfs::Mpi>,
     slots: Box<[Slot]>,
 }
 
@@ -113,17 +116,17 @@ impl Core {
         for i in 0..self.pids.len() {
             let pid = self.pids[i];
             if cg.pids.binary_search(&pid).is_err() {
-                self.new_proc(pid, id, emit);
+                self.new_proc(pid, id, cg.step, emit);
             }
-            self.sample_proc(pid, id, emit);
+            self.sample_proc(pid, id, cg.step, emit);
         }
         cg.pids.clear();
         cg.pids.extend_from_slice(&self.pids);
     }
 
     /// Samples one process. A vanished process gives `x`; a reused pid gives `x` then `P`; an
-    /// exec (new `comm`) gives `P` again with the new names.
-    fn sample_proc(&mut self, pid: u32, cg: u64, emit: Emit) {
+    /// exec (new `comm`) gives `P` again with the new names (and rank, in a `step`).
+    fn sample_proc(&mut self, pid: u32, cg: u64, step: bool, emit: Emit) {
         let Some(p) = self.procs.get_mut(&pid).filter(|p| p.cg == cg) else { return };
         let (start, mut slots, comm) = (p.start, mem::take(&mut p.slots), mem::take(&mut p.comm));
         let ok = self.run(Ent::Proc, Target::Proc { pid, start, comm: &comm }, &mut slots);
@@ -133,13 +136,14 @@ impl Core {
         if ok {
             emit(&Event::ProcVals { pid, first: 0, v: &self.vals });
         } else {
-            self.new_proc(pid, cg, emit);
+            self.new_proc(pid, cg, step, emit);
         }
     }
 
     /// Announces a process new to cgroup `cg`, or again after an exec. `x` comes first when the
-    /// pid was known with another start (reuse) or cgroup (move), or has vanished.
-    fn new_proc(&mut self, pid: u32, cg: u64, emit: Emit) {
+    /// pid was known with another start (reuse) or cgroup (move), or has vanished. In a `step`
+    /// the environment is read once for a rank, which `M` sends after `P` (D45).
+    fn new_proc(&mut self, pid: u32, cg: u64, step: bool, emit: Emit) {
         let old = self.procs.get(&pid).map(|p| (p.start, p.cg));
         self.drop_proc(pid, &mut |_| ()); // forgotten silently: whether `x` is due is known below
         let (root, files) = (&self.env.proc_root, &mut self.files);
@@ -152,7 +156,11 @@ impl Core {
             return self.files.release(&mut slots);
         };
         emit(&Event::Proc { pid, start, cg, ppid: up, comm: &comm, cmd: &cmd });
-        self.procs.insert(pid, ProcEnt { start, cg, ppid: up, comm, cmd, slots });
+        let mpi = if step { procfs::mpi_of(root, &mut self.files, pid) } else { None };
+        if let Some(m) = &mpi {
+            emit(&Event::Mpi { pid, rank: m.rank, size: m.size, world: &m.world });
+        }
+        self.procs.insert(pid, ProcEnt { start, cg, ppid: up, comm, cmd, mpi, slots });
     }
 
     /// Forgets a process: closes its fds at once and emits `x`.
@@ -237,6 +245,9 @@ impl Sampler {
         for (&pid, p) in &self.core.procs {
             let (start, cg, ppid, comm, cmd) = (p.start, p.cg, p.ppid, &*p.comm, &*p.cmd);
             emit(&Event::Proc { pid, start, cg, ppid, comm, cmd });
+            if let Some(m) = &p.mpi {
+                emit(&Event::Mpi { pid, rank: m.rank, size: m.size, world: &m.world });
+            }
         }
     }
 
@@ -269,8 +280,8 @@ impl Sampler {
             let (interval, what) = effective(&self.rules, self.opts.node, &rel);
             emit(&Event::Cg { id: ino, parent, path: &rel });
             let slots = (0..self.core.width[0]).map(|_| Slot::Empty).collect();
-            let (seen, procs, pids) = (self.seen, Slot::Empty, Vec::new());
-            let c = CgEnt { dir, rel, parent, seen, interval, what, slots, procs, pids };
+            let (seen, procs, pids, step) = (self.seen, Slot::Empty, Vec::new(), in_step(&dir));
+            let c = CgEnt { dir, rel, step, parent, seen, interval, what, slots, procs, pids };
             self.cgs.insert(ino, c);
         }
         self.retime(now);
@@ -368,6 +379,17 @@ impl Sampler {
     fn interval(&self) -> u32 {
         self.timers.iter().map(|t| t.0).min().unwrap_or(1000)
     }
+}
+
+/// Whether `dir` lies in a Slurm step's `user` subtree (`…/step_*/user/…`), where the
+/// processes that can hold MPI ranks run (D45).
+fn in_step(dir: &Path) -> bool {
+    let mut step = false;
+    dir.iter().any(|s| {
+        let user = step && s == "user";
+        step = s.to_str().is_some_and(|s| s.starts_with("step_"));
+        user
+    })
 }
 
 /// Emission delay that spreads phase-aligned ticks of many agents over time:
@@ -659,7 +681,7 @@ mod tests {
     fn snapshot_then_rules() {
         let (mut s, _t) = sampler("25.11", "snapshot");
         let snap = lines(|e| s.snapshot(0, e));
-        assert!(snap[0].starts_with("H\t1\t"), "{}", snap[0]);
+        assert!(snap[0].starts_with("H\t2\t"), "{}", snap[0]);
         assert_eq!(count(&snap, "D"), cgroup::METRICS.len() + procfs::METRICS.len());
         assert_eq!(count(&snap, "W"), 1, "the self-check fails on fixtures");
         assert_eq!(count(&snap, "G"), 8);
@@ -761,6 +783,28 @@ mod tests {
         assert!(gone < new, "{recreated:?}");
         assert!(recreated.contains(&"x\t102".to_owned()), "its process goes with it");
         assert_eq!(count(&recreated, "P"), 1, "and comes back in the new cgroup");
+    }
+
+    #[test]
+    fn ranks_follow_their_process_lines_and_resyncs() {
+        let (mut s, t) = sampler("25.11", "ranks");
+        lines(|e| s.snapshot(0, e));
+        rule(&mut s, "*\t.\t1000\tp", 0);
+        let first = lines(|e| _ = s.tick(1000, e));
+        let m = |pid: u32, rank| format!("M\t{pid}\t{rank}\t2\tslurm.pmix.42.0");
+        for (pid, rank) in [(100, 0), (101, 0), (102, 1)] {
+            let p = first.iter().position(|l| l.starts_with(&format!("P\t{pid}\t"))).unwrap();
+            assert_eq!(first[p + 1], m(pid, rank), "M right after P: {first:?}");
+        }
+        assert!(!first.iter().any(|l| l.contains("SECRET")), "nothing else leaves the agent");
+        let resync = lines(|e| s.snapshot(2000, e));
+        assert_eq!(count(&resync, "M"), 3, "S repeats them");
+        fs::write(t.0.join("proc/101/environ"), "PATH=/bin\0").unwrap();
+        let stat = t.0.join("proc/101/stat");
+        fs::write(&stat, fs::read_to_string(&stat).unwrap().replace("(x) (y)", "(app)")).unwrap();
+        let exec = lines(|e| _ = s.tick(2000, e));
+        assert!(exec.iter().any(|l| l.starts_with("P\t101\t")) && count(&exec, "M") == 0);
+        assert!(!in_step(Path::new("/a/job_1/step_0/slurm")) && in_step(Path::new("step_1/user")));
     }
 
     #[test]
@@ -926,7 +970,7 @@ mod tests {
         let all_procs = best_ns(|| {
             buf.clear();
             for &(pid, cg) in &pids {
-                p.core.sample_proc(pid, cg, &mut |e| wire::write(&mut buf, 0, e));
+                p.core.sample_proc(pid, cg, false, &mut |e| wire::write(&mut buf, 0, e));
             }
         });
         println!("bench_sample_and_encode: {cgs} cgroups, {procs} processes (best of 40 x 1000)");

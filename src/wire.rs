@@ -9,8 +9,9 @@ use std::fmt::Write as _;
 
 use crate::model::{Control, Ent, Event, Kind, NA, Rule, TaskSet};
 
-/// Line grammar version sent in `H`; a TUI refuses nodes whose proto differs (§7.2).
-pub const PROTO: u32 = 1;
+/// Line grammar version sent in `H`; a TUI refuses nodes whose proto differs (§7.2). Proto 2
+/// added `M` (D45) and the rule that a line with an unknown tag is ignored, not malformed.
+pub const PROTO: u32 = 2;
 /// Hard cap per line including `\n`: 24 bytes under slurmstepd's 1024-byte message size (D7).
 pub const MAX_LINE: usize = 1000;
 /// Cap for short strings (version, host, step, name, unit, comm), so fixed-field lines always fit.
@@ -52,6 +53,7 @@ fn line(buf: &mut Vec<u8>, node: u32, ev: &Event) {
         Event::CgGone(_) => b'X',
         Event::Proc { .. } => b'P',
         Event::ProcGone(_) => b'x',
+        Event::Mpi { .. } => b'M',
         _ => b'W',
     };
     let start = head(buf, node, tag);
@@ -91,6 +93,12 @@ fn line(buf: &mut Vec<u8>, node: u32, ev: &Event) {
         }
         Event::CgGone(id) => num(buf, id),
         Event::ProcGone(pid) => num(buf, pid.into()),
+        Event::Mpi { pid, rank, size, world } => {
+            for n in [pid.into(), rank.into(), size] {
+                num(buf, n);
+            }
+            text(buf, world, rest(buf));
+        }
         Event::Warn(t) => text(buf, t, rest(buf)),
         Event::CgVals { .. } | Event::ProcVals { .. } => {}
     }
@@ -165,6 +173,10 @@ pub fn parse<'a>(line: &'a [u8], vals: &'a mut Vec<u64>) -> Option<Event<'a>> {
         "X" => Event::CgGone(n()?),
         "x" => Event::ProcGone(u32::try_from(n()?).ok()?),
         "P" => proc(rest)?,
+        "M" => {
+            let (pid, rank) = (u32::try_from(n()?).ok()?, u32::try_from(n()?).ok()?);
+            Event::Mpi { pid, rank, size: n()?, world: rest.splitn(4, '\t').nth(3)? }
+        }
         "W" => Event::Warn(rest),
         "g" | "p" => {
             let (id, first) = (n()?, u16::try_from(n()?).ok()?);
@@ -181,6 +193,13 @@ pub fn parse<'a>(line: &'a [u8], vals: &'a mut Vec<u64>) -> Option<Event<'a>> {
         }
         _ => return None,
     })
+}
+
+/// Whether a line's tag is one this proto knows: proto 2 ignores a line with another tag, so
+/// a later structure line needs no proto bump (D45).
+pub fn known(line: &[u8]) -> bool {
+    let tag = line.split(|&b| b == b'\t' || b == b'\n').next().unwrap_or_default();
+    matches!(tag, b"H" | b"D" | b"T" | b"G" | b"g" | b"X" | b"P" | b"p" | b"x" | b"M" | b"W")
 }
 
 /// Decodes the fields of an `H` line.
@@ -302,6 +321,8 @@ mod tests {
             Event::Proc { pid: 9, start: 10, cg: 8, ppid: 1, comm: "x) (y", cmd: "a b  c" },
             Event::ProcVals { pid: 9, first: 0, v: &v },
             Event::ProcGone(9),
+            Event::Mpi { pid: 9, rank: 4, size: 8, world: "slurm.pmix.42.0" },
+            Event::Mpi { pid: 9, rank: 0, size: NA, world: "prterun-n1-7@1 x" },
             Event::Warn("no io: permission denied"),
         ] {
             round_trip(&ev);
@@ -336,6 +357,7 @@ mod tests {
         {
             assert_eq!(parse(bad, &mut vals), None, "{bad:?}");
         }
+        assert!(!known(b"Q\t1") && known(b"M\t1\t2\t-\tw\n") && known(b"T\n"), "proto 2");
         assert_eq!(split_node(b"junk line"), None);
         assert_eq!(split_node(b"+1\tT"), None);
         assert_eq!(split_node(b"\tT"), None);

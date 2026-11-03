@@ -50,7 +50,8 @@ srun unjam record -o rec/%j.%s-%n.arrows -- ./app args   # record a job step
 ```
 
 Keys: `?` help, `q` quit, `↑↓` move, `←→` fold (`←` on a leaf: parent), `Enter` detail,
-`v` layout (step, node, flat), `s` sort, `/` filter (name or path, any case; `Esc` clears),
+`v` layout (step, node, flat), `s` sort, `/` filter (name or path, any case, or an MPI rank
+`r5`, `r0-7`; `Esc` clears), `m` map of the step's tasks or the MPI world's ranks,
 `space` mark, `p` sampling level, `+`/`-` sampling rate, `z` pause, `r` record, `t` theme.
 `--batch N` prints N text snapshots instead of starting the TUI; use it where stdout is not a
 terminal (`ssh node unjam` without `-t`, cron). `--rule '* . 2s c'` replaces the default

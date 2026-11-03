@@ -60,6 +60,30 @@ fn squeue(args: &[&str]) -> Result<Vec<Row>, String> {
     Ok(text.lines().filter_map(row).collect())
 }
 
+/// The job's step ids, task counts and names from `squeue --steps` every 10 s while the viewer
+/// runs, for the step rows and the map (D44). Its stderr is dropped: the terminal is the TUI's.
+fn steps(job: &str, tx: &SyncSender<Msg>) {
+    let args = ["--noheader", "--steps", &format!("--jobs={job}"), "--format=%i %A %j"];
+    loop {
+        let out = Command::new("squeue").args(args).stderr(Stdio::null()).output();
+        let text = out.ok().filter(|o| o.status.success()).map(|o| o.stdout).unwrap_or_default();
+        if tx.send(Msg::Steps(step_rows(&String::from_utf8_lossy(&text)))).is_err() {
+            return;
+        }
+        thread::sleep(Duration::from_secs(10));
+    }
+}
+
+/// `squeue --steps` rows: step id, task count and name (control chars made `?`).
+fn step_rows(text: &str) -> Vec<(String, u32, String)> {
+    let row = |l: &str| {
+        let mut f = l.splitn(3, ' ');
+        let (id, n) = (f.next()?.into(), f.next()?.parse().ok()?);
+        Some((id, n, f.next().unwrap_or("").replace(char::is_control, "?")))
+    };
+    text.lines().filter_map(row).collect()
+}
+
 /// The running row with id `want`, else the only running row. `Err` holds the running rows
 /// when none or several fit: an array job id lists every task plus the pending rest.
 fn running(mut rows: Vec<Row>, want: &str) -> Result<Row, Vec<Row>> {
@@ -235,6 +259,8 @@ pub fn view(arg: &str, a: &SlurmArgs, opts: Opts, batch: Option<u32>) -> Result<
     }
     let ((tx, rx), (ctl, ctl_rx)) = (mpsc::sync_channel(64), mpsc::channel());
     let remote = spawn(&argv, &tx, ctl_rx).map_err(|e| format!("srun: {e}"))?;
+    let (id, t_steps) = (job.id.clone(), tx.clone());
+    thread::spawn(move || steps(&id, &t_steps));
     // The job name is the job owner's text: no control chars into the terminal.
     let source = format!("{} {}", job.id, job.name).trim_end().replace(char::is_control, "?");
     let mut app = App::new(Opts { source, ..opts }, ctl.clone());

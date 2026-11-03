@@ -28,12 +28,12 @@ use crate::agent::{OFF_WALK_MS, now_ms};
 use crate::model::{self, Control, Event, Kind, NA, Rule, TaskSet, What, effective, upsert};
 use crate::record::{Reader, Rec};
 use crate::source::{Env, Files, Slot, kv};
-use crate::state::{self, HIST, Key, Layout, NCOL, Row, State, View};
+use crate::state::{self, HIST, Key, Layout, NCOL, Of, Row, State, View};
 use crate::theme::{THEMES, Theme};
 use crate::{procfs, wire};
 
-/// What the main thread blocks on (D38): terminal events, data, the end of srun's output and
-/// the 1 Hz tick.
+/// What the main thread blocks on (D38): terminal events, data, the end of srun's output, the
+/// 1 Hz tick and the job's steps from `squeue` (id, task count, name; D44).
 pub enum Msg {
     Key(KeyEvent),
     Resize,
@@ -41,6 +41,7 @@ pub enum Msg {
     Stderr(String),
     End,
     Tick,
+    Steps(Vec<(String, u32, String)>),
 }
 
 /// Value columns after NAME: header, unit for `fmt`, width; in `state` value order.
@@ -51,16 +52,17 @@ const COLS: [(&str, &str, u16); NCOL] = [
     ("IO-W/s", "B/s", 7),
     ("PIDS", "1", 6),
 ];
-/// Sort columns cycled by `s`: NAME, the value columns, then NODE (not in local mode).
-const SORTS: [&str; NCOL + 2] = ["NAME", "CPU%", "MEM", "IO-R/s", "IO-W/s", "PIDS", "NODE"];
+/// Sort columns cycled by `s`: NAME, the value columns, RANK, then NODE (not in local mode).
+const SORTS: [&str; NCOL + 3] = ["NAME", "CPU%", "MEM", "IO-R/s", "IO-W/s", "PIDS", "RANK", "NODE"];
 // budget: data
 /// Footer key hints as (key, action), help and quit first: a narrow terminal drops whole
 /// hints from the end.
-const HINTS: [(&str, &str); 12] = [
+const HINTS: [(&str, &str); 13] = [
     ("?", "help"),
     ("q", "quit"),
     ("↑↓", "move"),
     ("←→", "fold"),
+    ("m", "map"),
     ("␣", "mark"),
     ("p", "level"),
     ("+/-", "rate"),
@@ -71,7 +73,7 @@ const HINTS: [(&str, &str); 12] = [
     ("t", "theme"),
 ];
 /// Replay footer key hints.
-const REPLAY: [(&str, &str); 8] = [
+const REPLAY: [(&str, &str); 9] = [
     ("?", "help"),
     ("q", "quit"),
     ("␣", "play"),
@@ -80,25 +82,30 @@ const REPLAY: [(&str, &str); 8] = [
     ("g G", "start/end"),
     ("v", "layout"),
     ("/", "filter"),
+    ("m", "map"),
 ];
 /// Help pane keys and legend, live; each line fits the 60 columns of the pane at 80x24.
-const HELP: [&str; 10] = [
+const HELP: [&str; 13] = [
     "↑↓ j k  PgUp PgDn  g G  move         Enter  detail",
     "← → h l  fold (← on a leaf: parent)  ␣  mark    a  clear",
     "p  level: p procs, c cgroups, o off  0  reset the rules",
     "+ -  halve / double the interval",
     "v  layout: step, node, flat          s S  sort, reverse",
-    "/  filter by name or path (Enter keeps, Esc clears)",
+    "/  filter: name, path, r5 or r0-7 (Enter keeps, Esc clears)",
+    "m  map: the step's tasks or the MPI world's ranks",
+    "   a cell holds the lowest CPU of its ids; · no value",
+    "   MPI ranks often spin while they wait: low CPU stands out",
     "r  record to DIR/<host>.arrows       t  theme    q  quit",
     "z  pause: hold updates (z again resumes)",
     "INT W: interval and level of the row (p, c or o)",
     "PIDS ~N: summed threads (no pids controller)    -: no value",
 ];
 /// Help pane keys in replay.
-const HELP_REPLAY: [&str; 3] = [
+const HELP_REPLAY: [&str; 4] = [
     "␣  play/pause   , .  one tick   < >  60 s   g G  start/end",
     "↑↓ j k PgUp PgDn  move    ← →  fold    Enter  detail",
     "/  filter    v  layout    s S  sort    t  theme    q  quit",
+    "m  map: the step's tasks or the MPI world's ranks",
 ];
 // budget: end
 /// Set by Ctrl-C in the input thread, by `q`, SIGTERM and SIGHUP: quits even while a draw
@@ -146,8 +153,10 @@ pub struct App {
     sel: Option<Key>,
     scroll: usize,
     marks: Vec<(Key, TaskSet, String)>,
-    /// 0: table only, 1: detail popup, 2: help and log, 3: editing the filter.
+    /// 0: table only, 1: detail popup, 2: help and log, 3: editing the filter, 4: map pane.
     overlay: u8,
+    /// The map pane's step or world and its first line.
+    map: Option<(state::Of, usize)>,
     pub log: VecDeque<String>,
     /// When the newest log line came: the footer shows it first for 10 s.
     logged: u64,
@@ -209,6 +218,7 @@ impl App {
             rec: None,
             held: None,
             rec_dir: None,
+            map: None,
         }
     }
 
@@ -265,7 +275,8 @@ impl App {
                     let err = rec.and_then(|r| r.node(&self.st, node).err());
                     (self.st.apply(node, &ev, self.now).is_ok(), err)
                 }
-                None => (false, None),
+                // Proto 2: a line with a tag this TUI does not know is ignored (D45).
+                None => (!wire::known(rest), None),
             };
             let n = &mut self.st.nodes[node as usize];
             (n.lines, n.errors) = (n.lines + 1, n.errors + u64::from(!ok));
@@ -385,6 +396,7 @@ impl App {
                 QUIT.fetch_or(self.st.nodes.is_empty(), Relaxed);
             }
             Msg::Tick => self.tick(),
+            Msg::Steps(s) => s.iter().for_each(|(id, n, name)| self.st.expect(id, *n, name)),
             Msg::Resize => {}
         }
         now
@@ -413,13 +425,23 @@ impl App {
                 return;
             }
             (3, KeyCode::Esc) => return (self.overlay, self.view.filter) = (0, String::new()),
-            (1..=3, c) if c != KeyCode::Char('q') => return self.overlay = 0,
+            (4, c @ (KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown)) => {
+                let d = match c {
+                    KeyCode::Up => -1,
+                    KeyCode::Down => 1,
+                    KeyCode::PageUp => -20,
+                    _ => 20,
+                };
+                return self.map.iter_mut().for_each(|m| m.1 = m.1.saturating_add_signed(d));
+            }
+            (1..=4, c) if c != KeyCode::Char('q') => return self.overlay = 0,
             (_, c) if self.replay_key(c) => return,
             _ => {}
         }
         let (at, rows) = follow(&self.st, &self.view, self.sel, self.cursor.saturating_add(1));
         self.cursor = at.unwrap_or(self.cursor);
         let row = rows.get(self.cursor).map(|r| (r.key, r.open, target(&self.st, r)));
+        let of = rows.get(self.cursor).and_then(|r| self.st.of(r));
         let parent = rows.get(self.cursor).and_then(|r| {
             let p = rows[..self.cursor].iter().rposition(|p| p.depth < r.depth)?;
             Some((p, rows[p].key))
@@ -440,6 +462,10 @@ impl App {
                     self.view.toggled.insert(key);
                 }
             }
+            (KeyCode::Char('m'), _) => match of {
+                Some(of) => (self.overlay, self.map) = (4, Some((of, 0))),
+                None => self.log("m: the row is in no step with tasks and has no MPI rank".into()),
+            },
             (KeyCode::Char(' '), Some((key, _, Some((tasks, pat))))) => {
                 match self.marks.iter().position(|m| m.0 == key) {
                     Some(i) => drop(self.marks.remove(i)),
@@ -769,9 +795,9 @@ fn title(app: &App) -> [String; 2] {
     [l0, l1]
 }
 
-/// The text cells of a row: indent plus fold glyph or guide, name, NODE, PID, INT W, then the
-/// value columns (PIDS fallback marked `~`).
-fn texts(app: &App, r: &Row) -> [String; 5 + NCOL] {
+/// The text cells of a row: indent plus fold glyph or guide, name, NODE, PID, INT W, the
+/// value columns (PIDS fallback marked `~`), then RANK.
+fn texts(app: &App, r: &Row) -> [String; 6 + NCOL] {
     let gl = &THEMES[app.opts.theme].glyphs;
     let glyph = match r.open {
         Some(o) => [gl.closed, gl.open][usize::from(o)],
@@ -781,7 +807,7 @@ fn texts(app: &App, r: &Row) -> [String; 5 + NCOL] {
         None => "  ",
     };
     let own = matches!(r.key, Key::Cg(..) | Key::Proc(..));
-    let mut out: [String; 5 + NCOL] = Default::default();
+    let mut out: [String; 6 + NCOL] = Default::default();
     out[0] = format!("{:w$}{glyph}", "", w = usize::from(r.depth) * 2);
     // The job row exists before any node has reported.
     let host = app.st.nodes.get(r.node as usize).map_or("", |n| &n.host);
@@ -797,6 +823,11 @@ fn texts(app: &App, r: &Row) -> [String; 5 + NCOL] {
         let approx = if c == 4 && r.approx && !r.v[c].is_nan() { "~" } else { "" };
         out[5 + c] = format!("{approx}{}", fmt(unit, r.v[c]));
     }
+    out[5 + NCOL] = match r.rank {
+        Some((a, b)) if a == b => a.to_string(),
+        Some((a, b)) => format!("{a}-{b}"),
+        None => String::new(),
+    };
     out
 }
 
@@ -858,13 +889,142 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         2 => Some((help(app), format!(" help · theme {} · any key closes ", t.name))),
         _ => None,
     };
-    if let Some((lines, title)) = lines {
-        f.render_widget(Clear, pop);
+    let block = |title| {
         let block = Block::bordered().title(title).style(t.base).border_style(t.tree);
         // The padding also indents the wrapped part of a long command line.
-        let block = block.padding(Padding::horizontal(1));
+        block.padding(Padding::horizontal(1))
+    };
+    if let Some((lines, title)) = lines {
+        f.render_widget(Clear, pop);
         let text = Paragraph::new(lines.join("\n")).wrap(Wrap { trim: false });
-        f.render_widget(text.block(block), pop);
+        f.render_widget(text.block(block(title)), pop);
+    }
+    if let Some((of, top)) = app.map.filter(|_| app.overlay == 4) {
+        let (title, lines) = map(app, t, of, usize::from(pop.width.saturating_sub(4)));
+        let top = top.min(lines.len().saturating_sub(usize::from(pop.height.saturating_sub(2))));
+        app.map = Some((of, top));
+        f.render_widget(Clear, pop);
+        let text = Paragraph::new(lines).scroll((u16::try_from(top).unwrap_or(u16::MAX), 0));
+        f.render_widget(text.block(block(title)), pop);
+    }
+}
+
+/// The map pane (D44, D45): a row per node with a cell per task or rank in id order, in the
+/// heat strip's bands and bar heights; with more ids than cells a cell shows the lowest CPU of
+/// its ids (M5). Then the CPU and MEM spread, and the absent ids: missing (never seen) and
+/// gone (seen, then removed).
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped levels")]
+fn map(app: &App, t: &Theme, of: Of, width: usize) -> (String, Vec<Line<'static>>) {
+    let (st, cells) = (&app.st, app.st.cells(&app.view, of));
+    let none = state::Bits::default();
+    let (name, kind, all, seen) = match of {
+        Of::Step(h) => st.steps.get(&h).map_or(("?".into(), "task", None, &none), |s| {
+            let name = format!("{} {}", s.key, s.name);
+            (name.trim_end().to_owned(), "task", s.expect, &s.seen)
+        }),
+        Of::World(w) => {
+            st.worlds.get(usize::from(w)).map_or(("?".into(), "rank", None, &none), |w| {
+                let size = (w.size != NA).then(|| u32::try_from(w.size).unwrap_or(u32::MAX));
+                (format!("world {}", w.key), "rank", size, &w.seen)
+            })
+        }
+    };
+    let host = |i: u32| st.nodes.get(i as usize).map_or("?", |n| &*n.host);
+    let hw = cells.iter().map(|c| host(c.0).chars().count()).max().unwrap_or(4).clamp(4, 12);
+    let groups: Vec<_> = cells.chunk_by(|a, b| a.0 == b.0).collect();
+    let fit = (width.saturating_sub(hw + 14) * 8 / 9).max(8);
+    let per = groups.iter().map(|g| g.len()).max().unwrap_or(1).div_ceil(fit).max(1);
+    let mut lines = Vec::new();
+    for g in &groups {
+        let label = format!(" {:<hw$} {:<12} ", cut(host(g[0].0), hw), cut(&ranges(g), 12));
+        let mut spans = vec![Span::raw(label)];
+        for (k, part) in g.chunks(per).enumerate() {
+            spans.extend((k > 0 && k % 8 == 0).then(|| Span::raw(" ")));
+            let low = part.iter().map(|c| c.2[0]).filter(|x| !x.is_nan()).min_by(f64::total_cmp);
+            spans.push(low.map_or(Span::styled(t.glyphs.bars[0], t.dim), |c| {
+                let lvl = 1 + ((c / 100.0 * 7.0) as usize).min(7);
+                Span::styled(t.glyphs.bars[lvl], Style::new().fg(t.heat[band(c * 10.0)]))
+            }));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::default());
+    lines.extend(
+        spread(&cells, kind, &host)
+            .map(|(l, x)| Line::from(vec![Span::styled(l, t.accent), Span::raw(x)])),
+    );
+    let (n, [missing, gone]) = absent(&cells, all.unwrap_or_else(|| seen.end()), seen);
+    for (label, absent) in [(" missing ", &missing), (" gone ", &gone)] {
+        if !absent.is_empty() {
+            let text = cut(&ranges(absent), width.saturating_sub(10));
+            lines.push(Line::from(vec![Span::styled(label, t.accent), Span::styled(text, t.crit)]));
+        }
+    }
+    let cell = if per > 1 { format!("lowest CPU of {per} {kind}s") } else { format!("one {kind}") };
+    let empty = t.glyphs.bars[0];
+    lines.push(Line::styled(format!(" cell: {cell} · {empty} = no value · ↑↓ scroll"), t.dim));
+    let q = if all.is_some() { "" } else { "?" };
+    let n = format!("{n}/{}{q}", all.unwrap_or_else(|| seen.end()));
+    (format!(" {name} · {kind}s {n} on {} nodes · any key closes ", groups.len()), lines)
+}
+
+/// The number of present ids and the absent ones below `end` (at most 4M) as cells: missing
+/// (never seen) and gone (seen, then removed).
+fn absent(cells: &[MapCell], end: u32, seen: &state::Bits) -> (usize, [Vec<MapCell>; 2]) {
+    let mut ids: Vec<u32> = cells.iter().map(|c| c.1).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let (mut out, mut at) = ([vec![], vec![]], ids.iter().peekable());
+    for i in 0..end.min(1 << 22) {
+        while at.next_if(|&&x| x < i).is_some() {}
+        if at.peek() != Some(&&i) {
+            out[usize::from(seen.has(i))].push((0, i, [0.0; 2]));
+        }
+    }
+    (ids.len(), out)
+}
+
+/// A map cell: node, task or rank id, CPU % and memory bytes.
+type MapCell = (u32, u32, [f64; 2]);
+
+/// The map's CPU and MEM lines: min and max with their id and node, and the median (one
+/// `select_nth`, O(ids)).
+fn spread<'a>(
+    cells: &'a [MapCell],
+    kind: &'a str,
+    host: &'a dyn Fn(u32) -> &'a str,
+) -> impl Iterator<Item = (&'static str, String)> + 'a {
+    [(" CPU ", "%"), (" MEM ", "B")].into_iter().enumerate().filter_map(
+        move |(c, (label, unit))| {
+            let v: Vec<_> = cells.iter().filter(|x| !x.2[c].is_nan()).collect();
+            let by = |a: &&&MapCell, b: &&&MapCell| a.2[c].total_cmp(&b.2[c]);
+            let (lo, hi) = (v.iter().min_by(by)?, v.iter().max_by(by)?);
+            let mut mid: Vec<f64> = v.iter().map(|x| x.2[c]).collect();
+            let half = mid.len() / 2;
+            let med = *mid.select_nth_unstable_by(half, f64::total_cmp).1;
+            let at = |x: &MapCell| format!("{} {kind} {} ({})", fmt(unit, x.2[c]), x.1, host(x.0));
+            Some((label, format!("min {} · median {} · max {}", at(lo), fmt(unit, med), at(hi))))
+        },
+    )
+}
+
+/// The ids of sorted cells as ranges, `0,64,128-130`.
+fn ranges(cells: &[MapCell]) -> String {
+    let mut out = String::new();
+    for run in cells.chunk_by(|a, b| b.1 == a.1 + 1) {
+        let (a, b) = (run[0].1, run[run.len() - 1].1);
+        let sep = if out.is_empty() { "" } else { "," };
+        let _ = if a == b { write!(out, "{sep}{a}") } else { write!(out, "{sep}{a}-{b}") };
+    }
+    out
+}
+
+/// `s` in at most `w` cells, cut with `…`.
+fn cut(s: &str, w: usize) -> String {
+    if s.chars().count() <= w {
+        s.into()
+    } else {
+        s.chars().take(w.saturating_sub(1)).chain(['…']).collect()
     }
 }
 
@@ -947,8 +1107,9 @@ fn table(f: &mut Frame, app: &App, t: &Theme, vis: &[Row], area: Rect) {
     let mut int = tx.iter().map(|x| &x[4]).filter(|s| !s.is_empty());
     let int = int.next().is_some_and(|a| hw == 16 || int.any(|b| b != a));
     // NAME starts one cell in, as the header and footer lines do.
-    let mut head = vec![(" NAME", 0), ("NODE", 8), ("PID", 7), (cpu, hw)];
-    head.retain(|h| node || h.0 != "NODE");
+    let rank = vis.iter().any(|r| r.rank.is_some());
+    let mut head = vec![(" NAME", 0), ("NODE", 8), ("PID", 7), ("RANK", 9), (cpu, hw)];
+    head.retain(|h| (node || h.0 != "NODE") && (rank || h.0 != "RANK"));
     head.extend(cols.iter().map(|&c| (COLS[c].0, COLS[c].2)));
     head.extend(int.then_some(("  INT W", 7)));
     let fixed: u16 = head.iter().map(|h| h.1 + 1).sum();
@@ -978,6 +1139,7 @@ fn table(f: &mut Frame, app: &App, t: &Theme, vis: &[Row], area: Rect) {
         let at = app.scroll + i == app.cursor;
         let pid = Cell::from(Line::from(take(3)).right_aligned());
         cells.push(if at { pid } else { pid.style(t.dim) });
+        cells.extend(rank.then(|| Cell::from(Line::from(take(5 + NCOL)).right_aligned())));
         let top = if matches!(r.key, Key::Cg(..) | Key::Proc(..)) { top } else { top * nodes };
         // Dim on the cursor row would turn mono's reversed cells into a grey slab.
         let idle = if at { Style::new() } else { t.dim };
@@ -990,7 +1152,7 @@ fn table(f: &mut Frame, app: &App, t: &Theme, vis: &[Row], area: Rect) {
         TRow::new(cells).style(look)
     });
     // Numbers are right-aligned, and so are their headings.
-    let right = |h: &str| h == "PID" || COLS.iter().any(|c| c.0 == h);
+    let right = |h: &str| h == "PID" || h == "RANK" || COLS.iter().any(|c| c.0 == h);
     let head =
         head.iter().map(|h| Line::from(h.0).alignment([Left, Right][usize::from(right(h.0))]));
     let header = TRow::new(head.map(Cell::from)).style(t.header);
@@ -1007,10 +1169,14 @@ fn detail(app: &App, r: &Row) -> Vec<String> {
         Key::Cg(_, id) => {
             n.cgs.get(&id).map(|c| (0, &c.vals, format!("cgroup /{}  ({host})", c.path)))
         }
-        Key::Proc(_, pid) => n
-            .procs
-            .get(&pid)
-            .map(|p| (1, &p.vals, format!("pid {pid} {}  ({host})\n{}", p.comm, p.cmd))),
+        Key::Proc(_, pid) => n.procs.get(&pid).map(|p| {
+            let w = p.mpi.and_then(|(w, r)| Some((r, app.st.worlds.get(usize::from(w))?)));
+            let mpi = w.map_or(String::new(), |(r, w)| {
+                let size = if w.size == NA { "?".into() } else { w.size.to_string() };
+                format!("\nMPI rank {r} of {size} · world {}", w.key)
+            });
+            (1, &p.vals, format!("pid {pid} {}  ({host}){mpi}\n{}", p.comm, p.cmd))
+        }),
         _ => None,
     };
     let Some((ent, vals, what)) = found else {
@@ -1073,18 +1239,21 @@ pub fn snapshot(app: &App, w: &mut dyn Write) -> io::Result<()> {
     let rows = state::rows(&app.st, &app.view, usize::MAX);
     let (cols, [l0, l1]) = (shown(&rows), title(app));
     let node = |s: &str| if app.opts.local { String::new() } else { format!(" {s:>7}") };
-    let line = |out: &mut String, name: &str, tx: [&str; 3], v: &dyn Fn(usize) -> String| {
-        let mut l = format!("{name:<44}{} {:>7}", node(tx[0]), tx[1]);
+    let ranked = rows.iter().any(|r| r.rank.is_some());
+    let rank = |s: &str| if ranked { format!(" {s:>9}") } else { String::new() };
+    let line = |out: &mut String, name: &str, tx: [&str; 4], v: &dyn Fn(usize) -> String| {
+        let mut l = format!("{name:<44}{} {:>7}{}", node(tx[0]), tx[1], rank(tx[3]));
         for &c in &cols {
             let _ = write!(l, " {:>w$}", v(c), w = usize::from(COLS[c].2));
         }
         let _ = writeln!(out, "{}", format!("{l} {}", tx[2]).trim_end());
     };
     let mut out = format!("{l0}\n{l1}\n");
-    line(&mut out, "NAME", ["NODE", "PID", "  INT W"], &|c| COLS[c].0.into());
+    line(&mut out, "NAME", ["NODE", "PID", "  INT W", "RANK"], &|c| COLS[c].0.into());
     for r in &rows {
         let tx = texts(app, r);
-        line(&mut out, &(tx[0].clone() + &tx[1]), [&tx[2], &tx[3], &tx[4]], &|c| tx[5 + c].clone());
+        let fixed = [&*tx[2], &tx[3], &tx[4], &tx[5 + NCOL]];
+        line(&mut out, &(tx[0].clone() + &tx[1]), fixed, &|c| tx[5 + c].clone());
     }
     let (nodes, n) = (&app.st.nodes, app.st.nodes.len());
     let missing = (app.expect as usize).saturating_sub(n);
@@ -1139,7 +1308,7 @@ mod tests {
     /// One host: two slices, a service with sshd and a shell, 17 ticks of rising load.
     fn host(app: &mut App, node: u32, name: &str, load: u64) {
         let head = [
-            &format!("H 1 0.1 {name} 42.0 1 0"),
+            &format!("H 2 0.1 {name} 42.0 1 0"),
             "D c 0 cg_cpu_usage_usec us counter",
             "D c 1 cg_mem_current_bytes B gauge",
             "D c 2 cg_pids_current 1 gauge",
@@ -1353,7 +1522,7 @@ mod tests {
         (app.rec_dir, app.now) = (Some(dir.clone()), 0);
         app.record();
         let lines =
-            ["H 1 0.1 n1 42.0 1 0", "D p 0 p_rss_bytes B gauge", "G 1 0 ", "T 1000 0 0 0 -"];
+            ["H 2 0.1 n1 42.0 1 0", "D p 0 p_rss_bytes B gauge", "G 1 0 ", "T 1000 0 0 0 -"];
         feed(&mut app, 0, &lines.map(str::to_owned));
         let next = ["P 50 1 1 1 sh sh", "T 2000 0 0 0 -", "p 50 0 777", "x 50", "T 3000 0 0 0 -"];
         feed(&mut app, 0, &next.map(str::to_owned));
@@ -1380,7 +1549,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("unjam-tui-old-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let (mut app, _rx) = app(false, "mono");
-        feed(&mut app, 0, &["H 1 0.1 n1 42.0 1 0", "G 1 0 ", "T 1000 0 0 0 -"].map(str::to_owned));
+        feed(&mut app, 0, &["H 2 0.1 n1 42.0 1 0", "G 1 0 ", "T 1000 0 0 0 -"].map(str::to_owned));
         (app.now, app.rec_dir) = (app.now + 60_000, Some(dir.clone()));
         app.record();
         app.record();
@@ -1396,7 +1565,7 @@ mod tests {
         app.rec_dir = Some(dir.clone());
         app.record();
         let (tx, rx) = mpsc::sync_channel(64);
-        let lines = ["H 1 0.1 n1 42.0 1 0", "G 1 0 ", "T 1000 0 0 0 -", "T 2000 0 0 0 -"];
+        let lines = ["H 2 0.1 n1 42.0 1 0", "G 1 0 ", "T 1000 0 0 0 -", "T 2000 0 0 0 -"];
         let mut wire = String::new();
         for l in lines {
             let _ = writeln!(wire, "0\t{}", l.replace(' ', "\t"));
@@ -1421,7 +1590,7 @@ mod tests {
         app.ingest(b"no tab here\n");
         let sent: Vec<String> = rx.try_iter().collect();
         assert_eq!(sent, ["S\t0\n"]);
-        assert_eq!(app.st.nodes[0].errors, 6);
+        assert_eq!(app.st.nodes[0].errors, 4, "proto 2 ignores the unknown tag Q");
         assert!(app.log.front().unwrap().starts_with("junk: no tab"));
         app.now += 10_000;
         feed(&mut app, 0, &bad[..1]);
@@ -1429,11 +1598,56 @@ mod tests {
     }
 
     #[test]
+    fn map_pane_shows_tasks_absent_ids_and_the_spread() {
+        let (mut app, _rx) = app(false, "mono");
+        for (node, name, tasks) in [(0, "n1", [0u64, 1, 2]), (1, "n2", [3, 5, 6])] {
+            let mut l = vec![
+                format!("H 2 0.1 {name} 42.0 1 0"),
+                "D c 0 cg_cpu_usage_usec us counter".into(),
+                "D c 1 cg_mem_current_bytes B gauge".into(),
+                "G 1 0 ".into(),
+                "G 2 1 step_0".into(),
+                "G 3 2 step_0/user".into(),
+            ];
+            l.extend(tasks.iter().map(|t| format!("G {} 3 step_0/user/task_{t}", 10 + t)));
+            for t in 1..=2u64 {
+                l.push(format!("T {} 0 0 0 -", NOON - 2000 + t * 1000));
+                let g =
+                    |k: &u64| format!("g {} 0 {} {}", 10 + k, t * (k + 1) * 100_000, (k + 1) << 20);
+                l.extend(tasks.iter().map(g));
+            }
+            feed(&mut app, node, &l);
+        }
+        feed(&mut app, 1, &["X 15".into()]);
+        app.handle(Msg::Steps(vec![("42.0".into(), 8, "su3".into())]));
+        app.cursor = 1;
+        app.on_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+        assert_eq!(app.overlay, 4);
+        golden("draw-map-mono.txt", &text(&frame(&mut app, 100, 24)));
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.overlay, 4, "arrows scroll");
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(app.overlay, 0, "any other key closes");
+    }
+
+    #[test]
+    fn detail_names_the_rank_and_world_and_unknown_tags_pass() {
+        let (mut app, rx) = app(false, "mono");
+        host(&mut app, 0, "n1", 1);
+        feed(&mut app, 0, &["M 10 1 - prterun-n1-7@1".into(), "Z future line".into()]);
+        assert_eq!((app.st.nodes[0].errors, rx.try_iter().count()), (0, 0));
+        let rows = state::rows(&app.st, &app.view, usize::MAX);
+        let r = rows.iter().find(|r| r.key == Key::Proc(0, 10)).unwrap();
+        let head = &detail(&app, r)[0];
+        assert_eq!(head.lines().nth(1), Some("MPI rank 1 of ? · world prterun-n1-7@1"), "{head}");
+    }
+
+    #[test]
     fn other_proto_is_logged_and_ignored() {
         // A node with another proto used to be blank with no error and no log line.
         let (mut app, rx) = app(false, "mono");
-        feed(&mut app, 0, &["H 2 9.0 n1 42.0 1 0".into(), "G 1 0 ".into()]);
-        assert_eq!(app.log.front().unwrap(), "node 0: proto 2, need 1: ignored");
+        feed(&mut app, 0, &["H 1 0.3 n1 42.0 1 0".into(), "G 1 0 ".into()]);
+        assert_eq!(app.log.front().unwrap(), "node 0: proto 1, need 2: ignored");
         assert!(app.st.nodes[0].cgs.is_empty());
         assert_eq!((app.st.nodes[0].errors, rx.try_iter().count()), (0, 0), "no resync loop");
     }
@@ -1574,12 +1788,12 @@ mod tests {
         app.on_key(key('/'));
         assert_eq!((app.overlay, app.view.filter.as_str()), (3, "ssh"), "/ edits the filter");
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        for _ in 0..4 {
+        for _ in 0..5 {
             app.on_key(key('s'));
         }
         assert_eq!((app.view.sort, app.view.desc), (0, false), "no NODE sort locally");
         app.opts.local = false;
-        for _ in 0..6 {
+        for _ in 0..7 {
             app.on_key(key('s'));
         }
         assert_eq!((SORTS[app.view.sort], app.view.desc), ("NODE", false));

@@ -31,7 +31,8 @@ description: Use when adding, changing, or reviewing any Rust item (fn, struct, 
   `unjam --replay FILE.arrows…`; `record` and hidden `agent` are the only subcommands. `--slurm`
   and `--replay` are one clap group; Slurm-only flags use `requires = "slurm"`.
 - Exactly three layouts, as level orders in `View` walked by one `state::rows`: step, node, flat.
-  A new view is a new level order, not new walking code. No "by command" layout, no RANK column.
+  A new view is a new level order, not new walking code. No "by command" layout. The RANK column
+  and the map pane (D44, D45) are the owner-approved MPI views; no fourth layout for ranks.
 - The sort column orders siblings only; a row never leaves its parent.
 - Missing controllers (io, pids) are NA, never an error: the column hides, PIDS falls back to `~`.
 

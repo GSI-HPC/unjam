@@ -16,7 +16,7 @@ This is the living design of the repository. It started as the reviewed round-on
 3. Agents send self-describing tab-separated text lines. Every line is at most 1000 bytes and starts with the agent's node index. A `D` line announces each metric's name, unit and kind. Control lines go to every agent on srun's stdin. The sampler never blocks on stdout: a writer thread, a bounded queue, a per-agent byte budget, staggered emission and wall-clock phase-aligned ticks handle that.
 4. Recording writes a crash-safe Arrow IPC stream with LZ4 compression. Each batch is a self-contained keyframe covering 10 s or 8,192 rows, so on-node memory stays at about 2 MB and at most about 10 s is lost on a crash. The schema is generated from the metric descriptors. There is no Parquet writer in the binary: a documented pyarrow one-liner converts a journal to Parquet, and IT 6 tests it (Q1 decides whether `unjam convert` comes back).
 5. The TUI offers three layouts (step, node, flat), a self-monitoring header, a node heat strip, a CPU history bar per row and live recording of what it receives (D39 to D41).
-6. Budget: about 3,400 LOC in 12 flat modules (hard cap 3,735, re-baselined from the planned 2,900 when record and replay measured about 580 lines against 330, from 3,460 by the 41 fixes of the UX review, and by 30 lines of TUI polish; see §10.2), 7 direct dependencies, no `unsafe` in production code (one ledgered use in a test-only allocator), and MSRV 1.88. Rust tests, scripts, mise tasks, CI gates and four Claude Code skills enforce these limits.
+6. Budget: about 3,400 LOC in 12 flat modules (hard cap 4,187, re-baselined from the planned 2,900 when record and replay measured about 580 lines against 330, from 3,460 by the 41 fixes of the UX review, by 30 lines of TUI polish, and by 452 lines of MPI structure (D44, D45); see §10.2), 7 direct dependencies, no `unsafe` in production code (one ledgered use in a test-only allocator), and MSRV 1.88. Rust tests, scripts, mise tasks, CI gates and four Claude Code skills enforce these limits.
 
 ---
 
@@ -168,6 +168,7 @@ agent stderr ──> srun stderr ──> TUI stderr-reader thread ──> log ri
      └─ cgroup (id = directory inode, parent id, path relative to the agent root)
          ├─ cgroup …
          └─ process (pid, start)  ← from that cgroup's cgroup.procs
+             └─ MPI rank and world (optional, D45) ← from its environment, once
 ```
 
 The precise cgroup v2 rule: a cgroup may hold processes and also have child cgroups unless domain controllers are enabled in its `cgroup.subtree_control` (the "no internal processes" rule). The root cgroup and threaded subtrees are exempt. unjam therefore reads `cgroup.procs` on **every** visited cgroup at level `p`, not only on leaves. In Slurm and systemd trees, processes normally sit in leaves.
@@ -266,6 +267,7 @@ pub enum Event<'a> {
     Proc  { pid: u32, start: u64, cg: u64, ppid: u32, comm: &'a str, cmd: &'a str },
     ProcVals { pid: u32, first: u16, v: &'a [u64] },
     ProcGone(u32),
+    Mpi   { pid: u32, rank: u32, size: u64, world: &'a str },
     Warn(&'a str),
 }
 ```
@@ -278,6 +280,52 @@ pub enum Event<'a> {
   - `State::derive(node)` runs at most at 4 Hz, before a row rebuild, for nodes that changed. It zeroes `threads_sum`, then adds each process's `p_threads` to its cgroup and every ancestor: O(processes × depth), with depth ≤ about 8. The PIDS column uses this value only when `cg_pids_current` is NA.
   - `Cg` and `Proc` also hold `hist: [u16; 16]`, a ring of CPU per mille per tick for the row's history bar (D41): 32 B per entity, about 3.2 MB at 100k.
   - At 100k processes with about 12 columns × 2 × 8 B plus about 100 B of strings, State is about 33 MB.
+  - MPI structure (§4.6): `steps: HashMap<u64, Step>` and `worlds: Vec<World>`; `Cg.task`, `Cg.ranks` and `Proc.mpi`.
+
+### 4.6 MPI structure (D44, D45)
+
+Slurm and MPI give a job a structure: steps, tasks per step, ranks per world. unjam shows it
+in two parts.
+
+- **Tasks (D44, TUI only).** Slurm's task/cgroup puts task N of a step into `step_S/user/task_N`
+  when a `Constrain*` option is on. The TUI already has these cgroups from the `G` lines.
+  - `State::apply` gives each `task_<N>` cgroup its step key and task id (`Cg.task`). Per step,
+    `Step` keeps two bit sets: tasks seen and tasks live. A task that was seen and is not live
+    is **gone**. An id below the expected count that was never seen is **missing**. Ids from
+    4M on get no bit, so a crafted line cannot grow the sets.
+  - The expected count comes from `squeue --noheader --steps --jobs=J --format="%i %A %j"`,
+    which a TUI thread runs every 10 s (`slurm::steps`; its stderr is dropped). Without it
+    (replay, local mode, a failed call), the count is the highest id seen plus 1, marked `?`.
+  - The step row reads `step_0 su3 · 4093/4096 tasks ✕3`. Missing tasks show in the step row
+    and in the map pane, not as rows of their own.
+  - For an srun launch of an MPI program, task N is rank N. The TUI calls them tasks.
+- **Ranks (D45, agent).** Under `mpirun` or `mpiexec`, one daemon per node starts the ranks, and
+  all ranks of a node share one task cgroup. Only the environment names them.
+  - When a process at level `p` appears in a step's `user` subtree (a path with `step_*`
+    followed by `user`), or execs there, the agent reads `/proc/<pid>/environ` once, uncached
+    (`procfs::mpi_of`). It keeps nine keys and sends nothing else: the rank from `PMIX_RANK`,
+    else `PMI_RANK`, else `OMPI_COMM_WORLD_RANK` (never `SLURM_PROCID`, which mpirun's ranks
+    inherit from their daemon); the world from `PMIX_NAMESPACE` (only with `PMIX_RANK`), else
+    `slurm.<SLURM_JOB_ID>.<SLURM_STEP_ID>`, else `-`; the size from `OMPI_COMM_WORLD_SIZE`, else
+    `PMI_SIZE`, else `SLURM_STEP_NUM_TASKS` for a `slurm.pmix.*` namespace, else NA.
+  - The read uses the shared `Files` buffer (it grows to the largest environment read). A
+    process that cannot be read (non-dumpable, EACCES) gets no rank. A process without a rank
+    key gets no `M` line, so daemons and launchers stay plain processes. A child inherits the
+    environment, so a helper forked by rank 5 is rank 5 too.
+  - The agent sends `M` right after `P`, keeps the rank in `ProcEnt` and sends it again on
+    `S`. The TUI interns worlds (`World { key, size, seen }`) and sets `Proc.mpi = (world,
+    rank)`. `State::derive` sets `Cg.ranks` to the lowest and highest rank below each cgroup.
+  - A rank is identity, not a metric, like pid and start time. The metric route (a `p_mpi_rank`
+    gauge) fails: a source gets no start time to cache per process, value lines can be dropped
+    under backpressure, and the world is a string.
+- **Views.** A RANK column (rank of a process, `lo-hi` span of a cgroup, hidden when no visible
+  row has one); `s` sorts by RANK after the value columns; the filter `r65` or `r64-127`
+  matches rows whose ranks meet the span; Detail shows `MPI rank R of N · world W`. The map
+  pane (`m`, §9.2) shows a step's tasks or a world's ranks.
+- **Levels.** At level `o` (the default for user subtrees in jobs over 16 nodes) the map shows
+  presence only. At `c` it shows task cgroup values. Ranks need level `p`.
+- **Later (M7).** The same map can show placement for every job: CPUs per task from
+  `Cpus_allowed_list`, with no MPI. Not built yet.
 
 ---
 
@@ -329,6 +377,7 @@ Level semantics (§6): `o` reads nothing, `c` reads cgroup files, `p` adds proce
 | Cgroup, level `p` | `cgroup.procs`, sorted and merge-diffed against the previous list into P and x lines | 1 / 3 |
 | Process, level `p`, each tick | `/proc/<pid>/stat`, `/proc/<pid>/io` | 2 / 6 |
 | New process, or `comm` changed (exec) | `/proc/<pid>/cmdline` once (NUL becomes space, cut to fit the line) | 3 |
+| New process at level `p` in a step's `user` subtree, or `comm` changed (exec) | `/proc/<pid>/environ` once, never cached: only the nine MPI keys of §4.6 leave the agent (D45). Measured in `docs/perf.md` | 3 (more `pread`s above the buffer size) |
 | Agent self, each tick | `/proc/self/stat` (utime + stime for self-CPU reporting) | 1 |
 | TUI, each second | `/proc/self/stat` for the header (D40); in local mode also `/proc/meminfo` (`MemTotal`, `MemAvailable`) for the host memory bar. Both stay open in the TUI's own two-fd `Files`; `meminfo` is a cold-tier file, which a cap of 2 still caches | 1 each / 3 each |
 | Record mode, each tick | `cgroup.events` of each `user/*` sibling, own `task_*/cgroup.procs` | 1 each |
@@ -460,7 +509,7 @@ Verified in Slurm 25.11 source:
 
 | Line | Fields after `<node>\t` |
 |---|---|
-| `H` | proto (=1), version, host, step (`<job>.<step>` or `-`), ntasks, btime |
+| `H` | proto (=2), version, host, step (`<job>.<step>` or `-`), ntasks, btime |
 | `D` | ent (`c`/`p`), idx, name, unit, `counter`\|`gauge` |
 | `T` | unix_ms, self_cpu_us, out_bytes, dropped_ticks, self_rss_bytes |
 | `G` | id, parent_id (0 for root), rel_path |
@@ -469,12 +518,14 @@ Verified in Slurm 25.11 source:
 | `P` | pid, start, cg_id, ppid, comm, cmdline |
 | `p` | pid, first, v… |
 | `x` | pid |
+| `M` | pid, rank, size (or `-`), world (or `-`; cleaned and cut like a path). Right after the `P` of a process with a rank, and again in an `S` resync (D45) |
 | `W` | text |
 
 **Compatibility.**
 
 - `proto` governs only the line grammar. A TUI ignores every line of a node whose `H.proto` differs and logs the reason (`node N: proto X, need Y: ignored`, in the footer and help pane), since such a node has no rows to show it on.
 - Different unjam **versions** with the same proto interoperate, because columns are matched by `D` names. Adding metrics never bumps `proto`.
+- Proto 2 (D45) added `M` and one rule: a parser ignores a line whose tag it does not know, so a later line type needs no proto bump. A proto-1 TUI treated unknown tags as malformed.
 - Parsers ignore extra trailing fields on `H`, `D` and `T` lines. A later field (such as a self-CPU stretch, or a cost class in `D`) can therefore be appended without a proto bump. `self_rss_bytes` on `T` was added this way (D40).
 
 ### 7.3 TUI receive path
@@ -542,13 +593,14 @@ srun's I/O thread throughput and CPU at 1k tasks are **UNVERIFIED**. They will b
 | `ppid` | `UInt32` | yes | Keyframe column |
 | `path` | `Utf8` | yes | Cgroup path relative to the root; keyframe column |
 | `comm`, `cmdline` | `Utf8` | yes | Keyframe columns |
+| `mpi_ns`, `mpi_rank`, `mpi_size` | `Utf8`, `UInt32`, `UInt32` | yes | Schema 2 (D45): world, rank and size of a ranked process; keyframe columns |
 | one `UInt64` per descriptor, named by `Metric.name` (`cg_cpu_usage_usec`, `p_rss_bytes`, …) | `UInt64` | yes | Field metadata `unjam.unit`, `unjam.kind` (`counter` or `gauge`), `unjam.source` (`cgroup` or `proc`, from the entity the metric belongs to). NA becomes null |
 
-- **Schema metadata:** `unjam.schema=1`, `unjam.version`, `unjam.host`, `unjam.job`, `unjam.step`, `unjam.root`, `unjam.interval_ms`, `unjam.btime`.
+- **Schema metadata:** `unjam.schema=2` (1 before the `mpi_*` columns), `unjam.version`, `unjam.host`, `unjam.job`, `unjam.step`, `unjam.root`, `unjam.interval_ms`, `unjam.btime`.
 - **Evolution rules.**
   - A new source appends metric columns automatically, with no code change in `record.rs`.
   - `unjam.schema` covers only the fixed columns. It is bumped only when a fixed nullable column is appended.
-  - Readers select by name, ignore unknown columns, and treat missing ones as null, so older recordings stay readable.
+  - Readers select by name, ignore unknown columns, and treat missing ones as null, so older recordings stay readable. Metric columns are the `cg_*` and `p_*` ones; a schema-1 journal replays without ranks.
   - Metric names are never renamed.
 - **Semantics.** Each record-mode tick is a **complete snapshot** of the scope (fixed interval, processes on). An entity missing from a tick has gone. No gone-rows are written. Keyframe columns are filled only on the first row of each entity in a batch. Analysts who want them on every row forward-fill per entity: `cg` for cgroup rows, `pid` for process rows (a reused pid starts a new entity, whose first row is a keyframe again). `start` cannot be part of the key, because it is itself a keyframe column. The README shows the pandas form.
 
@@ -642,9 +694,11 @@ The mock assumes `EnableExtraControllers=io,pids`. Without it, IO-R/s and IO-W/s
   - Local mode has no node level: `v` toggles between the cgroup tree and flat.
 - **Sort.** The sort column orders siblings only; a row never leaves its parent. Tree layouts sort every sibling set at every level by the row's own value; flat has one sibling set, so its sort is global. Counter → rate, Gauge → value, NA always last in both directions, NAME and NODE in natural order (NODE sorts by host, then NAME), ties in natural order. The cursor follows its entity across redraws, and a key acts on that entity even when data re-sorted the rows since the last frame.
 - **Folded node ranges (D41, step layout).** Under a step, the top nodes by the sort column fill the window, and the remaining nodes collapse into one aggregate row such as `n0418 … n1024 (606 folded)`. Unfolding it lists them. About 25 LOC.
-- **Not in round one:** a "by command" layout and a RANK column. Rank labels ("rank 0-95") need `SLURM_PROCID` from `/proc/<pid>/environ` once per new task, which is not designed yet.
+- **Not in round one:** a "by command" layout.
+- **RANK column (D45).** The rank of a process, or the `lo-hi` span of the ranks below a cgroup, a step or the job. Hidden when no visible row has one. Rows without a rank sort last, like NA.
+- **Map pane (`m`, D44, D45).** On a ranked process, or a cgroup with ranks below it, the map of its MPI world; on any other row in a step with tasks, the map of that step. One line per node (host, the ids in hostlist form), one cell per task or rank in id order, grouped by 8, in the heat strip's bands and bar heights. With more ids than cells, a cell holds the lowest CPU of its ids (M5). Below: min, median and max CPU% and MEM with the id and node of the min and max (one `select_nth`), then the missing and gone ids as ranges. Arrows and PgUp/PgDn scroll, any other key closes. It works in replay. Many MPI libraries spin while they wait, so a waiting rank shows 100 % CPU: a low cell in a busy world is the signal (help pane). Built only while open: O(entities) per frame. Not built yet: a cell cursor and `Enter` to jump to the task.
 - **Detail** (`Enter`): the full path, or the pid, comm and the full command line on its own line, then every column the node announced, including future-source metrics, shown raw and as the table shows it (CPU counters as %, `char` values as the letter). An NA value says "not announced or absent". Long lines wrap. Job, step and folded rows list their summed values.
-- **Filter** (`/`): ASCII case-insensitive substring of the name, a process's comm or a cgroup's path (a leading `/` is ignored). A match keeps its ancestors, opened, and its whole subtree with its folds. With no match the table says "no match (Esc clears the filter)".
+- **Filter** (`/`): ASCII case-insensitive substring of the name, a process's comm or a cgroup's path (a leading `/` is ignored). `r65` or `r64-127` also matches rows whose ranks meet that span (D45). A match keeps its ancestors, opened, and its whole subtree with its folds. With no match the table says "no match (Esc clears the filter)".
 - **Columns.** The table shows a fixed default list of metric names. Unknown metrics appear only in Detail. There is no column chooser in v1 (ADR D22).
   - A default column that is NA on every row in the visible window is hidden for that frame. This check runs only over the visible slice.
   - PIDS uses `cg_pids_current` and falls back to `~` plus the summed `p_threads` from `State::derive`.
@@ -665,7 +719,8 @@ The mock assumes `EnableExtraControllers=io,pids`. Without it, IO-R/s and IO-W/s
 | `0` | Reset rules to the defaults (`C *` plus the defaults) |
 | `z` | Pause: hold the agent output (the clock stops, so no node turns stale); `z` again applies it. A pause resumes by itself after 4096 held batches |
 | `v` | Next layout: step → node → flat (local: tree ↔ flat) |
-| `s` / `S` | Next sort column (NAME, the value columns, then NODE when attached) / reverse |
+| `s` / `S` | Next sort column (NAME, the value columns, RANK, then NODE when attached) / reverse |
+| `m` | Map pane of the cursor row's step or MPI world (§9.2); also in replay |
 | `/` | Edit the filter (§9.2); `Enter` keeps it, `Esc` clears it |
 | `r` | Start or stop recording what the TUI receives (§8.5) |
 | `t` | Next theme (none while `NO_COLOR` forces mono) |
@@ -742,7 +797,7 @@ Counted as code lines, excluding blanks, comments and `#[cfg(test)]` modules. Re
 | agent.rs | 275 | theme.rs | 60 (+ theme data) |
 | | | **Total** | **≈ 2,700** (hard total cap 2,900) |
 
-The table is the plan. As built, the hard total cap is **3,735**: record and replay measured about 580 lines against the planned 330, and the sampler (agent.rs) about 490 against 275, which set the owner's cap of 3,460; the 41 fixes of the UX review then measured 245 lines more, and the TUI polish 30 more (3,735). So `docs/budget.txt` holds the measured module budgets with a one-line reason each and is the authoritative gate. Modules that do not exist yet are skipped by the gate, and every file in `src/` needs a line. Theme data sits between `// budget: data` and `// budget: end` and is not counted. A budget may be re-baselined with a one-line reason in `docs/budget.txt`.
+The table is the plan. As built, the hard total cap is **4,187**: record and replay measured about 580 lines against the planned 330, and the sampler (agent.rs) about 490 against 275, which set the owner's cap of 3,460; the 41 fixes of the UX review then measured 245 lines more, the TUI polish 30 more (3,735), and the MPI structure of D44 and D45 452 more (4,187). So `docs/budget.txt` holds the measured module budgets with a one-line reason each and is the authoritative gate. Modules that do not exist yet are skipped by the gate, and every file in `src/` needs a line. Theme data sits between `// budget: data` and `// budget: end` and is not counted. A budget may be re-baselined with a one-line reason in `docs/budget.txt`.
 
 Changes from the owner review: the three layouts (+50 in state.rs), self-monitoring (+30), the heat strip, CPU history, TUI recording and folded node ranges (+150, D41), `--bcast` with `--unlink-self` (+30) and the input thread (+10).
 
@@ -1263,6 +1318,8 @@ Open:
 | D41 | All mock features in v1 (Q13): node heat strip, CPU history bar per row (16 × u16 ring), `r` key and `--record DIR` (TUI writes received events via `record::Writer`, one `.arrows` per node, `unjam.source=tui`), folded node ranges in the step layout (§8.5, §9) | Defer them | Owner decision. About 150 LOC in total; the LOC budget was raised to ≈ 2,700 (cap 2,900) |
 | D42 | No site requirement for `EnableExtraControllers` (Q12). IO and PIDS columns hide when the controllers are absent; PIDS falls back to summed threads marked `~`. CI matrix: 25.11 without `EXTRA`, 26.05 with `EXTRA`, 26.05 with `EXTRA` and `JOBIDPATHS`; ITs assert io and pids values only where `EXTRA` is set (§4.3, §14.2, §18) | Ask sites to set it | Sites cannot always change `cgroup.conf`; the tool degrades instead of failing. The matrix tests both cases |
 | D43 | One viewer command with source flags: `unjam`, `unjam --slurm[=JOBID]` (`num_args(0..=1)`, `require_equals`), `unjam --replay FILE.arrows…`; `--slurm`/`--replay` mutually exclusive, Slurm-only flags `requires = "slurm"`; `record` and hidden `agent` stay subcommands. Job resolution without a value: `$SLURM_JOB_ID`, else the only running job from `squeue --me`, else print the jobs and exit 2 (§3.1) | `unjam attach JOBID` and `unjam replay` subcommands | Subcommands would repeat the viewer flags per source and leave no room for a job picker. Cost: 0 LOC |
+| D44 | MPI structure, part 1: per-step task sets from the `task_<N>` cgroups (seen and live bits), the expected count from a TUI-side `squeue --steps` thread every 10 s, the step row `step_0 su3 · n/N tasks ✕k`, and the map pane on `m`. No change on the nodes, the wire or the journal (§4.6, §9.2) | `scontrol listpids` on each node; a missing-task row in the tree | The cgroups are already in the store. `listpids` gives ids for task leaders only and runs on the nodes. Missing tasks live in the step row and the map, so the tree stays one walk |
+| D45 | MPI structure, part 2: the agent reads `/proc/<pid>/environ` once per new process in a step's `user` subtree, keeps nine keys (rank, world, size) and sends an `M` line after `P`; proto 2 (with "unknown tags are ignored"); journal schema 2 (`mpi_ns`, `mpi_rank`, `mpi_size`); RANK column, sort, `r` filter, Detail line and the world map. Both launch styles: srun (direct) and mpirun/mpiexec (daemons). Owner decisions M1 to M6: both phases now, an allowlist read, the `M` line, a pane and a column instead of a fourth layout, the lowest CPU per aggregated cell, unchanged large-job defaults. Placement for all jobs (M7) is later work (§4.6) | A `p_mpi_rank` metric source; the PMIx tool API; `SLURM_PROCID`; a by-rank layout | A rank is identity: it must arrive with its process and never be dropped; a source gets no start time and values are u64. PMIx needs a C library (FFI, no static musl build). `SLURM_PROCID` is the node index under mpirun. Cost: about 450 lines (`docs/budget.txt`), one environ read per new ranked process |
 
 **Judge must-fix resolution:**
 
