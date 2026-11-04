@@ -1,4 +1,4 @@
- unjam  vm  2 procs  1s  tree  sort CPU% ▼  12:00:00Z
+ unjam  vm  2 procs  1s  tree  12:00:00Z
  tui - - ·┌ detail · any key closes ─────────────────────────────────────────────────────┐
  CPU ▁▁▁▁▁│ cgroup /  (vm)                                                               │
  NAME     │                                                                              │DS   INT W

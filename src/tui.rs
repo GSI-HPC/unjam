@@ -759,8 +759,7 @@ fn title(app: &App) -> [String; 2] {
         _ => format!("unjam {}  {seen}/{all} nodes ({stale} stale)", app.opts.source),
     };
     let layout = ["step", if local { "tree" } else { "node" }, "flat"][app.view.layout as usize];
-    let (iv, sort) = (interval(app.opts.interval_ms, What::Cg), SORTS[app.view.sort]);
-    let arrow = if app.view.desc { '▼' } else { '▲' };
+    let iv = interval(app.opts.interval_ms, What::Cg);
     let clock = |ms: u64| {
         let s = ms / 1000 % 86_400;
         format!("{:02}:{:02}:{:02}Z", s / 3600, s / 60 % 60, s % 60)
@@ -773,7 +772,7 @@ fn title(app: &App) -> [String; 2] {
         _ => "",
     };
     let now = clock(app.now);
-    let l0 = format!(" {src}{mode}  {procs} procs  {iv}  {layout}  sort {sort} {arrow}  {now}");
+    let l0 = format!(" {src}{mode}  {procs} procs  {iv}  {layout}  {now}");
     // Replay has no live agents to monitor: line 2 is the position in the recording.
     if let Some(r) = &app.replay {
         let (n, t) = (r.times.len(), &r.times);
@@ -1096,6 +1095,12 @@ fn strip_line(app: &App, t: &Theme, width: u16) -> Vec<Span<'static>> {
     spans
 }
 
+/// Heading `h`, followed by the sort arrow when it names the sort column.
+fn marked(h: &str, v: &View) -> String {
+    let arrow = if v.desc { '▼' } else { '▲' };
+    if h.trim() == SORTS[v.sort] { format!("{h}{arrow}") } else { h.into() }
+}
+
 /// The table for the visible rows only; all-NA value columns are hidden for this frame, and
 /// below 100 columns so is INT W when every row shows the same. NAME takes the rest, at most
 /// 72 cells (values stay near their names), and a cut name ends in `…`.
@@ -1153,8 +1158,9 @@ fn table(f: &mut Frame, app: &App, t: &Theme, vis: &[Row], area: Rect) {
     });
     // Numbers are right-aligned, and so are their headings.
     let right = |h: &str| h == "PID" || h == "RANK" || COLS.iter().any(|c| c.0 == h);
-    let head =
-        head.iter().map(|h| Line::from(h.0).alignment([Left, Right][usize::from(right(h.0))]));
+    let head = head.iter().map(|h| {
+        Line::from(marked(h.0, &app.view)).alignment([Left, Right][usize::from(right(h.0))])
+    });
     let header = TRow::new(head.map(Cell::from)).style(t.header);
     f.render_widget(Table::new(rows, widths).header(header).column_spacing(1).style(t.base), area);
 }
@@ -1249,7 +1255,8 @@ pub fn snapshot(app: &App, w: &mut dyn Write) -> io::Result<()> {
         let _ = writeln!(out, "{}", format!("{l} {}", tx[2]).trim_end());
     };
     let mut out = format!("{l0}\n{l1}\n");
-    line(&mut out, "NAME", ["NODE", "PID", "  INT W", "RANK"], &|c| COLS[c].0.into());
+    let m = |h| marked(h, &app.view);
+    line(&mut out, &m("NAME"), [&m("NODE"), "PID", "  INT W", &m("RANK")], &|c| m(COLS[c].0));
     for r in &rows {
         let tx = texts(app, r);
         let fixed = [&*tx[2], &tx[3], &tx[4], &tx[5 + NCOL]];

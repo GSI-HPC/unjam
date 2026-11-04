@@ -19,9 +19,9 @@ wire.rs     226  # proto 2: the M line, and a line with an unknown tag is ignore
 slurm.rs    220  # MPI structure: the squeue --steps thread for task counts (D44)
 record.rs   623  # schema 2: mpi_ns, mpi_rank, mpi_size; metrics found by prefix (D45)
 state.rs    720  # MPI ranks: worlds, RANK span, sort and filter, world map cells (D45)
-tui.rs     1024  # MPI ranks: RANK column, rank in Detail, world map (D45)
+tui.rs     1029  # MPI ranks: RANK column, rank in Detail, world map (D45); sort arrow in headings
 theme.rs     65  # UX review: UNJAM_THEME named in its error
-total      4187  # MPI ranks (+183, D45); was 4004 after the MPI tasks (D44)
+total      4192  # sort arrow in headings; MPI ranks (+183, D45); was 4004 after the MPI tasks (D44)
 
 # Release binary (bytes) and resolved normal dependencies (crates, root excluded) on
 # x86_64-unknown-linux-gnu. Re-baselined from measurement (+5 %) by the change that needs it.
