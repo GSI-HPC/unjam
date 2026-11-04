@@ -4,11 +4,8 @@ SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Da
 */
 
 /* Nord Frost: the palette of the TUI's default theme (src/theme.rs). Starlight reads the
-   --sl-* tokens; the diagrams and the terminal player read the --uj-* tokens. */
-
-:root {
-  --sl-content-width: 50rem;
-}
+   --sl-* tokens; the diagrams and the terminal player read the --uj-* tokens. Type, spacing
+   and layout are in layout.css. */
 
 :root,
 :root[data-theme='dark'] {
@@ -23,8 +20,6 @@ SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Da
   --sl-color-gray-5: #434c5e;
   --sl-color-gray-6: #3b4252;
   --sl-color-black: #2e3440;
-  --sl-font: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
-  --sl-font-mono: 'JetBrains Mono', ui-monospace, 'DejaVu Sans Mono', monospace;
 
   /* Callouts: aurora colours, not the Starlight defaults. */
   --sl-color-blue-low: #2a3a4f;
@@ -114,45 +109,6 @@ SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Da
   letter-spacing: -0.01em;
 }
 
-/* Headings: a little tighter than the default. */
-.sl-markdown-content :is(h1, h2, h3) {
-  letter-spacing: -0.015em;
-}
-
-/* Keyboard keys, as in the prototype. */
-kbd {
-  display: inline-block;
-  min-width: 1.6em;
-  padding: 0 0.35em;
-  border: 1px solid var(--sl-color-gray-5);
-  border-bottom-width: 2px;
-  border-radius: 4px;
-  background: var(--sl-color-gray-6);
-  font: 0.85em/1.5 var(--sl-font-mono);
-  text-align: center;
-  color: var(--sl-color-white);
-}
-
-/* Figures: a diagram with a short caption. */
-.uj-figure {
-  margin: 1.5rem 0;
-}
-.uj-figure > figcaption {
-  margin-top: 0.5rem;
-  font-size: var(--sl-text-sm);
-  color: var(--sl-color-gray-3);
-}
-.uj-figure svg {
-  display: block;
-  width: 100%;
-  height: auto;
-}
-
-/* Splash page */
-.hero .tagline {
-  max-width: 34rem;
-}
-
 /* Diagrams (src/components/diagrams): inline SVG that follows the light and dark theme. Motion
    only runs when the reader allows it. */
 .uj-d {
@@ -221,20 +177,4 @@ kbd {
   .uj-d * {
     animation: none !important;
   }
-}
-.uj-figure .legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.25rem 1rem;
-  margin-top: 0.4rem;
-  font-size: var(--sl-text-xs);
-  color: var(--sl-color-gray-3);
-}
-.uj-figure .legend i {
-  display: inline-block;
-  width: 0.7rem;
-  height: 0.7rem;
-  margin-right: 0.3rem;
-  border-radius: 2px;
-  vertical-align: -0.05rem;
 }

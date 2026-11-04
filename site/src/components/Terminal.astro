@@ -30,10 +30,8 @@ const prompt = title ?? { slurm: 'unjam --slurm=4242', host: 'unjam', replay: 'u
     <span class="dot"></span><span class="dot"></span><span class="dot"></span>
     <span class="title">$ {prompt}</span>
   </div>
-  <div class="screen">
-    <pre set:html={html} aria-label={`Terminal: ${prompt}`}></pre>
-    {!still && <div class="cap" aria-live="polite"><span class="keys"></span><span class="text"></span></div>}
-  </div>
+  <pre set:html={html} aria-label={`Terminal: ${prompt}`}></pre>
+  {!still && <div class="cap" aria-live="polite"><span class="keys"></span><span class="text"></span></div>}
   {
     !still && (
       <div class="ctl">
@@ -53,9 +51,8 @@ const prompt = title ?? { slurm: 'unjam --slurm=4242', host: 'unjam', replay: 'u
     --t-bg: var(--uj-term-bg);
     --t-fg: #d8dee9;
     container-type: inline-size;
-    margin: 1.5rem 0;
     border: 1px solid var(--uj-line);
-    border-radius: 10px;
+    border-radius: 6px;
     overflow: hidden;
     background: var(--t-bg);
     box-shadow: 0 12px 40px -18px rgb(0 0 0 / 0.6);
@@ -72,8 +69,7 @@ const prompt = title ?? { slurm: 'unjam --slurm=4242', host: 'unjam', replay: 'u
   .dot:nth-child(1) { background: #bf616a; }
   .dot:nth-child(2) { background: #ebcb8b; }
   .dot:nth-child(3) { background: #a3be8c; }
-  .title { margin-left: 0.6rem; font: 0.8rem var(--sl-font-mono); color: #a3adc0; }
-  .screen { position: relative; }
+  .title { margin-left: 0.6rem; font: 0.8125rem var(--sl-font-mono); color: #a3adc0; }
   pre {
     margin: 0;
     padding: 0.6rem 0.75rem;
@@ -81,29 +77,23 @@ const prompt = title ?? { slurm: 'unjam --slurm=4242', host: 'unjam', replay: 'u
     background: var(--t-bg);
     color: var(--t-fg);
     /* 100 columns fill the box: a mono cell is about 0.6 em wide. */
-    font: calc((100cqw - 1.5rem) / var(--cols) / 0.602) / 1.22 'JetBrains Mono', 'DejaVu Sans Mono', ui-monospace, monospace;
+    font: calc((100cqw - 1.5rem) / var(--cols) / 0.602) / 1.22 var(--sl-font-mono);
     white-space: pre;
     overflow: hidden;
   }
+  /* The caption sits under the screen, not over it, so it never hides a row. Two lines of
+     room keep the screen from moving when the caption changes. */
   .cap {
-    position: absolute;
-    left: 50%;
-    bottom: 1.4rem;
-    transform: translateX(-50%);
     display: flex;
     gap: 0.6rem;
     align-items: center;
-    max-width: 92%;
+    min-height: calc(2 * 1.4em + 0.9rem);
     padding: 0.45rem 0.85rem;
-    border: 1px solid #4c566a;
-    border-radius: 8px;
-    background: rgb(46 52 64 / 0.94);
+    border-top: 1px solid #434c5e;
+    background: #333a47;
     color: #eceff4;
-    font: 500 clamp(0.72rem, 2.1cqw, 0.95rem) / 1.35 var(--sl-font);
-    box-shadow: 0 8px 24px -8px rgb(0 0 0 / 0.7);
-    transition: opacity 0.25s;
+    font: 500 var(--uj-s-1) / 1.4 var(--sl-font);
   }
-  .cap:has(.text:empty) { opacity: 0; }
   .keys:empty { display: none; }
   .keys :global(kbd) {
     margin-right: 0.2rem;
@@ -137,11 +127,12 @@ const prompt = title ?? { slurm: 'unjam --slurm=4242', host: 'unjam', replay: 'u
   .track { flex: 1; height: 4px; border-radius: 2px; background: #2e3440; overflow: hidden; }
   .fill { height: 100%; width: 0; background: #88c0d0; transition: width 0.3s linear; }
   figcaption {
-    padding: 0.5rem 0.85rem;
+    padding: 0.55rem 0.85rem;
+    border-top: 1px solid var(--uj-line);
     background: var(--sl-color-bg);
     color: var(--sl-color-gray-3);
-    font-size: var(--sl-text-sm);
-    border-top: 1px solid var(--uj-line);
+    font-size: var(--uj-s-1);
+    line-height: 1.5;
   }
 </style>
 

@@ -15,7 +15,32 @@ export default defineConfig({
       description: 'A top-like terminal UI over the cgroup v2 tree, for Linux hosts and Slurm jobs.',
       logo: { src: './src/assets/logo.svg' },
       favicon: '/favicon.svg',
-      customCss: ['./src/styles/nord.css', './src/styles/layout.css'],
+      // The fonts ship with the site: without them, each reader sees whatever sans and mono
+      // fonts the system has, with other widths and spacing.
+      customCss: [
+        '@fontsource-variable/inter',
+        '@fontsource-variable/jetbrains-mono',
+        './src/styles/fonts.css',
+        './src/styles/nord.css',
+        './src/styles/layout.css',
+      ],
+      // Code blocks: Nord syntax colours on the site's own surfaces, and no empty terminal title
+      // bar on a block without a title.
+      expressiveCode: {
+        themes: ['nord', 'github-light'],
+        useStarlightUiThemeColors: true,
+        defaultProps: { frame: 'code' },
+        styleOverrides: {
+          borderRadius: '4px',
+          codeFontFamily: 'var(--sl-font-mono)',
+          codeFontSize: '0.875rem',
+          codeLineHeight: '1.6',
+          codePaddingBlock: '0.8125rem',
+          codePaddingInline: '1rem',
+          uiFontFamily: 'var(--sl-font)',
+          frames: { shadowColor: 'transparent' },
+        },
+      },
       social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/GSI-HPC/unjam' }],
       editLink: { baseUrl: 'https://github.com/GSI-HPC/unjam/edit/main/site/' },
       lastUpdated: false,

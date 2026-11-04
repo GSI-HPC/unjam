@@ -6,7 +6,9 @@ SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Da
 # unjam documentation site
 
 The site at <https://gsi-hpc.github.io/unjam/>: [Astro](https://astro.build/) with
-[Starlight](https://starlight.astro.build/) and the Nord theme in `src/styles/nord.css`.
+[Starlight](https://starlight.astro.build/), the Nord colours in `src/styles/nord.css`, and
+the type scale and layout in `src/styles/layout.css`. The site ships its fonts (Inter and
+JetBrains Mono, from Fontsource), so every reader sees the same type.
 `pages.yml` builds it and deploys it at `/`, next to the dnf repository at `/rpm/`.
 
 ```sh

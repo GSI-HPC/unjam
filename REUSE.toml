@@ -19,3 +19,11 @@ path = ["site/package.json", "site/package-lock.json", "site/src/content/**", "s
 precedence = "aggregate"
 SPDX-FileCopyrightText = "© GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany"
 SPDX-License-Identifier = "LGPL-3.0-or-later"
+
+# A subset of JetBrains Mono 2.304 (box-drawing, block, arrow and braille glyphs); see
+# site/src/styles/fonts.css for how it was made.
+[[annotations]]
+path = "site/src/fonts/jetbrains-mono-symbols.woff2"
+precedence = "override"
+SPDX-FileCopyrightText = "2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)"
+SPDX-License-Identifier = "OFL-1.1"
