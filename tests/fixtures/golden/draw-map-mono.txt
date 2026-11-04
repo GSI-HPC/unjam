@@ -1,4 +1,4 @@
- unjam 42  2/2 nodes (0 stale)  0 procs  1s  step  sort CPU% ▼  12:00:00Z
+ unjam 42  2/2 nodes (0 stale)  0 procs  1s  step  12:00:00Z
  tui - - · in 0 0 msg/s · out 0 · drop 0 err 0 · agents max 0.0% - (n2)
  NODES ·· ┌ step_0 su3 · tasks 5/8 on 2 nodes · any key closes ──────────────────────────┐
  NAME     │  n1   0-2          ▁▂▃                                                       │EM   INT W
