@@ -20,10 +20,15 @@ precedence = "aggregate"
 SPDX-FileCopyrightText = "© GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany"
 SPDX-License-Identifier = "LGPL-3.0-or-later"
 
-# A subset of JetBrains Mono 2.304 (box-drawing, block, arrow and braille glyphs); see
-# site/src/styles/fonts.css for how it was made.
+# The site's fonts, cut from the upstream releases by site/scripts/fonts.sh.
 [[annotations]]
-path = "site/src/fonts/jetbrains-mono-symbols.woff2"
+path = ["site/src/fonts/inter.woff2", "site/src/fonts/inter-italic.woff2"]
+precedence = "override"
+SPDX-FileCopyrightText = "2016 The Inter Project Authors (https://github.com/rsms/inter)"
+SPDX-License-Identifier = "OFL-1.1"
+
+[[annotations]]
+path = "site/src/fonts/jetbrains-mono.woff2"
 precedence = "override"
 SPDX-FileCopyrightText = "2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)"
 SPDX-License-Identifier = "OFL-1.1"

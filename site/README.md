@@ -7,8 +7,8 @@ SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Da
 
 The site at <https://gsi-hpc.github.io/unjam/>: [Astro](https://astro.build/) with
 [Starlight](https://starlight.astro.build/), the Nord colours in `src/styles/nord.css`, and
-the type scale and layout in `src/styles/layout.css`. The site ships its fonts (Inter and
-JetBrains Mono, from Fontsource), so every reader sees the same type.
+the type scale and layout in `src/styles/layout.css`. The fonts (Inter and JetBrains Mono)
+are in `src/fonts/`, cut to the glyphs the site needs by `scripts/fonts.sh`.
 `pages.yml` builds it and deploys it at `/`, next to the dnf repository at `/rpm/`.
 
 ```sh
