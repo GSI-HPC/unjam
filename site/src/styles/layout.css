@@ -14,9 +14,8 @@ SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Da
    Colours stay in nord.css. */
 
 :root {
-  --sl-font: 'Inter Variable', 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
-  --sl-font-mono: 'JetBrains Mono Variable', 'JetBrains Mono', 'DejaVu Sans Mono', Menlo,
-    'Liberation Mono', 'Courier New', monospace;
+  --sl-font: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --sl-font-mono: 'JetBrains Mono', 'DejaVu Sans Mono', Menlo, 'Liberation Mono', monospace;
 
   --uj-s-2: 0.7862rem; /* φ^-½: labels */
   --uj-s-1: 0.8866rem; /* φ^-¼: captions, tables, navigation */

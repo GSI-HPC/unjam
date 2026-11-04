@@ -3,17 +3,27 @@ SPDX-License-Identifier: LGPL-3.0-or-later
 SPDX-FileCopyrightText: © GSI Helmholtzzentrum f. Schwerionenforschung GmbH, Darmstadt, Germany
 */
 
-/* The Fontsource subsets of JetBrains Mono lack its box-drawing, block, arrow and braille
-   glyphs, which the terminal player and the text diagrams use. Without them each system fills
-   in a font with other cell widths, and columns drift. This file holds those glyphs of
-   JetBrains Mono 2.304 (OFL-1.1), made with fontTools:
-     pyftsubset 'JetBrainsMono[wght].ttf' --flavor=woff2 --layout-features='*' \
-       --unicodes=U+2190-21FF,U+2300-23FF,U+2400-243F,U+2500-25FF,U+2800-28FF */
+/* The site's fonts, in the repository: Inter 4.1 and JetBrains Mono 2.304 (OFL-1.1), cut by
+   scripts/fonts.sh to the glyphs the site needs. Every reader gets the same type, and the
+   terminal screens get box-drawing and block cells of the same width as the text. */
 @font-face {
-  font-family: 'JetBrains Mono Variable';
+  font-family: 'Inter';
   font-style: normal;
+  font-weight: 100 900;
   font-display: swap;
+  src: url('../fonts/inter.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Inter';
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('../fonts/inter-italic.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
   font-weight: 100 800;
-  src: url('../fonts/jetbrains-mono-symbols.woff2') format('woff2-variations');
-  unicode-range: U+2190-21FF, U+2300-23FF, U+2400-243F, U+2500-25FF, U+2800-28FF;
+  font-display: swap;
+  src: url('../fonts/jetbrains-mono.woff2') format('woff2');
 }

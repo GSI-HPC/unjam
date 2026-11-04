@@ -15,11 +15,7 @@ export default defineConfig({
       description: 'A top-like terminal UI over the cgroup v2 tree, for Linux hosts and Slurm jobs.',
       logo: { src: './src/assets/logo.svg' },
       favicon: '/favicon.svg',
-      // The fonts ship with the site: without them, each reader sees whatever sans and mono
-      // fonts the system has, with other widths and spacing.
       customCss: [
-        '@fontsource-variable/inter',
-        '@fontsource-variable/jetbrains-mono',
         './src/styles/fonts.css',
         './src/styles/nord.css',
         './src/styles/layout.css',
